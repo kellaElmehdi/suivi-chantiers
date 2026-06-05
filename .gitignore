@@ -1,0 +1,11 @@
+# Environnement Python (régénéré par Suivi.bat)
+.venv/
+__pycache__/
+*.pyc
+
+# Données personnelles (régénérées au 1er lancement)
+data/
+
+# Divers
+*.lnk
+.env

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Suivi des chantiers</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Suivi des chantiers</h1>
+  <span class="sub" id="subtitle"></span>
+  <div class="grow"></div>
+  <div class="nav">
+    <button class="on" data-v="board" onclick="setView('board')">Tableau</button>
+    <button data-v="dash" onclick="setView('dash')">Tableau de bord</button>
+    <button data-v="charge" onclick="setView('charge')">Charge</button>
+    <button data-v="people" onclick="setView('people')">Par personne</button>
+  </div>
+  <button class="ghost primary" onclick="newChantier()">Nouveau chantier</button>
+  <button class="ghost" onclick="document.getElementById('importFile').click()">Importer Excel</button>
+  <button class="ghost" onclick="location='/api/template'">Modèle</button>
+  <button class="ghost" onclick="location='/api/export'">Exporter Excel</button>
+  <input type="file" id="importFile" accept=".xlsx" style="display:none" onchange="importExcel(this)">
+</header>
+
+<div class="bar-alert" id="alert"></div>
+
+<div class="layout">
+  <div class="work">
+    <div class="board" id="board"></div>
+    <div class="dash" id="dash" style="display:none"></div>
+    <div class="charge" id="charge" style="display:none"></div>
+    <div class="people" id="people" style="display:none"></div>
+    <div class="page" id="page" style="display:none"></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
