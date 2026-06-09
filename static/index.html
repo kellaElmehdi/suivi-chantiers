@@ -13,14 +13,33 @@
   <div class="grow"></div>
   <div class="nav">
     <button class="on" data-v="board" onclick="setView('board')">Tableau</button>
-    <button data-v="dash" onclick="setView('dash')">Tableau de bord</button>
-    <button data-v="charge" onclick="setView('charge')">Charge</button>
-    <button data-v="people" onclick="setView('people')">Par personne</button>
+    <button data-v="planning" onclick="setView('planning')">Planning</button>
+    <div class="menu navmenu" id="navPilotage">
+      <button data-group="dash,activite,charge,risques" onclick="toggleMenu(event,'navPilotage')">Pilotage ▾</button>
+      <div class="menu-list">
+        <a onclick="setView('dash')">Tableau de bord</a>
+        <a onclick="setView('activite')">Activité</a>
+        <a onclick="setView('charge')">Charge</a>
+        <a onclick="setView('risques')">Risques</a>
+      </div>
+    </div>
+    <div class="menu navmenu" id="navPeople">
+      <button data-group="people,contacts" onclick="toggleMenu(event,'navPeople')">Personnes ▾</button>
+      <div class="menu-list">
+        <a onclick="setView('people')">Par personne</a>
+        <a onclick="setView('contacts')">Annuaire</a>
+      </div>
+    </div>
   </div>
   <button class="ghost primary" onclick="newChantier()">Nouveau chantier</button>
-  <button class="ghost" onclick="document.getElementById('importFile').click()">Importer Excel</button>
-  <button class="ghost" onclick="location='/api/template'">Modèle</button>
-  <button class="ghost" onclick="location='/api/export'">Exporter Excel</button>
+  <div class="menu right" id="excelMenu">
+    <button class="ghost" onclick="toggleMenu(event,'excelMenu')">Excel ▾</button>
+    <div class="menu-list">
+      <a onclick="document.getElementById('importFile').click()">Importer un fichier…</a>
+      <a onclick="location='/api/template'">Télécharger le modèle</a>
+      <a onclick="location='/api/export'">Exporter vers Excel</a>
+    </div>
+  </div>
   <input type="file" id="importFile" accept=".xlsx" style="display:none" onchange="importExcel(this)">
 </header>
 
@@ -29,9 +48,13 @@
 <div class="layout">
   <div class="work">
     <div class="board" id="board"></div>
+    <div class="planning" id="planning" style="display:none"></div>
     <div class="dash" id="dash" style="display:none"></div>
+    <div class="activite" id="activite" style="display:none"></div>
     <div class="charge" id="charge" style="display:none"></div>
+    <div class="risques" id="risques" style="display:none"></div>
     <div class="people" id="people" style="display:none"></div>
+    <div class="contacts" id="contacts" style="display:none"></div>
     <div class="page" id="page" style="display:none"></div>
   </div>
 </div>

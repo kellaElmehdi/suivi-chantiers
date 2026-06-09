@@ -19,10 +19,28 @@ const allRetours = c => (c.iterations || []).flatMap(it => it.retours.map(r => (
 const openRetours = c => allRetours(c).filter(r => r.statut === "a_traiter" || r.statut === "en_cours");
 const currentIter = c => (c.iterations || []).find(it => it.ouverte) || (c.iterations || []).slice(-1)[0] || null;
 
+// ---- risques (cotation 5×5 : criticité = proba × gravité, 1..25) ----------
+const RISK = {ouvert: "Ouvert", maitrise: "Maîtrisé", avere: "Avéré", clos: "Clos"};
+const RISK_CATS = ["Délai", "Technique", "Dépendance/IT", "Fournisseur/Externe",
+                   "Budget", "Ressources/RH", "Qualité", "Périmètre", "Autre"];
+const crit = r => (r.probabilite || 0) * (r.gravite || 0);
+const riskActive = r => r.statut === "ouvert" || r.statut === "avere";   // pèse encore
+function critLevel(n){   // 5×5 → 4 niveaux + couleur
+  if(n >= 15) return {k: "critique", lbl: "Critique", col: "#dc2626", bg: "#fee2e2"};
+  if(n >= 10) return {k: "eleve",    lbl: "Élevé",    col: "#ea580c", bg: "#ffedd5"};
+  if(n >= 5)  return {k: "moyen",    lbl: "Moyen",    col: "#ca8a04", bg: "#fef9c3"};
+  return             {k: "faible",   lbl: "Faible",   col: "#16a34a", bg: "#dcfce7"};
+}
+const risquesOf = c => c.risques || [];
+const openRisques = c => risquesOf(c).filter(riskActive);
+const topCrit = c => openRisques(c).reduce((m, r) => Math.max(m, crit(r)), 0);
+const allRisques = () => STORE.chantiers.flatMap(c => risquesOf(c).map(r => ({...r, _c: c})));
+
 // ---- utils ---------------------------------------------------------------
 const $ = id => document.getElementById(id);
 const esc = s => (s == null ? "" : String(s)).replace(/[&<>"]/g, c =>
   ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const jqs = s => esc(s).replace(/'/g, "\\'");   // chaîne sûre pour un attribut onX='...'
 const isLate = d => d && d < TODAY;
 const pct = c => c.taches.length ? Math.round(100 * c.taches.filter(t => t.done).length / c.taches.length) : 0;
 const openAtt = c => c.livrables.filter(l => l.statut === "attente" || l.statut === "partiel");
@@ -94,20 +112,40 @@ async function mutate(op){
 // ---- vues ----------------------------------------------------------------
 let VIEW = "board";
 function showView(v){
-  if(v === "board" || v === "charge" || v === "people" || v === "dash") VIEW = v;
+  if(["board", "charge", "people", "dash", "contacts", "risques", "planning", "activite"].includes(v)) VIEW = v;
   $("board").style.display = v === "board" ? "flex" : "none";
+  $("planning").style.display = v === "planning" ? "block" : "none";
   $("dash").style.display = v === "dash" ? "block" : "none";
+  $("activite").style.display = v === "activite" ? "block" : "none";
   $("charge").style.display = v === "charge" ? "block" : "none";
+  $("risques").style.display = v === "risques" ? "block" : "none";
   $("people").style.display = v === "people" ? "grid" : "none";
+  $("contacts").style.display = v === "contacts" ? "block" : "none";
   $("page").style.display = v === "page" ? "block" : "none";
-  document.querySelectorAll(".nav button").forEach(b => b.classList.toggle("on", b.dataset.v === v));
+  document.querySelectorAll(".nav button").forEach(b => {
+    const grp = b.dataset.group ? b.dataset.group.split(",") : (b.dataset.v ? [b.dataset.v] : []);
+    b.classList.toggle("on", grp.includes(v));
+  });
   renderAlert();
   if(v === "board") renderBoard();
+  if(v === "planning") renderPlanning();
   if(v === "dash") renderDashboard();
+  if(v === "activite") renderActivite();
   if(v === "charge") renderCharge();
+  if(v === "risques") renderRisques();
   if(v === "people") renderPeople();
+  if(v === "contacts") renderContacts();
 }
 function setView(v){ CUR = null; showView(v); }
+
+// menu déroulant (Excel : import / modèle / export)
+function toggleMenu(e, id){
+  e.stopPropagation();
+  const m = $(id), willOpen = !m.classList.contains("open");
+  document.querySelectorAll(".menu.open").forEach(x => x.classList.remove("open"));
+  if(willOpen) m.classList.add("open");
+}
+document.addEventListener("click", () => document.querySelectorAll(".menu.open").forEach(m => m.classList.remove("open")));
 function renderAll(){ renderAlert(); renderBoard(); renderPeople(); }
 
 // ---- bandeau + board + personnes ----------------------------------------
@@ -152,6 +190,7 @@ function chargeData(){
 
 // Lissage assisté : pour chaque jour en surcharge, proposer de décaler UNE tâche
 // qui a de la marge (slack) juste après ce jour, sans repousser la fin du projet.
+const PR_RANK = {b: 0, m: 1, h: 2};   // priorité basse déplacée en premier
 function levelingSuggestions(){
   const cd = chargeData();
   if(!cd.overload) return [];
@@ -159,8 +198,17 @@ function levelingSuggestions(){
   const sugg = [], used = new Set();
   for(const day of overDays){
     if(sugg.length >= 8) break;
-    const cand = cd.items.filter(i => i.slack > 0 && i.start <= day.date && day.date < i.end
-      && !used.has(i.chantier_id + i.tache_id)).sort((a, b) => b.slack - a.slack);
+    let cand = cd.items
+      .filter(i => i.slack > 0 && i.start <= day.date && day.date < i.end && !used.has(i.chantier_id + i.tache_id))
+      .map(i => ({...i, ch: chById(i.chantier_id)}))
+      .filter(x => x.ch && !x.ch.baseline);   // PROTÉGER les chantiers figés : on ne déplace pas leurs tâches
+    cand.sort((a, b) => {
+      const pr = PR_RANK[a.ch.prio] - PR_RANK[b.ch.prio];          // priorité basse d'abord
+      if(pr) return pr;
+      const ea = a.ch.echeance || "9999-99-99", eb = b.ch.echeance || "9999-99-99";
+      if(ea !== eb) return eb > ea ? 1 : -1;                        // échéance la plus lointaine d'abord
+      return b.slack - a.slack;
+    });
     for(const it of cand){
       let ns = addDays(day.date, 1);
       while(SETTINGS.jours_ouvres && isWeekend(dparse(ns))) ns = addDays(ns, 1);
@@ -206,6 +254,8 @@ function renderAlert(){
   if(retL) seg.push(`<span class="lt">${retL} retour(s) en retard</span>`);
   seg.push(`WIP <b class="${wip > SETTINGS.wip_max ? "lt" : ""}">${wip}</b>/${SETTINGS.wip_max} en cours`);
   if(over) seg.push(`<a class="seg lt" onclick="setView('charge')">${over} jour(s) en surcharge</a>`);
+  const critRisk = STORE.chantiers.reduce((a, c) => a + openRisques(c).filter(r => crit(r) >= 15).length, 0);
+  if(critRisk) seg.push(`<a class="seg lt" onclick="setView('risques')">${critRisk} risque(s) critique(s)</a>`);
   $("alert").innerHTML = seg.join("&nbsp;·&nbsp;");
 }
 
@@ -401,6 +451,9 @@ function renderDashboard(){
   // E. Recette
   let retOpen = 0, retLate = 0, iterOpen = 0;
   chs.forEach(c => { retOpen += openRetours(c).length; retLate += retoursLate(c).length; iterOpen += (c.iterations || []).filter(it => it.ouverte).length; });
+  // E2. Risques
+  let riskCrit = 0, riskAvere = 0;
+  chs.forEach(c => openRisques(c).forEach(r => { if(crit(r) >= 15) riskCrit++; if(r.statut === "avere") riskAvere++; }));
   // F. Activité & hygiène
   let done7 = 0, done30 = 0, critN = 0, taskN = 0;
   chs.forEach(c => c.taches.forEach(t => { if(t.done && t.done_date){ const d = daysBetween(t.done_date, TODAY); if(d >= 0 && d <= 7) done7++; if(d >= 0 && d <= 30) done30++; } }));
@@ -444,7 +497,8 @@ function renderDashboard(){
     dkpi("Retard cumulé / réf.", retardCumule + " j", "Σ glissements", retardCumule ? "bad" : "good") +
     dkpi("Échéances < 7 j", ech7.length, ech7.slice(0, 2).join(", ") || "rien d'imminent", ech7.length ? "bad" : "") +
     dkpi("Prochain jalon", jalon ? fmt(jalon.date) : "—", jalon ? jalon.label : "aucun") +
-    dkpi("Tâches/jalons en retard", lateTtl, "à rattraper", lateTtl ? "bad" : "good") + `</div>`;
+    dkpi("Tâches/jalons en retard", lateTtl, "à rattraper", lateTtl ? "bad" : "good") +
+    dkpi("Risques critiques", riskCrit, riskAvere + " avéré(s)", riskCrit ? "bad" : "good", "setView('risques')") + `</div>`;
 
   h += dsection("Charge");
   h += chartBox("Calendrier de charge — tâches actives/jour (limite " + cd.cap + ")", cd.days.length ? heatmapCalendar(cd) : `<div class="empty">—</div>`);
@@ -499,12 +553,17 @@ function renderCharge(){
           `<button class="btn sm primary" onclick="applyLeveling('${s.chantier_id}','${s.tache_id}','${s.newStart}')">Appliquer</button></div>`;
       });
     } else {
-      h += `<div class="muted small" style="margin-bottom:10px">Aucune tâche déplaçable (toutes les tâches des jours surchargés sont sur le chemin critique, sans marge). Réduis la charge en allongeant une échéance ou en retirant une tâche.</div>`;
+      h += `<div class="muted small" style="margin-bottom:10px">Aucune tâche déplaçable : sur les jours surchargés, les tâches sont soit <b>figées</b> (protégées), soit sur le <b>chemin critique</b> (sans marge). Réduis la charge en allongeant une échéance, en retirant une tâche, ou en défigeant un chantier.</div>`;
     }
     h += `<div class="ch-h">Jours en surcharge (${over.length})</div>`;
     over.forEach(x => {
       h += `<div class="overday"><b>${fmt(x.date)}</b> — ${x.count} tâches (limite ${cd.cap})<ul>` +
-        x.tasks.map(t => `<li>${esc(t.label)} <span class="muted">— ${esc(t.chantier)}</span>${t.slack > 0 ? ` <span class="movable">marge ${t.slack} j</span>` : ` <span class="muted">(critique)</span>`}</li>`).join("") + `</ul></div>`;
+        x.tasks.map(t => {
+          const ch = chById(t.chantier_id), fige = ch && ch.baseline;
+          const tag = fige ? ` <span class="figbadge">figé — protégé</span>`
+                    : (t.slack > 0 ? ` <span class="movable">marge ${t.slack} j</span>` : ` <span class="muted">(critique)</span>`);
+          return `<li>${esc(t.label)} <span class="muted">— ${esc(t.chantier)}</span>${tag}</li>`;
+        }).join("") + `</ul></div>`;
     });
   } else {
     h += `<div class="ok-note">Aucune journée au-dessus de la limite de ${cd.cap} tâches.</div>`;
@@ -544,9 +603,9 @@ function renderBoard(){
                        .sort((a, c) => (a.ordre || 0) - (c.ordre || 0));
     const el = document.createElement("div");
     el.className = "col"; el.dataset.col = col.key;
-    const autoNote = col.key === "block" ? ` <span class="auto">auto</span>` : "";
-    el.innerHTML = `<div class="col-h"><span class="mk ${col.key}"></span>` +
-      `<span class="nm">${col.label}</span>${autoNote}<span class="ct">${cards.length}</span></div>`;
+    const autoNote = col.key === "block" ? `<span class="auto">auto</span>` : "";
+    el.innerHTML = `<div class="col-h s-${col.key}"><span class="nm">${col.label}</span>${autoNote}<span class="ct">${cards.length}</span></div>`;
+    const body = document.createElement("div"); body.className = "col-body";
     if(col.key !== "block"){   // la colonne Bloqué est calculée → pas une cible de drop
       el.addEventListener("dragover", e => { e.preventDefault(); el.classList.add("over"); });
       el.addEventListener("dragleave", () => el.classList.remove("over"));
@@ -556,59 +615,120 @@ function renderBoard(){
         if(c && c.statut !== col.key) mutate({op: "move_chantier", id, statut: col.key});
       });
     }
+    if(!cards.length) body.innerHTML = `<div class="empty">—</div>`;
     cards.forEach(c => {
       const open = openAtt(c), late = lateAtt(c);
       const card = document.createElement("div");
-      card.className = "card" + (late.length ? " w-late" : (open.length ? " w-wait" : ""));
+      card.className = `card p-${c.prio}`;
       card.draggable = true;
       card.addEventListener("dragstart", e => { e.dataTransfer.setData("id", c.id); card.classList.add("drag"); });
       card.addEventListener("dragend", () => card.classList.remove("drag"));
       card.onclick = () => openChantier(c.id);
       const p = pct(c), lateDue = c.statut !== "done" && isLate(c.echeance);
-      let h = `<div class="c-title">${esc(c.titre)}</div>`;
+      const refPin = c.baseline
+        ? ` <span class="c-pin" title="Référence figée${c.baseline_edits ? ` — modifiée ${c.baseline_edits}× depuis le figeage` : ""}">📌</span>`
+        : "";
+      let h = `<div class="c-title">${esc(c.titre)}${refPin}</div>`;
       h += `<div class="c-prog"><span class="track"><i style="width:${p}%"></i></span><span class="pc">${p}%</span></div>`;
-      h += `<div class="c-meta"><span class="due ${lateDue ? "late" : ""}">${fmt(c.echeance)}</span>` +
-           `<span class="pr-${c.prio}">Priorité ${PRIO[c.prio]}</span></div>`;
-      if((c.tags || []).length) h += `<div class="chips">` + c.tags.map(t => `<span class="chip">${esc(t)}</span>`).join("") + `</div>`;
-      if(c.statut === "recette"){
-        const it = currentIter(c), or = openRetours(c).length;
-        h += `<div class="tag rec">Recette · it. ${it ? it.num : 1} · ${or} retour(s) ouvert(s)</div>`;
-      }
-      if(open.length){
-        const names = [...new Set(open.map(a => a.personne))].join(", ");
-        h += `<div class="tag ${late.length ? "late" : ""}">${late.length ? "En retard" : "En attente"} · ${esc(names)}</div>`;
-      }
-      if(c.blocage) h += `<div class="blk"><span class="lab">Bloqué</span>${esc(c.blocage)}</div>`;
+      h += `<div class="c-meta"><span class="due ${lateDue ? "late" : ""}">éch. ${fmt(c.echeance)}</span>` +
+           `<span class="pr-${c.prio}">${PRIO[c.prio]}</span></div>`;
+      // Carte bloquée : on montre DIRECTEMENT la raison (point bloquant, livrable attendu/en retard).
+      if(col.key === "block") h += `<div class="c-blk">⛔ <b>Bloqué</b> — ${esc(blockReason(c))}</div>`;
+      const bdg = [];
+      // Chaque type a une icône + une couleur dédiées → reconnaissable d'un coup d'œil.
+      const tc = topCrit(c);
+      if(tc >= 10){ const lv = critLevel(tc);
+        bdg.push(`<span class="bdg b-risk" style="color:${lv.col};background:${lv.bg};border-color:${lv.col}">⚠ Risque ${lv.lbl.toLowerCase()}</span>`); }
       const lt = lateTasks(c).length;
-      if(lt) h += `<div class="tag late">${lt} tâche(s) en retard</div>`;
-      card.innerHTML = h; el.appendChild(card);
+      if(lt) bdg.push(`<span class="bdg b-late">⏰ ${lt} tâche${lt > 1 ? "s" : ""} en retard</span>`);
+      if(open.length){ const names = [...new Set(open.map(a => a.personne))].join(", ");
+        bdg.push(late.length
+          ? `<span class="bdg b-livlate">✉ Livrable en retard · ${esc(names)}</span>`
+          : `<span class="bdg b-wait">⌛ En attente · ${esc(names)}</span>`); }
+      if(col.key === "recette"){ const it = currentIter(c), or = openRetours(c).length;
+        bdg.push(`<span class="bdg b-rec">↻ Recette · it.${it ? it.num : 1}${or ? ` · ${or} retour${or > 1 ? "s" : ""}` : ""}</span>`); }
+      if(bdg.length) h += `<div class="c-badges">${bdg.join("")}</div>`;
+      card.innerHTML = h; body.appendChild(card);
     });
-    b.appendChild(el);
+    el.appendChild(body); b.appendChild(el);
   });
 }
 
 function renderPeople(){
   const map = {};
   STORE.chantiers.forEach(c => c.livrables.forEach(l => {
-    (map[l.personne] = map[l.personne] || {role: l.role, items: []}).items.push({...l, chantier: c.titre});
+    const key = (l.personne || "").trim() || "(personne non renseignée)";
+    (map[key] = map[key] || {role: l.role, items: []}).items.push({...l, chantier: c.titre, chantier_id: c.id});
   }));
   const w = $("people"); w.innerHTML = "";
   const names = Object.keys(map).sort((a, b) => a.localeCompare(b));
   if(!names.length){ w.innerHTML = `<div class="empty">Aucune attente enregistrée.</div>`; return; }
+  let head = `<div class="people-hint">Astuce : clique un livrable pour ouvrir son chantier et y <b>assigner / renommer</b> la personne.</div>`;
   names.forEach(nom => {
     const info = map[nom];
-    const el = document.createElement("div"); el.className = "person";
-    let h = `<h3>${esc(nom)}</h3><div class="role">${esc(info.role || "")}</div>`;
+    const editable = nom !== "(personne non renseignée)";
+    head += `<div class="person"><h3>${esc(nom)}</h3>` +
+      (editable ? `<div class="role"><input class="role-edit" value="${esc(info.role || "")}" placeholder="rôle (éditable)" onchange="setPersonRole('${jqs(nom)}',this.value)"></div>`
+                : `<div class="role">${esc(info.role || "")}</div>`);
     info.items.forEach(it => {
       const late = (it.statut === "attente" || it.statut === "partiel") && isLate(it.date);
       const cls = it.statut === "recu" ? "recu" : it.statut === "annule" ? "annule"
                 : it.statut === "partiel" ? "partiel" : (late ? "retard" : "attente");
-      h += `<div class="deliv"><span class="stm ${cls}"></span><div><div class="q">${esc(it.quoi)}</div>` +
+      head += `<div class="deliv clickable" onclick="openChantier('${it.chantier_id}')" title="Ouvrir le chantier"><span class="stm ${cls}"></span><div><div class="q">${esc(it.quoi)}</div>` +
            `<div class="meta ${late ? "late" : ""}"><b>${esc(it.chantier)}</b> · attendu le ${fmt(it.date)} · ` +
            `${late ? "EN RETARD" : LIV[it.statut]}</div></div></div>`;
     });
-    el.innerHTML = h; w.appendChild(el);
+    head += `</div>`;
   });
+  w.innerHTML = head;
+}
+
+// ---- Personnes (gestion) -------------------------------------------------
+function peopleStats(){
+  const st = {};
+  const ensure = n => (st[n] = st[n] || {nom: n, role: "", total: 0, open: 0, contact: false});
+  STORE.contacts.forEach(c => { const n = (c.nom || "").trim(); if(n){ const s = ensure(n); s.contact = true; if(!s.role) s.role = c.role || ""; } });
+  STORE.chantiers.forEach(c => c.livrables.forEach(l => {
+    const n = (l.personne || "").trim(); if(!n) return;
+    const s = ensure(n); s.total++; if(l.statut === "attente" || l.statut === "partiel") s.open++; if(!s.role) s.role = l.role || "";
+  }));
+  return Object.values(st).sort((a, b) => a.nom.localeCompare(b.nom));
+}
+function renderContacts(){
+  const rows = peopleStats();
+  let h = `<div class="ch-h">Personnes <button class="btn sm primary" onclick="addPerson()">+ Ajouter une personne</button></div>`;
+  if(!rows.length){ $("contacts").innerHTML = h + `<div class="empty">Aucune personne. Ajoute-en une, ou crée un livrable.</div>`; return; }
+  const jq = s => esc(s).replace(/'/g, "\\'");
+  h += `<table class="ptable"><thead><tr><th>Nom</th><th>Rôle</th><th>Livrables</th><th></th></tr></thead><tbody>`;
+  rows.forEach(p => {
+    h += `<tr><td><b>${esc(p.nom)}</b></td>` +
+      `<td><input class="role-edit" value="${esc(p.role || "")}" placeholder="rôle" onchange="setPersonRole('${jq(p.nom)}',this.value)"></td>` +
+      `<td>${p.total}${p.open ? ` <span class="muted">(${p.open} ouvert${p.open > 1 ? "s" : ""})</span>` : ""}</td>` +
+      `<td class="pacts"><a onclick="renamePerson('${jq(p.nom)}')">Renommer</a>` +
+      `<a class="danger" onclick="removePerson('${jq(p.nom)}',${p.total})">Supprimer</a></td></tr>`;
+  });
+  h += `</tbody></table>`;
+  $("contacts").innerHTML = h;
+}
+function addPerson(){
+  const n = prompt("Nom de la personne :"); if(!n || !n.trim()) return;
+  const r = (prompt("Rôle (optionnel) :") || "").trim();
+  mutate({op: "add_contact", nom: n.trim(), role: r});
+}
+function renamePerson(nom){
+  const n = prompt("Nouveau nom :", nom);
+  if(n && n.trim() && n.trim() !== nom) mutate({op: "rename_person", old: nom, new: n.trim()});
+}
+function setPersonRole(nom, role){ mutate({op: "set_person_role", nom, role}); }
+function removePerson(nom, total){
+  if(total > 0){
+    if(!confirm(`« ${nom} » a ${total} livrable(s). Le supprimer ?`)) return;
+    const to = prompt("Réassigner ses livrables à (laisser vide = non assigné) :", "");
+    if(to === null) return;
+    mutate({op: "remove_person", nom, reassign_to: to.trim()});
+  } else {
+    if(confirm(`Supprimer « ${nom} » ?`)) mutate({op: "remove_person", nom});
+  }
 }
 
 // ======================================================================== //
@@ -796,6 +916,9 @@ function renderPage(){
   // Tâches (checklist enrichie)
   h += card(`Plan de tâches <span class="add" onclick="showAddTache('${c.id}')">+ tâche</span>`, taskTable(c, S));
 
+  // Risques
+  h += card(`Risques <span class="add" onclick="showAddRisque('${c.id}')">+ risque</span>`, risquesBlock(c));
+
   // Recette / itérations (retours utilisateurs)
   if(c.statut === "recette" || (c.iterations || []).length)
     h += card(`Recette / Itérations <span class="add" onclick="showAddRetour('${c.id}')">+ retour</span>`, recetteCard(c));
@@ -870,8 +993,10 @@ function countdownBlock(c, S){
   h += `<div class="baseline">`;
   if(S.baseline){
     const rd = daysBetween(S.baseline.project_end, S.fend);
+    const ed = c.baseline_edits || 0;
     h += `<div class="muted small">Référence figée le <b>${fmt(S.baseline.frozen_at)}</b> — fin prévue alors : <b>${fmt(S.baseline.project_end)}</b></div>`;
     h += `<div class="small ${rd > 0 ? "bad-t" : rd < 0 ? "good-t" : ""}">${rd > 0 ? "Glissement de +" + rd + " j" : rd < 0 ? Math.abs(rd) + " j d'avance" : "Conforme à la référence"}</div>`;
+    h += `<div class="small ${ed ? "bad-t" : "muted"}">${ed ? "Modifié " + ed + "× depuis le figeage" : "Aucune modification depuis le figeage"}</div>`;
     h += `<div class="acts"><a onclick="setBaseline()">Re-figer</a> <a class="danger" onclick="mutate({op:'clear_baseline',chantier_id:'${c.id}'})">Effacer</a></div>`;
   } else {
     h += `<button class="btn sm" onclick="setBaseline()">Figer la référence</button>` +
@@ -919,6 +1044,8 @@ function taskTable(c, S){
            `onchange="mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',duree:this.value})"><span class="fu">j</span></span>`;
       h += `<span class="fld"><span class="fl">Fin</span><input type="date" value="${s.endDate}" title="Saisir une fin ajuste la durée" ` +
            `onchange="setEnd('${c.id}','${t.id}',this.value)"></span>`;
+    } else {   // jalon : cellules Durée/Fin vides pour garder l'alignement des colonnes
+      h += `<span class="fld fld-empty muted">jalon</span><span class="fld fld-empty"></span>`;
     }
     // predecesseurs
     const avail = c.taches.filter(o => o.id !== t.id && !t.preds.includes(o.id));
@@ -935,8 +1062,8 @@ function taskTable(c, S){
     const pend = gates.filter(l => l.statut !== "recu");
     if(gates.length){
       h += pend.length
-        ? `<span class="gate wait">⊘ attend : ${pend.map(l => esc(l.quoi) + " (" + esc(l.personne) + (l.date ? ", " + fmtShort(l.date) : "") + ")").join(" · ")}</span>`
-        : `<span class="gate ok">✓ livrable reçu</span>`;
+        ? `<span class="gate wait gate-row">⊘ attend : ${pend.map(l => esc(l.quoi) + " (" + esc(l.personne) + (l.date ? ", " + fmtShort(l.date) : "") + ")").join(" · ")}</span>`
+        : `<span class="gate ok gate-row">✓ livrable reçu</span>`;
     }
     h += `</div></div>`;
   });
@@ -1104,18 +1231,28 @@ function livrablesBlock(c){
     const late = (l.statut === "attente" || l.statut === "partiel") && isLate(l.date);
     const cls = l.statut === "recu" ? "recu" : l.statut === "annule" ? "annule"
               : l.statut === "partiel" ? "partiel" : (late ? "retard" : "attente");
-    h += `<div class="d-deliv"><span class="stm ${cls}" style="margin-top:6px"></span><div>` +
-      `<div class="q">${esc(l.quoi)}</div>` +
-      `<div class="meta ${late ? "late" : ""}"><b>${esc(l.personne)}</b>${l.role ? " · " + esc(l.role) : ""} · attendu le ${fmt(l.date)} · ${late ? "EN RETARD" : LIV[l.statut]}</div>` +
+    const pname = (l.personne || "").trim();
+    const psel = `<select class="liv-psel" title="Qui doit le livrer" onchange="assignPerson('${c.id}','${l.id}',this)">` +
+      (pname ? "" : `<option value="" selected>— choisir —</option>`) +
+      knownPeople().map(p => `<option value="${esc(p.nom)}" data-role="${esc(p.role)}" ${p.nom === pname ? "selected" : ""}>${esc(p.nom)}</option>`).join("") +
+      `<option value="__new__">+ nouvelle…</option></select>`;
+    const u = (extra) => `mutate({op:'update_livrable',chantier_id:'${c.id}',livrable_id:'${l.id}',${extra}})`;
+    h += `<div class="d-deliv"><span class="stm ${cls}" style="margin-top:6px"></span><div class="dl-body">` +
+      `<input class="liv-q" value="${esc(l.quoi)}" placeholder="Ce que j'attends" title="Description" onchange="${u("quoi:this.value")}">` +
+      `<div class="liv-meta">` +
+        `<span class="fld"><span class="fl">de</span>${psel}</span>` +
+        `<span class="fld"><span class="fl">pour le</span><input type="date" class="liv-d" value="${l.date || ""}" onchange="${u("date:this.value")}"></span>` +
+        `<span class="fld"><span class="fl">statut</span><select onchange="${u("statut:this.value")}">` +
+          Object.keys(LIV).map(s => `<option value="${s}" ${l.statut === s ? "selected" : ""}>${LIV[s]}</option>`).join("") + `</select></span>` +
+        (late ? `<span class="lt-badge">EN RETARD</span>` : "") +
+      `</div>` +
       (l.impact ? `<div class="relance">Impact : ${esc(l.impact)}</div>` : "") +
       (l.relances ? `<div class="relance">relancé ${l.relances}× · dernière le ${fmt(l.derniere)}</div>` : "") +
-      `<div class="acts"><select onchange="mutate({op:'update_livrable',chantier_id:'${c.id}',livrable_id:'${l.id}',statut:this.value})">` +
-        Object.keys(LIV).map(s => `<option value="${s}" ${l.statut === s ? "selected" : ""}>${LIV[s]}</option>`).join("") + `</select>` +
-      `<select title="Rattacher à une tâche : elle attend ce livrable" onchange="mutate({op:'update_livrable',chantier_id:'${c.id}',livrable_id:'${l.id}',tache_id:this.value})">` +
-        `<option value="">— ne bloque aucune tâche —</option>` +
-        c.taches.map(t => `<option value="${t.id}" ${l.tache_id === t.id ? "selected" : ""}>bloque : ${esc(t.label)}</option>`).join("") + `</select>` +
-      `<a onclick="mutate({op:'update_livrable',chantier_id:'${c.id}',livrable_id:'${l.id}',relance:true})">Relancé aujourd'hui</a>` +
-      `<a class="danger" onclick="if(confirm('Supprimer ce livrable ?'))mutate({op:'remove_livrable',chantier_id:'${c.id}',livrable_id:'${l.id}'})">Supprimer</a>` +
+      `<div class="acts">` +
+        `<select title="Rattacher à une tâche : elle attend ce livrable" onchange="${u("tache_id:this.value")}"><option value="">— ne bloque aucune tâche —</option>` +
+          c.taches.map(t => `<option value="${t.id}" ${l.tache_id === t.id ? "selected" : ""}>bloque : ${esc(t.label)}</option>`).join("") + `</select>` +
+        `<a onclick="${u("relance:true")}">Relancé aujourd'hui</a>` +
+        `<a class="danger" onclick="if(confirm('Supprimer ce livrable ?'))mutate({op:'remove_livrable',chantier_id:'${c.id}',livrable_id:'${l.id}'})">Supprimer</a>` +
       `</div></div></div>`;
   });
   h += `<div id="addLiv_${c.id}"></div>`;
@@ -1281,16 +1418,19 @@ function showAddTag(id){
 }
 function addTag(id){ const v = $("tgv").value.trim(); if(v) mutate({op: "add_tag", chantier_id: id, tag: v}); }
 
-function contactOptions(sel){
-  let o = `<option value="">— saisir un nom —</option>`;
-  STORE.contacts.forEach(c => { o += `<option value="${c.id}" ${sel === c.id ? "selected" : ""}>${esc(c.nom)}${c.role ? " (" + esc(c.role) + ")" : ""}</option>`; });
-  return o;
+// Toutes les personnes connues : contacts + noms déjà utilisés sur des livrables.
+function knownPeople(){
+  const map = {};
+  STORE.contacts.forEach(c => { const n = (c.nom || "").trim(); if(n && !(n in map)) map[n] = c.role || ""; });
+  STORE.chantiers.forEach(c => c.livrables.forEach(l => { const n = (l.personne || "").trim(); if(n && !(n in map)) map[n] = l.role || ""; }));
+  return Object.keys(map).sort((a, b) => a.localeCompare(b)).map(n => ({nom: n, role: map[n]}));
 }
 function showAddLiv(id){
+  const opts = knownPeople().map(p => `<option value="${esc(p.nom)}" data-role="${esc(p.role)}">${esc(p.nom)}${p.role ? " (" + esc(p.role) + ")" : ""}</option>`).join("");
   $("addLiv_" + id).innerHTML =
     `<div class="miniform">` +
-    `<div class="row"><select id="lvc" onchange="lvContactChange()">${contactOptions("")}</select></div>` +
-    `<div class="row" id="lvname"><input id="lvp" placeholder="Personne"><input id="lvr" placeholder="Rôle / service"></div>` +
+    `<div class="row"><select id="lvperson" onchange="lvPersonChange()"><option value="">— choisir une personne —</option>${opts}<option value="__new__">+ nouvelle personne…</option></select></div>` +
+    `<div class="row" id="lvname" style="display:none"><input id="lvp" placeholder="Nom"><input id="lvr" placeholder="Rôle / service"></div>` +
     `<input id="lvq" placeholder="Ce que tu attends (le livrable)">` +
     `<div class="row"><input id="lvd" type="date"><select id="lvs">` +
       Object.keys(LIV).map(s => `<option value="${s}">${LIV[s]}</option>`).join("") + `</select></div>` +
@@ -1298,21 +1438,341 @@ function showAddLiv(id){
     `<div class="actions"><button class="btn sm" onclick="hide('addLiv_${id}')">Annuler</button>` +
     `<button class="btn sm primary" onclick="addLiv('${id}')">Ajouter</button></div></div>`;
 }
-function lvContactChange(){ $("lvname").style.display = $("lvc").value ? "none" : "flex"; }
+function lvPersonChange(){
+  const nw = $("lvperson").value === "__new__";
+  $("lvname").style.display = nw ? "flex" : "none";
+  if(nw) $("lvp").focus();
+}
 function addLiv(id){
-  const cid = $("lvc").value;
+  const sel = $("lvperson").value;
   const op = {op: "add_livrable", chantier_id: id, quoi: $("lvq").value.trim(),
               date: $("lvd").value || null, statut: $("lvs").value, impact: $("lvi").value.trim()};
-  if(cid) op.contact_id = cid; else { op.personne = $("lvp").value.trim(); op.role = $("lvr").value.trim(); }
+  if(sel === "__new__"){ op.personne = $("lvp").value.trim(); op.role = $("lvr").value.trim(); }
+  else if(sel){ op.personne = sel; const o = $("lvperson").selectedOptions[0]; op.role = o ? o.getAttribute("data-role") || "" : ""; }
   if(!op.quoi){ alert("Indique ce que tu attends."); return; }
-  if(!cid && !op.personne){ alert("Indique de qui tu l'attends."); return; }
+  if(!op.personne){ alert("Choisis une personne (ou « nouvelle personne »)."); return; }
   mutate(op);
+}
+function assignPerson(cid, lid, sel){   // liste déroulante d'un livrable
+  const v = sel.value;
+  if(v === "__new__"){
+    // CRÉE une personne dans la liste, SANS changer l'affectation du livrable (non destructif)
+    const nom = prompt("Nouvelle personne à créer (n'affecte PAS ce livrable — tu la sélectionneras ensuite) :");
+    if(nom && nom.trim()){
+      const role = (prompt("Rôle (optionnel) :") || "").trim();
+      mutate({op: "add_contact", nom: nom.trim(), role});
+    } else { renderPage(); }   // annulé → on redessine pour réafficher la personne actuelle
+    return;
+  }
+  if(v) mutate({op: "update_livrable", chantier_id: cid, livrable_id: lid, personne: v});  // sélection d'une personne existante = affectation voulue
 }
 function hide(id){ if($(id)) $(id).innerHTML = ""; }
 
 function newChantier(){
   const titre = prompt("Titre du nouveau chantier :");
   if(titre && titre.trim()) mutate({op: "create_chantier", titre: titre.trim(), statut: "todo", prio: "m"});
+}
+
+// ======================================================================== //
+//  Risques (registre par chantier + vue globale avec matrice de criticité)
+// ======================================================================== //
+function risquesBlock(c){
+  const rs = risquesOf(c).slice().sort((a, b) => (riskActive(b) - riskActive(a)) || (crit(b) - crit(a)));
+  let h = "";
+  if(!rs.length) h += `<div class="empty">Aucun risque identifié.</div>`;
+  rs.forEach(r => {
+    const n = crit(r), lv = critLevel(n), off = !riskActive(r);
+    const late = riskActive(r) && isLate(r.echeance_revue);
+    const u = extra => `mutate({op:'update_risque',chantier_id:'${c.id}',risque_id:'${r.id}',${extra}})`;
+    const opt15 = cur => [1, 2, 3, 4, 5].map(v => `<option value="${v}" ${r[cur] === v ? "selected" : ""}>${v}</option>`).join("");
+    h += `<div class="rk ${off ? "rk-off" : ""}">`;
+    h += `<div class="rk-top"><span class="rk-crit" style="color:${lv.col};background:${lv.bg}" title="Proba ${r.probabilite} × Gravité ${r.gravite}">${n} · ${lv.lbl}</span>` +
+      `<input class="rk-lib" value="${esc(r.libelle)}" placeholder="Risque" onchange="${u("libelle:this.value")}">` +
+      `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer ce risque ?'))mutate({op:'remove_risque',chantier_id:'${c.id}',risque_id:'${r.id}'})">×</span></div>`;
+    h += `<div class="rk-meta">` +
+      `<span class="fld"><span class="fl">Proba</span><select onchange="${u("probabilite:this.value")}">${opt15("probabilite")}</select></span>` +
+      `<span class="fld"><span class="fl">Gravité</span><select onchange="${u("gravite:this.value")}">${opt15("gravite")}</select></span>` +
+      `<span class="fld"><span class="fl">Catégorie</span><select onchange="${u("categorie:this.value")}">` +
+        RISK_CATS.map(x => `<option ${r.categorie === x ? "selected" : ""}>${esc(x)}</option>`).join("") + `</select></span>` +
+      `<span class="fld"><span class="fl">Statut</span><select onchange="${u("statut:this.value")}">` +
+        Object.keys(RISK).map(s => `<option value="${s}" ${r.statut === s ? "selected" : ""}>${RISK[s]}</option>`).join("") + `</select></span>` +
+      `<span class="fld"><span class="fl">Revue</span><input type="date" class="liv-d" value="${r.echeance_revue || ""}" onchange="${u("echeance_revue:this.value")}"></span>` +
+      (late ? `<span class="lt-badge">REVUE EN RETARD</span>` : "") + `</div>`;
+    const psel = `<select class="liv-psel" onchange="${u("responsable:this.value")}"><option value="">— responsable —</option>` +
+      knownPeople().map(p => `<option value="${esc(p.nom)}" ${p.nom === (r.responsable || "") ? "selected" : ""}>${esc(p.nom)}</option>`).join("") + `</select>`;
+    h += `<div class="rk-meta"><span class="fld"><span class="fl">Responsable</span>${psel}</span></div>`;
+    h += `<input class="rk-parade" value="${esc(r.parade)}" placeholder="Parade / mitigation" onchange="${u("parade:this.value")}">`;
+    h += `</div>`;
+  });
+  h += `<div id="addRisque_${c.id}"></div>`;
+  return h;
+}
+
+function riskMatrix(risks){
+  const cell = 54, padL = 70, padT = 14, padB = 24, padR = 10;
+  const W = padL + 5 * cell + padR, H = padT + 5 * cell + padB;
+  const at = {}; risks.forEach(r => { const k = r.probabilite + "_" + r.gravite; (at[k] = at[k] || []).push(r); });
+  let g = `<div class="scrollx"><svg width="${W}" height="${H}">`;
+  for(let gr = 5; gr >= 1; gr--){
+    for(let p = 1; p <= 5; p++){
+      const n = p * gr, lv = critLevel(n), items = at[p + "_" + gr] || [];
+      const x = padL + (p - 1) * cell, y = padT + (5 - gr) * cell;
+      const tip = `${items.length} risque(s) — proba ${p} × gravité ${gr} = ${n} (${lv.lbl})` +
+        (items.length ? "\n• " + items.map(r => r.libelle).join("\n• ") : "");
+      g += `<rect x="${x}" y="${y}" width="${cell - 3}" height="${cell - 3}" rx="3" fill="${lv.bg}" ` +
+        `stroke="${items.length ? lv.col : "var(--line)"}" stroke-width="${items.length ? 2 : 1}"><title>${esc(tip)}</title></rect>`;
+      g += items.length
+        ? `<text x="${x + (cell - 3) / 2}" y="${y + (cell - 3) / 2 + 6}" text-anchor="middle" font-size="17" font-weight="700" fill="${lv.col}">${items.length}</text>`
+        : `<text x="${x + (cell - 3) / 2}" y="${y + (cell - 3) / 2 + 4}" text-anchor="middle" font-size="9" fill="var(--faint)">${n}</text>`;
+    }
+  }
+  for(let p = 1; p <= 5; p++) g += `<text x="${padL + (p - 1) * cell + (cell - 3) / 2}" y="${padT + 5 * cell + 14}" text-anchor="middle" font-size="10" fill="var(--muted)">${p}</text>`;
+  for(let gr = 5; gr >= 1; gr--) g += `<text x="${padL - 8}" y="${padT + (5 - gr) * cell + (cell - 3) / 2 + 4}" text-anchor="end" font-size="10" fill="var(--muted)">${gr}</text>`;
+  g += `<text x="${padL + 5 * cell / 2}" y="${H - 3}" text-anchor="middle" font-size="9.5" fill="var(--faint)">Probabilité →</text>`;
+  const my = padT + 5 * cell / 2;
+  g += `<text x="13" y="${my}" text-anchor="middle" font-size="9.5" fill="var(--faint)" transform="rotate(-90 13 ${my})">Gravité →</text>`;
+  g += `</svg></div><div class="legend">` +
+    `<span><i class="sq" style="background:#dcfce7;border-color:#16a34a"></i>faible</span>` +
+    `<span><i class="sq" style="background:#fef9c3;border-color:#ca8a04"></i>moyen</span>` +
+    `<span><i class="sq" style="background:#ffedd5;border-color:#ea580c"></i>élevé</span>` +
+    `<span><i class="sq" style="background:#fee2e2;border-color:#dc2626"></i>critique</span></div>`;
+  return g;
+}
+
+function catRows(risks){
+  const m = {}; risks.forEach(r => m[r.categorie] = (m[r.categorie] || 0) + 1);
+  return Object.entries(m).sort((a, b) => b[1] - a[1]).map(([k, v]) => ({label: k, value: v, color: "var(--blue)"}));
+}
+
+function renderRisques(){
+  const all = allRisques();
+  const active = all.filter(riskActive);
+  const critN = active.filter(r => crit(r) >= 15).length;
+  const avere = active.filter(r => r.statut === "avere").length;
+  let h = `<div class="ch-h">Cartographie des risques — ${active.length} actif(s) sur ${all.length}</div>`;
+  h += `<div class="kpis">` +
+    kpi("Risques actifs", String(active.length), "ouverts + avérés") +
+    kpi("Critiques", String(critN), "criticité ≥ 15", critN ? "bad" : "good") +
+    kpi("Avérés", String(avere), "déjà survenus", avere ? "bad" : "") +
+    kpi("Neutralisés", String(all.length - active.length), "maîtrisés / clos") + `</div>`;
+  h += `<div class="dash-row">` +
+    chartBox("Matrice de criticité (proba × gravité) — risques actifs", active.length ? riskMatrix(active) : `<div class="empty">Aucun risque actif.</div>`) +
+    chartBox("Risques actifs par catégorie", active.length ? hbar(catRows(active), {labelW: 150, barW: 170}) : `<div class="empty">—</div>`) + `</div>`;
+  h += `<div class="ch-h">Registre — trié par criticité</div>`;
+  if(!all.length){ $("risques").innerHTML = h + `<div class="empty">Aucun risque. Ouvre un chantier et utilise « + risque » pour en ajouter.</div>`; return; }
+  const sorted = all.slice().sort((a, b) => (riskActive(b) - riskActive(a)) || (crit(b) - crit(a)));
+  h += `<table class="ptable rk-table"><thead><tr><th>Criticité</th><th>Risque</th><th>Chantier</th><th>Catégorie</th><th>Responsable</th><th>Revue</th><th>Statut</th></tr></thead><tbody>`;
+  sorted.forEach(r => {
+    const n = crit(r), lv = critLevel(n), late = riskActive(r) && isLate(r.echeance_revue);
+    h += `<tr class="${riskActive(r) ? "" : "rk-off"}" onclick="openChantier('${r._c.id}')">` +
+      `<td><span class="rk-crit" style="color:${lv.col};background:${lv.bg}">${n} · ${lv.lbl}</span></td>` +
+      `<td><b>${esc(r.libelle)}</b>${r.parade ? `<div class="muted small">parade : ${esc(r.parade)}</div>` : ""}</td>` +
+      `<td>${esc(r._c.titre)}</td><td>${esc(r.categorie)}</td><td>${esc(r.responsable || "—")}</td>` +
+      `<td class="${late ? "bad-t" : ""}">${r.echeance_revue ? fmt(r.echeance_revue) : "—"}</td>` +
+      `<td>${RISK[r.statut]}</td></tr>`;
+  });
+  h += `</tbody></table>`;
+  $("risques").innerHTML = h;
+}
+
+function showAddRisque(cid){
+  const opt = v => [1, 2, 3, 4, 5].map(x => `<option value="${x}" ${x === v ? "selected" : ""}>${x}</option>`).join("");
+  $("addRisque_" + cid).innerHTML =
+    `<div class="miniform"><input id="rkl" placeholder="Risque (ex. Export non livré à temps)">` +
+    `<div class="row"><span class="fld"><span class="fl">Proba 1-5</span><select id="rkp">${opt(3)}</select></span>` +
+    `<span class="fld"><span class="fl">Gravité 1-5</span><select id="rkg">${opt(3)}</select></span>` +
+    `<select id="rkc">${RISK_CATS.map(x => `<option ${x === "Autre" ? "selected" : ""}>${esc(x)}</option>`).join("")}</select>` +
+    `<span class="fld"><span class="fl">Revue</span><input id="rke" type="date"></span></div>` +
+    `<div class="row"><select id="rkr"><option value="">— responsable —</option>` +
+      knownPeople().map(p => `<option value="${esc(p.nom)}">${esc(p.nom)}</option>`).join("") + `</select>` +
+    `<input id="rkpa" placeholder="Parade / mitigation (optionnel)"></div>` +
+    `<div class="actions"><button class="btn sm" onclick="hide('addRisque_${cid}')">Annuler</button>` +
+    `<button class="btn sm primary" onclick="addRisque('${cid}')">Ajouter</button></div></div>`;
+  $("rkl").focus();
+  $("rkl").addEventListener("keydown", e => { if(e.key === "Enter") addRisque(cid); });
+}
+function addRisque(cid){
+  const lib = $("rkl").value.trim(); if(!lib){ alert("Décris le risque."); return; }
+  mutate({op: "add_risque", chantier_id: cid, libelle: lib, probabilite: $("rkp").value, gravite: $("rkg").value,
+          categorie: $("rkc").value, responsable: $("rkr").value, parade: $("rkpa").value.trim(),
+          echeance_revue: $("rke").value || null});
+}
+
+// ======================================================================== //
+//  Planning : tâches du jour (ordonnées) + Gantt portefeuille (tous chantiers)
+// ======================================================================== //
+function planningTasks(){
+  // Tâches sur lesquelles travailler aujourd'hui : non finies, dont le créneau
+  // prévisionnel a déjà commencé (en cours ou en retard) — pas les jalons ni le futur.
+  const items = [];
+  STORE.chantiers.forEach(c => {
+    if(colOf(c) === "done") return;
+    const S = computeSchedule(c);
+    c.taches.forEach(t => {
+      if(t.done || t.is_milestone) return;
+      const f = S.fc[t.id], s = S.sched[t.id];
+      if(!f || f.fsDate > TODAY) return;                 // commence plus tard → pas aujourd'hui
+      const gated = (S.gateInfo[t.id] || []).some(l => l.statut !== "recu");   // attend un livrable
+      const late = !!s && s.endDate < TODAY;              // fin PRÉVUE déjà passée
+      items.push({c, t, due: f.ffDate, planEnd: s ? s.endDate : f.ffDate, late, gated,
+                  slack: s ? s.slack : 0, critical: !!s && s.critical});
+    });
+  });
+  const pr = {h: 0, m: 1, b: 2};
+  items.sort((a, b) =>
+    (b.late - a.late) ||                 // en retard d'abord
+    (b.critical - a.critical) ||         // puis chemin critique
+    (pr[a.c.prio] - pr[b.c.prio]) ||     // puis priorité du chantier
+    (a.planEnd < b.planEnd ? -1 : a.planEnd > b.planEnd ? 1 : 0) ||   // échéance la plus proche
+    (a.slack - b.slack));
+  return items;
+}
+
+function portfolioGantt(){
+  const rows = STORE.chantiers.map(c => ({c, S: computeSchedule(c)}))
+    .filter(r => r.S.order.length || r.c.echeance);
+  if(!rows.length) return `<div class="empty">Aucun chantier planifiable (ajoute des tâches ou une échéance).</div>`;
+  rows.sort((a, b) => {
+    const ea = a.c.echeance || a.S.fend, eb = b.c.echeance || b.S.fend;
+    return ea < eb ? -1 : ea > eb ? 1 : 0;
+  });
+  let mn = TODAY, mx = TODAY;
+  rows.forEach(({c, S}) => {
+    const st = c.date_debut || S.start; if(st < mn) mn = st;
+    if(S.fend > mx) mx = S.fend; if(c.echeance && c.echeance > mx) mx = c.echeance;
+  });
+  const span = Math.max(1, daysBetween(mn, mx));
+  const labelW = 200, plotW = Math.max(440, Math.min(1000, span * 6)), rowH = 26, top = 30;
+  const W = labelW + plotW + 24, H = top + rows.length * rowH + 14;
+  const x = d => labelW + (daysBetween(mn, d) / span) * plotW;
+  let g = `<div class="scrollx"><svg width="${W}" height="${H}" class="gantt">`;
+  // repères de début de mois
+  for(let k = 0; k <= span; k++){
+    const cur = addDays(mn, k);
+    if(k === 0 || cur.slice(8, 10) === "01"){
+      const gx = x(cur);
+      g += `<line x1="${gx}" y1="${top}" x2="${gx}" y2="${H - 10}" stroke="var(--line-soft)"/>`;
+      g += `<text x="${gx + 2}" y="${top - 6}" font-size="9" fill="var(--faint)">${cur.slice(5, 7)}/${cur.slice(2, 4)}</text>`;
+    }
+  }
+  const tx = x(TODAY);
+  if(TODAY >= mn && TODAY <= mx){
+    g += `<line x1="${tx}" y1="${top}" x2="${tx}" y2="${H - 10}" stroke="var(--red)" stroke-dasharray="3 3"/>`;
+    g += `<text x="${tx}" y="${top - 18}" font-size="9" fill="var(--red)" text-anchor="middle">auj.</text>`;
+  }
+  rows.forEach((r, i) => {
+    const c = r.c, S = r.S, y = top + i * rowH + 5;
+    const st = c.date_debut || S.start, en = S.fend;
+    const blocked = colOf(c) === "block";
+    const col = c.statut === "done" ? "var(--green)" : blocked ? "var(--red)"
+              : c.statut === "recette" ? "#7a5ea8" : "var(--blue)";
+    g += `<text x="${labelW - 8}" y="${y + 11}" font-size="11" text-anchor="end" fill="var(--ink)" ` +
+         `style="cursor:pointer" onclick="openChantier('${c.id}')">${esc(c.titre.slice(0, 30))}</text>`;
+    const bx = x(st), bw = Math.max(3, x(en) - bx);
+    g += `<rect x="${bx}" y="${y}" width="${bw}" height="14" rx="3" fill="${col}" opacity="${c.statut === "done" ? .7 : 1}" ` +
+         `style="cursor:pointer" onclick="openChantier('${c.id}')"><title>${esc(c.titre)} : ${fmt(st)} → ${fmt(en)} (${PRIO[c.prio]})</title></rect>`;
+    if(c.echeance){
+      const ex = x(c.echeance), over = S.fend > c.echeance && c.statut !== "done";
+      g += `<path d="M${ex},${y - 3} L${ex + 5},${y + 7} L${ex},${y + 17} L${ex - 5},${y + 7} Z" ` +
+           `fill="${over ? "var(--red)" : "var(--ink)"}"><title>échéance ${fmt(c.echeance)}${over ? " — dépassée" : ""}</title></path>`;
+    }
+  });
+  g += `</svg></div><div class="legend">` +
+    `<span><i class="sq blue"></i>en cours</span><span><i class="sq red"></i>bloqué</span>` +
+    `<span><i class="sq" style="background:#7a5ea8;border-color:#7a5ea8"></i>recette</span>` +
+    `<span><i class="sq green"></i>terminé</span><span><i class="dia"></i>échéance (rouge = dépassée)</span></div>`;
+  return g;
+}
+
+function renderPlanning(){
+  const items = planningTasks();
+  let h = `<div class="ch-h">À faire aujourd'hui — ${fmt(TODAY)} · ${items.length} tâche(s)</div>`;
+  if(!items.length){
+    h += `<div class="ok-note">Rien d'actif aujourd'hui — aucune tâche en cours ni en retard.</div>`;
+  } else {
+    h += `<div class="today-list">`;
+    items.forEach(it => {
+      const c = it.c, t = it.t, tags = [];
+      if(it.late) tags.push(`<span class="bdg b-late">⏰ en retard</span>`);
+      if(it.gated) tags.push(`<span class="bdg b-wait">⌛ attend un livrable</span>`);
+      if(it.critical) tags.push(`<span class="bdg red">critique</span>`);
+      else if(it.slack > 0) tags.push(`<span class="muted small">marge ${it.slack} j</span>`);
+      h += `<div class="td-row">` +
+        `<span class="box ${t.done ? "ok" : ""}" title="Marquer fait" onclick="event.stopPropagation();mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})"></span>` +
+        `<div class="td-body" onclick="openChantier('${c.id}')">` +
+          `<div class="td-lib">${esc(t.label)}</div>` +
+          `<div class="td-meta"><span class="pr-${c.prio}">${PRIO[c.prio]}</span> · <b>${esc(c.titre)}</b> · ` +
+          `<span class="${it.late ? "bad-t" : ""}">fin prévue ${fmt(it.planEnd)}</span> ${tags.join(" ")}</div>` +
+        `</div></div>`;
+    });
+    h += `</div>`;
+  }
+  h += `<div class="ch-h">Planning général — tous les chantiers (triés par échéance)</div>`;
+  h += portfolioGantt();
+  $("planning").innerHTML = h;
+}
+
+// ======================================================================== //
+//  Activité : progression hebdo (journal auto + métriques dérivées des dates)
+// ======================================================================== //
+function weekStart(ds){   // lundi de la semaine de `ds` (YYYY-MM-DD)
+  const dt = dparse(ds), day = (dt.getUTCDay() + 6) % 7;
+  dt.setUTCDate(dt.getUTCDate() - day);
+  return dstr(dt);
+}
+function weeklyActivity(){
+  const wk = {};
+  const ensure = k => (wk[k] = wk[k] || {taches: 0, jalons: 0, notes: 0, retours: 0, relances: 0, actions: 0, events: []});
+  STORE.chantiers.forEach(c => {
+    (c.taches || []).forEach(t => { if(t.done && t.done_date){ const w = ensure(weekStart(t.done_date)); w.taches++; if(t.is_milestone) w.jalons++; } });
+    (c.histo || []).forEach(e => { if(e.d) ensure(weekStart(e.d)).notes++; });
+    (c.livrables || []).forEach(l => { if(l.derniere) ensure(weekStart(l.derniere)).relances++; });
+    (c.iterations || []).forEach(it => (it.retours || []).forEach(r => { if(r.date) ensure(weekStart(r.date)).retours++; }));
+  });
+  (STORE.journal || []).forEach(j => { if(j.date){ const w = ensure(weekStart(j.date)); w.actions++; w.events.push(j); } });
+  return wk;
+}
+function actKpi(label, c, p){
+  const d = c - p, arrow = d > 0 ? `▲ +${d}` : d < 0 ? `▼ ${d}` : "= 0";
+  return kpi(label, String(c), `S-1 : ${p}  (${arrow})`, d > 0 ? "good" : "");
+}
+function renderActivite(){
+  const wk = weeklyActivity();
+  const z = {taches: 0, jalons: 0, notes: 0, retours: 0, relances: 0, actions: 0, events: []};
+  const thisMon = weekStart(TODAY), lastMon = weekStart(addDays(thisMon, -1));
+  const cur = wk[thisMon] || z, prev = wk[lastMon] || z;
+  let h = dsection(`Cette semaine — du ${fmt(thisMon)}`);
+  h += `<div class="kpis">` +
+    actKpi("Tâches terminées", cur.taches, prev.taches) +
+    actKpi("Jalons franchis", cur.jalons, prev.jalons) +
+    actKpi("Actions tracées", cur.actions, prev.actions) +
+    actKpi("Notes + retours", cur.notes + cur.retours, prev.notes + prev.retours) + `</div>`;
+  // 8 dernières semaines
+  const wTaches = [], wActions = [];
+  for(let i = 7; i >= 0; i--){
+    const k = weekStart(addDays(thisMon, -7 * i)), w = wk[k] || z;
+    wTaches.push({label: fmtShort(k), value: w.taches});
+    wActions.push({label: fmtShort(k), value: w.actions});
+  }
+  h += `<div class="dash-row">` +
+    chartBox("Tâches terminées / semaine", vbar(wTaches)) +
+    chartBox("Actions tracées / semaine", vbar(wActions)) + `</div>`;
+  // Journal détaillé par semaine (récent d'abord)
+  h += dsection("Journal — ce que tu as fait, par semaine");
+  const keys = Object.keys(wk).filter(k => (wk[k].events || []).length).sort().reverse();
+  if(!keys.length){
+    h += `<div class="muted small">Le journal se remplit automatiquement au fil de tes actions (tâche cochée, chantier déplacé, livrable mis à jour, risque ajouté, note…). Reviens après quelques jours d'usage — l'export Excel (menu « Excel ▾ ») contient déjà les feuilles « Journal » et « Synthèse hebdo ».</div>`;
+  }
+  keys.forEach(k => {
+    const w = wk[k];
+    h += `<div class="ch-h">Semaine du ${fmt(k)} · ${w.events.length} action(s)</div><div class="jrnl">`;
+    w.events.slice().sort((a, b) => (a.ts < b.ts ? 1 : -1)).forEach(e => {
+      h += `<div class="jr"><span class="jr-d">${fmtShort(e.date)}</span>` +
+        (e.chantier ? `<b>${esc(e.chantier)}</b> · ` : "") + `${esc(e.msg)}</div>`;
+    });
+    h += `</div>`;
+  });
+  $("activite").innerHTML = h;
 }
 
 loadStore();

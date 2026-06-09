@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from datetime import date
+from datetime import date, datetime
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 STORE_PATH = os.path.join(DATA_DIR, "store.json")
@@ -26,14 +26,55 @@ STATUTS = {"todo", "doing", "block", "recette", "done"}
 PRIOS = {"h", "m", "b"}
 LIV_STATUTS = {"attente", "recu", "partiel", "annule"}
 RETOUR_STATUTS = {"a_traiter", "en_cours", "fait", "rejete"}
+RISQUE_STATUTS = {"ouvert", "maitrise", "avere", "clos"}   # cote / maitrise / avere / clos
 
 
 def _uid(prefix: str) -> str:
     return prefix + uuid.uuid4().hex[:8]
 
 
+def _clamp15(v, default=3) -> int:
+    """Ramene proba/gravite sur l'echelle 1..5 (cotation 5x5)."""
+    try:
+        return min(5, max(1, int(v)))
+    except (TypeError, ValueError):
+        return default
+
+
 def today() -> str:
     return date.today().isoformat()
+
+
+# --------------------------------------------------------------------------- #
+# Journal d'actions (suivi de progression hebdo). Chaque mutation y dépose une
+# ligne horodatée — le message lisible est déjà produit par _apply_op.
+# --------------------------------------------------------------------------- #
+JOURNAL_SKIP = {"set_settings"}   # simples réglages : pas une "action" à tracer
+JOURNAL_MAX = 3000                # garde les N dernières lignes
+
+
+def _iso_week(d: date) -> str:
+    y, w, _ = d.isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+def _journal(store: dict, op: dict, msg: str) -> None:
+    name = op.get("op")
+    if name in JOURNAL_SKIP:
+        return
+    now = datetime.now()
+    cid = op.get("chantier_id") or op.get("id") or ""
+    titre = ""
+    if cid:
+        ch = next((c for c in store.get("chantiers", []) if c.get("id") == cid), None)
+        if ch:
+            titre = ch.get("titre", "")
+    j = store.setdefault("journal", [])
+    j.append({"ts": now.isoformat(timespec="seconds"), "date": now.date().isoformat(),
+              "week": _iso_week(now.date()), "op": name,
+              "chantier_id": cid, "chantier": titre, "msg": msg})
+    if len(j) > JOURNAL_MAX:
+        del j[:len(j) - JOURNAL_MAX]
 
 
 # --------------------------------------------------------------------------- #
@@ -85,6 +126,18 @@ def _seed() -> dict:
                     {"d": "2026-06-01", "t": "Acces passerelle demande a Marc."},
                     {"d": "2026-06-03", "t": "Relance Marc, sans reponse."},
                 ],
+                "risques": [
+                    {"id": "rk_pbi1", "libelle": "Acces passerelle non ouvert a temps",
+                     "categorie": "Dependance/IT", "probabilite": 4, "gravite": 5,
+                     "parade": "Escalade DSI + plan B : publication manuelle temporaire.",
+                     "responsable": "Marc", "echeance_revue": "2026-06-15",
+                     "statut": "ouvert", "tache_id": "t5"},
+                    {"id": "rk_pbi2", "libelle": "Ecarts de marge detectes en recette",
+                     "categorie": "Qualite", "probabilite": 2, "gravite": 4,
+                     "parade": "Double calcul DAX vs warehouse avant publication.",
+                     "responsable": "Controle de gestion", "echeance_revue": "2026-06-10",
+                     "statut": "ouvert", "tache_id": None},
+                ],
                 "ordre": 0,
             },
             {
@@ -115,6 +168,13 @@ def _seed() -> dict:
                 "histo": [
                     {"d": "2026-05-20", "t": "Demande d'export envoyee a Karim."},
                     {"d": "2026-06-02", "t": "3e relance. Karim invoque une priorite serveur."},
+                ],
+                "risques": [
+                    {"id": "rk_slv1", "libelle": "Export SILOG FAFE/FAFC jamais livre par l'IT",
+                     "categorie": "Dependance/IT", "probabilite": 4, "gravite": 4,
+                     "parade": "Reconstruire les factures d'achat depuis BDRE (recption) en plan B.",
+                     "responsable": "Karim", "echeance_revue": "2026-06-10",
+                     "statut": "avere", "tache_id": "t2"},
                 ],
                 "ordre": 1,
             },
@@ -184,6 +244,7 @@ def _seed() -> dict:
 # --------------------------------------------------------------------------- #
 def _normalize(store: dict) -> dict:
     store.setdefault("contacts", [])
+    store.setdefault("journal", [])
     s = store.setdefault("settings", {})
     s.setdefault("capacite_jour", 3)     # max taches actives par jour (global)
     s.setdefault("wip_max", 3)           # max chantiers "En cours" simultanes
@@ -200,6 +261,18 @@ def _normalize(store: dict) -> dict:
         c.setdefault("livrables", [])
         c.setdefault("histo", [])
         c.setdefault("baseline", None)
+        c.setdefault("baseline_edits", 0)
+        for rk in c.setdefault("risques", []):       # registre de risques (proba x gravite 5x5)
+            rk.setdefault("id", _uid("rk_"))
+            rk.setdefault("libelle", "")
+            rk.setdefault("categorie", "Autre")
+            rk.setdefault("probabilite", 3)
+            rk.setdefault("gravite", 3)
+            rk.setdefault("parade", "")
+            rk.setdefault("responsable", "")
+            rk.setdefault("echeance_revue", None)
+            rk.setdefault("statut", "ouvert")
+            rk.setdefault("tache_id", None)
         for t in c.setdefault("taches", []):
             t.setdefault("done", False)
             t.setdefault("done_date", None)
@@ -285,6 +358,24 @@ def _iteration(ch: dict, iid: str) -> dict:
 # Application d'une operation
 # --------------------------------------------------------------------------- #
 def apply_op(store: dict, op: dict) -> str:
+    """Applique l'operation puis incremente le compteur de modifs post-reference
+    si le chantier vise possede une reference figee."""
+    msg = _apply_op(store, op)
+    name = op.get("op")
+    NON_EDIT = {"set_baseline", "clear_baseline", "set_settings", "add_contact",
+                "rename_person", "remove_person", "set_person_role", "create_chantier",
+                "delete_chantier", "add_risque", "update_risque", "remove_risque"}
+    if name not in NON_EDIT:
+        cid = op.get("chantier_id") or op.get("id")
+        if cid:
+            ch = next((c for c in store["chantiers"] if c["id"] == cid), None)
+            if ch and ch.get("baseline"):
+                ch["baseline_edits"] = ch.get("baseline_edits", 0) + 1
+    _journal(store, op, msg)
+    return msg
+
+
+def _apply_op(store: dict, op: dict) -> str:
     name = op.get("op")
 
     if name == "create_chantier":
@@ -449,6 +540,15 @@ def apply_op(store: dict, op: dict) -> str:
             lv["date"] = op["date"] or None
         if "tache_id" in op:
             lv["tache_id"] = op["tache_id"] or None
+        if "contact_id" in op:           # choisir un contact remplit nom + role
+            lv["contact_id"] = op["contact_id"] or None
+            if lv["contact_id"]:
+                ct = _sub(store["contacts"], lv["contact_id"], "Contact")
+                lv["personne"], lv["role"] = ct["nom"], ct.get("role", "")
+        if "personne" in op and op["personne"] is not None:
+            lv["personne"] = op["personne"]
+        if "role" in op and op["role"] is not None:
+            lv["role"] = op["role"]
         if op.get("relance"):
             lv["relances"] = lv.get("relances", 0) + 1
             lv["derniere"] = today()
@@ -500,14 +600,54 @@ def apply_op(store: dict, op: dict) -> str:
         store["contacts"].append({"id": _uid("c_"), "nom": nom, "role": op.get("role") or ""})
         return f"Contact ajoute : {nom}"
 
+    if name == "rename_person":   # renomme une personne partout (contacts + livrables)
+        old = (op.get("old") or "").strip()
+        new = (op.get("new") or "").strip()
+        if not new:
+            raise ValueError("Nouveau nom requis.")
+        for ct in store["contacts"]:
+            if ct["nom"] == old:
+                ct["nom"] = new
+        for c in store["chantiers"]:
+            for l in c["livrables"]:
+                if (l.get("personne") or "") == old:
+                    l["personne"] = new
+        return f"« {old} » renommé en « {new} »"
+
+    if name == "set_person_role":   # change le rôle d'une personne partout
+        nom = (op.get("nom") or "").strip()
+        role = op.get("role") or ""
+        for ct in store["contacts"]:
+            if ct["nom"] == nom:
+                ct["role"] = role
+        for c in store["chantiers"]:
+            for l in c["livrables"]:
+                if (l.get("personne") or "") == nom:
+                    l["role"] = role
+        return f"Rôle de « {nom} » mis à jour"
+
+    if name == "remove_person":   # supprime une personne ; ses livrables sont réassignés ou non assignés
+        nom = (op.get("nom") or "").strip()
+        to = (op.get("reassign_to") or "").strip()
+        store["contacts"] = [ct for ct in store["contacts"] if ct["nom"] != nom]
+        n = 0
+        for c in store["chantiers"]:
+            for l in c["livrables"]:
+                if (l.get("personne") or "") == nom:
+                    l["personne"] = to
+                    n += 1
+        return f"« {nom} » supprimé ({n} livrable(s) {'réassigné(s) à ' + to if to else 'désormais non assignés'})"
+
     if name == "set_baseline":
         ch = _chantier(store, op["chantier_id"])
         ch["baseline"] = op.get("baseline")
+        ch["baseline_edits"] = 0          # nouvelle reference -> compteur remis a zero
         return f"Reference figee pour « {ch['titre']} »"
 
     if name == "clear_baseline":
         ch = _chantier(store, op["chantier_id"])
         ch["baseline"] = None
+        ch["baseline_edits"] = 0
         return "Reference effacee"
 
     # ---- Recette / iterations -------------------------------------------- #
@@ -567,6 +707,52 @@ def apply_op(store: dict, op: dict) -> str:
         it = _iteration(ch, op["iteration_id"])
         it["retours"] = [x for x in it["retours"] if x["id"] != op["retour_id"]]
         return "Retour supprimé"
+
+    # ---- Risques --------------------------------------------------------- #
+    if name == "add_risque":
+        ch = _chantier(store, op["chantier_id"])
+        libelle = (op.get("libelle") or "").strip()
+        if not libelle:
+            raise ValueError("Libellé du risque requis.")
+        statut = op.get("statut") or "ouvert"
+        if statut not in RISQUE_STATUTS:
+            raise ValueError(f"Statut risque invalide: {statut}")
+        ch.setdefault("risques", []).append({
+            "id": _uid("rk_"), "libelle": libelle,
+            "categorie": (op.get("categorie") or "Autre").strip() or "Autre",
+            "probabilite": _clamp15(op.get("probabilite"), 3),
+            "gravite": _clamp15(op.get("gravite"), 3),
+            "parade": (op.get("parade") or "").strip(),
+            "responsable": (op.get("responsable") or "").strip(),
+            "echeance_revue": op.get("echeance_revue") or None,
+            "statut": statut, "tache_id": op.get("tache_id") or None,
+        })
+        return f"Risque ajouté à « {ch['titre']} » : {libelle}"
+
+    if name == "update_risque":
+        ch = _chantier(store, op["chantier_id"])
+        rk = _sub(ch.setdefault("risques", []), op["risque_id"], "Risque")
+        for field in ("libelle", "categorie", "parade", "responsable"):
+            if field in op and op[field] is not None:
+                rk[field] = op[field]
+        for field in ("probabilite", "gravite"):
+            if field in op and op[field] is not None:
+                rk[field] = _clamp15(op[field], rk.get(field, 3))
+        if op.get("statut"):
+            if op["statut"] not in RISQUE_STATUTS:
+                raise ValueError(f"Statut risque invalide: {op['statut']}")
+            rk["statut"] = op["statut"]
+        if "echeance_revue" in op:
+            rk["echeance_revue"] = op["echeance_revue"] or None
+        if "tache_id" in op:
+            rk["tache_id"] = op["tache_id"] or None
+        return f"Risque mis à jour dans « {ch['titre']} »"
+
+    if name == "remove_risque":
+        ch = _chantier(store, op["chantier_id"])
+        rk = _sub(ch.setdefault("risques", []), op["risque_id"], "Risque")
+        ch["risques"] = [x for x in ch["risques"] if x["id"] != op["risque_id"]]
+        return f"Risque supprimé : {rk['libelle']}"
 
     if name == "set_settings":
         store.setdefault("settings", {}).update(op.get("settings") or {})

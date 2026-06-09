@@ -83,6 +83,56 @@ def _schedule(ch: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Synthèse hebdomadaire (journal + métriques dérivées des dates existantes)
+# --------------------------------------------------------------------------- #
+def _iso_week_str(ds: str) -> str:
+    try:
+        y, w, _ = date.fromisoformat(str(ds)[:10]).isocalendar()
+        return f"{y}-W{w:02d}"
+    except (ValueError, TypeError):
+        return ""
+
+
+def _week_monday(wk: str) -> str:
+    try:
+        y, w = wk.split("-W")
+        return date.fromisocalendar(int(y), int(w), 1).isoformat()
+    except (ValueError, TypeError):
+        return ""
+
+
+def _weekly_synthese(store: dict) -> dict:
+    from collections import defaultdict
+    m = defaultdict(lambda: {"taches": 0, "jalons": 0, "notes": 0, "retours": 0, "relances": 0, "actions": 0})
+    for ch in store.get("chantiers", []):
+        for t in ch.get("taches", []):
+            if t.get("done") and t.get("done_date"):
+                w = _iso_week_str(t["done_date"])
+                if w:
+                    m[w]["taches"] += 1
+                    if t.get("is_milestone"):
+                        m[w]["jalons"] += 1
+        for e in ch.get("histo", []):
+            w = _iso_week_str(e.get("d", ""))
+            if w:
+                m[w]["notes"] += 1
+        for l in ch.get("livrables", []):
+            w = _iso_week_str(l.get("derniere") or "")
+            if w:
+                m[w]["relances"] += 1
+        for it in ch.get("iterations", []):
+            for r in it.get("retours", []):
+                w = _iso_week_str(r.get("date") or "")
+                if w:
+                    m[w]["retours"] += 1
+    for j in store.get("journal", []):
+        w = j.get("week") or _iso_week_str(j.get("date", ""))
+        if w:
+            m[w]["actions"] += 1
+    return m
+
+
+# --------------------------------------------------------------------------- #
 # Export
 # --------------------------------------------------------------------------- #
 def _styles():
@@ -177,6 +227,33 @@ def build() -> bytes:
             ws3.cell(row=ws3.max_row, column=col).alignment = Align(vertical="top", wrap_text=col in (4, 8))
     _widths(ws3, [22, 16, 28, 40, 12, 13, 9, 34])
     _header(ws3, len(cols3), st)
+
+    # --- Synthese hebdo (progression semaine par semaine) ---
+    ws4 = wb.create_sheet("Synthese hebdo")
+    cols4 = ["Semaine", "Debut (lundi)", "Taches terminees", "Jalons", "Notes",
+             "Retours recus", "Relances", "Actions"]
+    ws4.append(cols4)
+    syn = _weekly_synthese(store)
+    for w in sorted(syn.keys(), reverse=True):
+        d = syn[w]
+        ws4.append([w, _week_monday(w), d["taches"], d["jalons"], d["notes"],
+                    d["retours"], d["relances"], d["actions"]])
+        for col in range(1, len(cols4) + 1):
+            ws4.cell(row=ws4.max_row, column=col).border = st["border"]
+    _widths(ws4, [12, 14, 16, 9, 9, 14, 10, 9])
+    _header(ws4, len(cols4), st)
+
+    # --- Journal (toutes les actions horodatees) ---
+    ws5 = wb.create_sheet("Journal")
+    cols5 = ["Date", "Semaine", "Chantier", "Action"]
+    ws5.append(cols5)
+    for j in sorted(store.get("journal", []), key=lambda x: x.get("ts", ""), reverse=True):
+        ws5.append([j.get("date", ""), j.get("week", ""), j.get("chantier", ""), j.get("msg", "")])
+        for col in range(1, len(cols5) + 1):
+            ws5.cell(row=ws5.max_row, column=col).border = st["border"]
+            ws5.cell(row=ws5.max_row, column=col).alignment = Align(vertical="top", wrap_text=col == 4)
+    _widths(ws5, [12, 12, 28, 64])
+    _header(ws5, len(cols5), st)
 
     buf = io.BytesIO()
     wb.save(buf)
