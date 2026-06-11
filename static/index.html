@@ -19,6 +19,7 @@
   <div class="nav">
     <button class="on" data-v="board" onclick="setView('board')">Tableau</button>
     <button data-v="planning" onclick="setView('planning')">Planning</button>
+    <button data-v="cahiers" onclick="setView('cahiers')">Cahiers des charges</button>
     <div class="menu navmenu" id="navPilotage">
       <button data-group="dash,activite,charge,risques" onclick="toggleMenu(event,'navPilotage')">Pilotage ▾</button>
       <div class="menu-list">
@@ -60,6 +61,8 @@
     <div class="risques" id="risques" style="display:none"></div>
     <div class="people" id="people" style="display:none"></div>
     <div class="contacts" id="contacts" style="display:none"></div>
+    <div class="cahiers" id="cahiers" style="display:none"></div>
+    <div class="cdc" id="cdc" style="display:none"></div>
     <div class="page" id="page" style="display:none"></div>
   </div>
 </div>

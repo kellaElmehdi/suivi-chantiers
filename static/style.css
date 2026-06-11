@@ -448,3 +448,70 @@ textarea{width:100%;resize:vertical;min-height:52px}
 .td-meta{font-size:11px;color:var(--muted);margin-top:3px;display:flex;flex-wrap:wrap;gap:5px 8px;align-items:center}
 
 @media(max-width:960px){ .pg-grid{grid-template-columns:1fr} .kpis{grid-template-columns:repeat(2,1fr)} }
+
+/* ---------------- Cahier des charges ---------------- */
+/* Badge de statut (pilule) — sur cartes Kanban, page, listes */
+.cdc-badge{display:inline-block;font-size:11px;font-weight:700;padding:3px 11px;border-radius:var(--radius-pill);border:1px solid transparent;letter-spacing:.2px}
+.cdc-badge.big{font-size:12.5px;padding:4px 13px}
+.cdc-draft{color:var(--muted);background:var(--surface-card);border-color:var(--line)}
+.cdc-review{color:#92590a;background:var(--amber-bg);border-color:#f0d79e}
+.cdc-valid{color:#047857;background:#ecfdf5;border-color:#a7f3d0}
+.cdc-obsolete{color:var(--muted);background:var(--surface-card);border-color:var(--line);text-decoration:line-through}
+.bdg.b-cdc.cdc-draft{color:var(--muted);background:var(--surface-card);border-color:var(--line)}
+.bdg.b-cdc.cdc-review{color:#92590a;background:var(--amber-bg);border-color:#f0d79e}
+.bdg.b-cdc.cdc-valid{color:#047857;background:#ecfdf5;border-color:#a7f3d0}
+.bdg.b-cdc.cdc-obsolete{color:var(--muted);background:var(--surface-card);border-color:var(--line)}
+.cdc-sum{margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+
+/* Éditeur de document */
+.cdc{padding:0}
+.cdc-top{display:flex;align-items:center;gap:10px;padding:14px 22px;border-bottom:1px solid var(--line);
+  position:sticky;top:0;background:var(--canvas);z-index:5}
+.cdc-toptitle .d-status{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--muted)}
+.cdc-toptitle .pg-title{font-size:20px}
+.cdc-doc{max-width:860px;margin:0 auto;padding:22px 20px 64px;display:flex;flex-direction:column;gap:16px}
+.cdc-card{background:var(--canvas);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:16px 18px}
+.cdc-fields{display:grid;grid-template-columns:1fr 1fr;gap:12px 16px}
+.cdc-f{display:flex;flex-direction:column;gap:5px}
+.cdc-f.full{grid-column:1/-1}
+.cdc-fl{font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);font-weight:600}
+.cdc-valid-block{margin-top:14px;padding-top:14px;border-top:1px solid var(--line-soft);display:flex;flex-direction:column;gap:11px}
+.cdc-vrow{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.cdc-vrow input[type=date]{width:140px}
+.cdc-pp .row-line{max-width:440px}
+.cdc-pp .add,.cdc-rev-h .add{margin-left:6px}
+
+.cdc-sections{display:flex;flex-direction:column;gap:14px}
+.cdc-sec{background:var(--canvas);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px 16px}
+.cdc-sec-h{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.cdc-sec-n{font-family:var(--font-display);font-weight:700;color:var(--muted);font-size:14px;min-width:18px}
+.cdc-sec-titre{flex:1;font-size:15px;font-weight:700;font-family:var(--font-display);letter-spacing:-.02em;
+  border:1px solid transparent;background:transparent;padding:5px 7px;border-radius:var(--radius-sm)}
+.cdc-sec-titre:hover{border-color:var(--line)} .cdc-sec-titre:focus{border-color:var(--ink);background:var(--canvas)}
+.cdc-sec-acts{display:flex;gap:12px;align-items:center}
+.cdc-sec-acts a{cursor:pointer;color:var(--muted);font-size:15px;text-decoration:none;line-height:1}
+.cdc-sec-acts a:hover{color:var(--ink)} .cdc-sec-acts a.danger:hover{color:var(--red)}
+.cdc-sec-corps{width:100%;min-height:94px;font-size:13px;line-height:1.6;padding:10px 12px}
+
+.cdc-rev-h{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);margin-bottom:10px}
+.cdc-rev{max-width:none}
+.cdc-rev th,.cdc-rev td{font-size:12px}
+.cdc-cur{font-size:9.5px;font-weight:700;color:#047857;background:#ecfdf5;border:1px solid #a7f3d0;
+  border-radius:var(--radius-pill);padding:1px 7px;text-transform:uppercase;letter-spacing:.3px}
+.cdc-clk{cursor:pointer}
+.cdc-clk:hover{background:var(--surface-soft)}
+
+/* Modale de lecture seule d'une révision */
+.cdc-modal-bg{position:fixed;inset:0;background:rgba(17,17,17,.45);display:flex;align-items:flex-start;
+  justify-content:center;z-index:100;padding:40px 20px;overflow:auto}
+.cdc-modal{background:var(--canvas);border:1px solid var(--line);border-radius:var(--radius);
+  box-shadow:var(--shadow-h);max-width:820px;width:100%}
+.cdc-modal-h{display:flex;align-items:center;gap:8px;padding:13px 20px;border-bottom:1px solid var(--line);font-size:13px}
+.cdc-modal-h .add{margin-left:auto;cursor:pointer;color:var(--ink);text-decoration:underline;font-size:12px}
+.cdc-modal-b{padding:24px 26px}
+.cdc-h1{font-family:var(--font-display);letter-spacing:-.03em;font-size:24px;margin:0 0 4px}
+.cdc-sub{color:var(--muted);font-size:12.5px;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:16px}
+.cdc-h3{font-size:14px;margin:16px 0 4px;font-family:var(--font-display);letter-spacing:-.01em}
+.cdc-corps{font-size:13px;line-height:1.6;white-space:pre-wrap;color:var(--ink)}
+.cdc-objet{margin-top:18px;font-size:11.5px;border-top:1px solid var(--line-soft);padding-top:10px}
+@media(max-width:700px){ .cdc-fields{grid-template-columns:1fr} }

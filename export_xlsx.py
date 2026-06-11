@@ -255,6 +255,46 @@ def build() -> bytes:
     _widths(ws5, [12, 12, 28, 64])
     _header(ws5, len(cols5), st)
 
+    # --- Cahiers des charges (synthese + validation) ---
+    CDC_LBL = {"brouillon": "Brouillon", "en_validation": "En validation",
+               "valide": "Valide", "obsolete": "Obsolete"}
+    ws6 = wb.create_sheet("Cahiers des charges")
+    cols6 = ["Chantier", "Reference", "Titre", "Indice", "Statut", "Redige par",
+             "Mis a jour", "Valide par", "Date validation", "Parties prenantes", "Lien"]
+    ws6.append(cols6)
+    for ch in store.get("chantiers", []):
+        cdc = ch.get("cdc")
+        if not cdc:
+            continue
+        pp = " ; ".join(f"{p.get('nom', '')}{(' (' + p['role'] + ')') if p.get('role') else ''}"
+                        for p in cdc.get("parties_prenantes", []))
+        ws6.append([ch.get("titre", ""), cdc.get("reference", ""), cdc.get("titre", ""),
+                    cdc.get("indice", ""), CDC_LBL.get(cdc.get("statut"), cdc.get("statut", "")),
+                    cdc.get("redacteur", ""), cdc.get("date_maj", ""), cdc.get("valide_par", ""),
+                    cdc.get("date_validation", "") or "", pp, cdc.get("lien", "")])
+        for col in range(1, len(cols6) + 1):
+            ws6.cell(row=ws6.max_row, column=col).border = st["border"]
+            ws6.cell(row=ws6.max_row, column=col).alignment = Align(vertical="top", wrap_text=col in (3, 10))
+    _widths(ws6, [24, 16, 30, 7, 13, 12, 12, 16, 13, 34, 28])
+    _header(ws6, len(cols6), st)
+
+    # --- CdC : suivi des modifications (revisions, tous chantiers) ---
+    ws7 = wb.create_sheet("CdC revisions")
+    cols7 = ["Chantier", "Indice", "Date", "Auteur", "Objet de la modification"]
+    ws7.append(cols7)
+    for ch in store.get("chantiers", []):
+        cdc = ch.get("cdc")
+        if not cdc:
+            continue
+        for r in cdc.get("revisions", []):
+            ws7.append([ch.get("titre", ""), r.get("indice", ""), r.get("date", ""),
+                        r.get("auteur", ""), r.get("objet", "")])
+            for col in range(1, len(cols7) + 1):
+                ws7.cell(row=ws7.max_row, column=col).border = st["border"]
+                ws7.cell(row=ws7.max_row, column=col).alignment = Align(vertical="top", wrap_text=col == 5)
+    _widths(ws7, [24, 7, 12, 16, 60])
+    _header(ws7, len(cols7), st)
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()

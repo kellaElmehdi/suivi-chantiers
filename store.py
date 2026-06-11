@@ -27,6 +27,7 @@ PRIOS = {"h", "m", "b"}
 LIV_STATUTS = {"attente", "recu", "partiel", "annule"}
 RETOUR_STATUTS = {"a_traiter", "en_cours", "fait", "rejete"}
 RISQUE_STATUTS = {"ouvert", "maitrise", "avere", "clos"}   # cote / maitrise / avere / clos
+CDC_STATUTS = {"brouillon", "en_validation", "valide", "obsolete"}   # cycle de vie d'un cahier des charges
 
 
 def _uid(prefix: str) -> str:
@@ -46,10 +47,51 @@ def today() -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Cahier des charges — document libre (sections) + suivi de modification
+# (table d'indices A/B/C avec snapshot) + validation par statut posé.
+# --------------------------------------------------------------------------- #
+CDC_TEMPLATE = [
+    ("Objet", "But de ce cahier des charges et du besoin couvert."),
+    ("Contexte et enjeux", ""),
+    ("Périmètre", "Ce qui est inclus — et ce qui est explicitement exclu."),
+    ("Besoins et exigences", ""),
+    ("Contraintes (techniques, délais, budget)", ""),
+    ("Livrables attendus", ""),
+    ("Critères de recette / validation", ""),
+]
+
+
+def _next_indice(cur: str) -> str:
+    """Indice suivant façon industrie : A→B, Z→AA, AZ→BA, ZZ→AAA."""
+    chars = list((cur or "A").strip().upper() or "A")
+    i = len(chars) - 1
+    while i >= 0:
+        if chars[i] == "Z":
+            chars[i] = "A"
+            i -= 1
+        else:
+            chars[i] = chr(ord(chars[i]) + 1)
+            return "".join(chars)
+    return "A" + "".join(chars)
+
+
+def _new_cdc(ch: dict) -> dict:
+    return {
+        "reference": "", "titre": ch.get("titre", ""), "statut": "brouillon",
+        "indice": "A", "redacteur": "", "lien": "",
+        "date_creation": today(), "date_maj": today(),
+        "parties_prenantes": [], "valide_par": "", "date_validation": None,
+        "sections": [{"id": _uid("sec_"), "titre": t, "corps": b} for t, b in CDC_TEMPLATE],
+        "revisions": [{"id": _uid("rev_"), "indice": "A", "date": today(),
+                       "auteur": "", "objet": "Création du document", "snapshot": None}],
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Journal d'actions (suivi de progression hebdo). Chaque mutation y dépose une
 # ligne horodatée — le message lisible est déjà produit par _apply_op.
 # --------------------------------------------------------------------------- #
-JOURNAL_SKIP = {"set_settings"}   # simples réglages : pas une "action" à tracer
+JOURNAL_SKIP = {"set_settings", "cdc_section_update", "cdc_section_move"}   # bruit d'édition : pas une "action" à tracer
 JOURNAL_MAX = 3000                # garde les N dernières lignes
 
 
@@ -138,6 +180,41 @@ def _seed() -> dict:
                      "responsable": "Controle de gestion", "echeance_revue": "2026-06-10",
                      "statut": "ouvert", "tache_id": None},
                 ],
+                "cdc": {
+                    "reference": "CDC-PBI-2026-001",
+                    "titre": "Cahier des charges — Migration Power BI v2",
+                    "statut": "en_validation", "indice": "B", "redacteur": "Moi", "lien": "",
+                    "date_creation": "2026-05-26", "date_maj": "2026-06-05",
+                    "parties_prenantes": [
+                        {"id": "pp_cg", "nom": "Controle de gestion", "role": "Approbateur (recette)"},
+                        {"id": "pp_dir", "nom": "Direction", "role": "Destinataire"},
+                        {"id": "pp_dsi", "nom": "Marc", "role": "Verificateur (DSI)"},
+                    ],
+                    "valide_par": "", "date_validation": None,
+                    "sections": [
+                        {"id": "sec_obj", "titre": "Objet",
+                         "corps": "Refondre les rapports Power BI sur le nouveau modele gold et les republier aux directions."},
+                        {"id": "sec_ctx", "titre": "Contexte et enjeux",
+                         "corps": "L'ancien modele melangeait les sources ; les marges n'etaient pas fiables. Le modele gold consolide les 3 ERP."},
+                        {"id": "sec_per", "titre": "Perimetre",
+                         "corps": "Inclus : 6 pages de rapport (CA, marge, NC, charge). Exclu : la partie previsionnelle (phase 2)."},
+                        {"id": "sec_exi", "titre": "Besoins et exigences",
+                         "corps": "- Marge calculee au grain OF cloture\n- Filtre par secteur marche\n- Rafraichissement quotidien via passerelle"},
+                        {"id": "sec_con", "titre": "Contraintes (techniques, delais, budget)",
+                         "corps": "Publication avant le 20/06. Acces passerelle a ouvrir par la DSI."},
+                        {"id": "sec_liv", "titre": "Livrables attendus",
+                         "corps": "Rapport publie + jeu de donnees rafraichi + note de version."},
+                        {"id": "sec_rec", "titre": "Criteres de recette / validation",
+                         "corps": "Double calcul DAX vs warehouse a moins de 0,5% d'ecart sur le CA et la marge."},
+                    ],
+                    "revisions": [
+                        {"id": "rev_a", "indice": "A", "date": "2026-05-26", "auteur": "Moi",
+                         "objet": "Creation du document", "snapshot": None},
+                        {"id": "rev_b", "indice": "B", "date": "2026-06-05", "auteur": "Moi",
+                         "objet": "Ajout des criteres de recette chiffres (ecart < 0,5%) apres echange controle de gestion",
+                         "snapshot": None},
+                    ],
+                },
                 "ordre": 0,
             },
             {
@@ -273,6 +350,33 @@ def _normalize(store: dict) -> dict:
             rk.setdefault("echeance_revue", None)
             rk.setdefault("statut", "ouvert")
             rk.setdefault("tache_id", None)
+        cdc = c.setdefault("cdc", None)                # cahier des charges (0..1 par chantier)
+        if cdc is not None:
+            cdc.setdefault("reference", "")
+            cdc.setdefault("titre", c.get("titre", ""))
+            cdc.setdefault("statut", "brouillon")
+            cdc.setdefault("indice", "A")
+            cdc.setdefault("redacteur", "")
+            cdc.setdefault("lien", "")
+            cdc.setdefault("date_creation", today())
+            cdc.setdefault("date_maj", cdc.get("date_creation") or today())
+            cdc.setdefault("valide_par", "")
+            cdc.setdefault("date_validation", None)
+            for pp in cdc.setdefault("parties_prenantes", []):
+                pp.setdefault("id", _uid("pp_"))
+                pp.setdefault("nom", "")
+                pp.setdefault("role", "")
+            for sec in cdc.setdefault("sections", []):
+                sec.setdefault("id", _uid("sec_"))
+                sec.setdefault("titre", "")
+                sec.setdefault("corps", "")
+            for rev in cdc.setdefault("revisions", []):
+                rev.setdefault("id", _uid("rev_"))
+                rev.setdefault("indice", "A")
+                rev.setdefault("date", today())
+                rev.setdefault("auteur", "")
+                rev.setdefault("objet", "")
+                rev.setdefault("snapshot", None)
         for t in c.setdefault("taches", []):
             t.setdefault("done", False)
             t.setdefault("done_date", None)
@@ -354,6 +458,14 @@ def _iteration(ch: dict, iid: str) -> dict:
     return _sub(ch.setdefault("iterations", []), iid, "Iteration")
 
 
+def _cdc(store: dict, cid: str):
+    ch = _chantier(store, cid)
+    cdc = ch.get("cdc")
+    if not cdc:
+        raise ValueError("Ce chantier n'a pas de cahier des charges.")
+    return ch, cdc
+
+
 # --------------------------------------------------------------------------- #
 # Application d'une operation
 # --------------------------------------------------------------------------- #
@@ -364,7 +476,10 @@ def apply_op(store: dict, op: dict) -> str:
     name = op.get("op")
     NON_EDIT = {"set_baseline", "clear_baseline", "set_settings", "add_contact",
                 "rename_person", "remove_person", "set_person_role", "create_chantier",
-                "delete_chantier", "add_risque", "update_risque", "remove_risque"}
+                "delete_chantier", "add_risque", "update_risque", "remove_risque",
+                "cdc_create", "cdc_delete", "cdc_update", "cdc_section_add",
+                "cdc_section_update", "cdc_section_remove", "cdc_section_move",
+                "cdc_partie_add", "cdc_partie_remove", "cdc_revise"}
     if name not in NON_EDIT:
         cid = op.get("chantier_id") or op.get("id")
         if cid:
@@ -753,6 +868,116 @@ def _apply_op(store: dict, op: dict) -> str:
         rk = _sub(ch.setdefault("risques", []), op["risque_id"], "Risque")
         ch["risques"] = [x for x in ch["risques"] if x["id"] != op["risque_id"]]
         return f"Risque supprimé : {rk['libelle']}"
+
+    # ---- Cahier des charges ---------------------------------------------- #
+    if name == "cdc_create":
+        ch = _chantier(store, op["chantier_id"])
+        if ch.get("cdc"):
+            return "Cahier des charges déjà présent."
+        ch["cdc"] = _new_cdc(ch)
+        if op.get("reference"):
+            ch["cdc"]["reference"] = str(op["reference"]).strip()
+        if op.get("redacteur"):
+            ch["cdc"]["redacteur"] = str(op["redacteur"]).strip()
+        return f"Cahier des charges créé pour « {ch['titre']} »"
+
+    if name == "cdc_delete":
+        ch = _chantier(store, op["chantier_id"])
+        ch["cdc"] = None
+        return f"Cahier des charges supprimé de « {ch['titre']} »"
+
+    if name == "cdc_update":
+        ch, cdc = _cdc(store, op["chantier_id"])
+        for f in ("reference", "titre", "redacteur", "lien", "valide_par"):
+            if f in op and op[f] is not None:
+                cdc[f] = str(op[f]).strip()
+        if "statut" in op and op["statut"]:
+            if op["statut"] not in CDC_STATUTS:
+                raise ValueError(f"Statut CdC invalide: {op['statut']}")
+            cdc["statut"] = op["statut"]
+            if op["statut"] == "valide" and not cdc.get("date_validation"):
+                cdc["date_validation"] = today()
+            if op["statut"] == "brouillon":
+                cdc["date_validation"] = None
+                cdc["valide_par"] = ""
+        if "date_validation" in op:
+            cdc["date_validation"] = op["date_validation"] or None
+        cdc["date_maj"] = today()
+        return f"Cahier des charges mis à jour — « {ch['titre']} »"
+
+    if name == "cdc_section_add":
+        ch, cdc = _cdc(store, op["chantier_id"])
+        titre = (op.get("titre") or "Nouvelle section").strip() or "Nouvelle section"
+        cdc["sections"].append({"id": _uid("sec_"), "titre": titre, "corps": op.get("corps") or ""})
+        cdc["date_maj"] = today()
+        return f"Section « {titre} » ajoutée au cahier des charges"
+
+    if name == "cdc_section_update":
+        ch, cdc = _cdc(store, op["chantier_id"])
+        sec = _sub(cdc["sections"], op["section_id"], "Section")
+        if "titre" in op and op["titre"] is not None:
+            sec["titre"] = str(op["titre"]).strip()
+        if "corps" in op and op["corps"] is not None:
+            sec["corps"] = op["corps"]
+        cdc["date_maj"] = today()
+        return "Section mise à jour"
+
+    if name == "cdc_section_remove":
+        ch, cdc = _cdc(store, op["chantier_id"])
+        sec = _sub(cdc["sections"], op["section_id"], "Section")
+        cdc["sections"] = [x for x in cdc["sections"] if x["id"] != op["section_id"]]
+        cdc["date_maj"] = today()
+        return f"Section « {sec['titre']} » supprimée"
+
+    if name == "cdc_section_move":
+        ch, cdc = _cdc(store, op["chantier_id"])
+        secs = cdc["sections"]
+        idx = next((i for i, x in enumerate(secs) if x["id"] == op["section_id"]), -1)
+        if idx < 0:
+            raise ValueError("Section introuvable")
+        j = idx + (1 if (op.get("dir", 1) or 1) > 0 else -1)
+        if 0 <= j < len(secs):
+            secs[idx], secs[j] = secs[j], secs[idx]
+        return "Section déplacée"
+
+    if name == "cdc_partie_add":
+        ch, cdc = _cdc(store, op["chantier_id"])
+        nom = (op.get("nom") or "").strip()
+        if not nom:
+            raise ValueError("Nom de la partie prenante requis.")
+        cdc["parties_prenantes"].append({"id": _uid("pp_"), "nom": nom, "role": (op.get("role") or "").strip()})
+        return f"Partie prenante ajoutée : {nom}"
+
+    if name == "cdc_partie_remove":
+        ch, cdc = _cdc(store, op["chantier_id"])
+        cdc["parties_prenantes"] = [x for x in cdc["parties_prenantes"] if x["id"] != op["partie_id"]]
+        return "Partie prenante retirée"
+
+    if name == "cdc_revise":
+        ch, cdc = _cdc(store, op["chantier_id"])
+        objet = (op.get("objet") or "").strip()
+        if not objet:
+            raise ValueError("Décris l'objet de la révision.")
+        auteur = (op.get("auteur") or cdc.get("redacteur") or "").strip()
+        cur = cdc["indice"]
+        rec = next((r for r in cdc["revisions"] if r["indice"] == cur), None)
+        if rec is not None and rec.get("snapshot") is None:
+            # fige le contenu de l'indice courant avant de passer au suivant
+            rec["snapshot"] = {
+                "titre": cdc.get("titre", ""), "reference": cdc.get("reference", ""),
+                "statut": cdc.get("statut"), "valide_par": cdc.get("valide_par", ""),
+                "date_validation": cdc.get("date_validation"),
+                "sections": [dict(s) for s in cdc.get("sections", [])],
+            }
+        nxt = _next_indice(cur)
+        cdc["indice"] = nxt
+        cdc["statut"] = "brouillon"          # nouvel indice -> validation réinitialisée
+        cdc["valide_par"] = ""
+        cdc["date_validation"] = None
+        cdc["date_maj"] = today()
+        cdc["revisions"].append({"id": _uid("rev_"), "indice": nxt, "date": today(),
+                                 "auteur": auteur, "objet": objet, "snapshot": None})
+        return f"Révision {nxt} émise — « {ch['titre']} » (validation réinitialisée)"
 
     if name == "set_settings":
         store.setdefault("settings", {}).update(op.get("settings") or {})

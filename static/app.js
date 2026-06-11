@@ -105,14 +105,15 @@ async function mutate(op){
   if(d.error){ alert(d.error); return; }
   STORE = d.store; TODAY = d.today;
   if(STORE.settings) SETTINGS = {...SETTINGS, ...STORE.settings};
-  if(CUR && chById(CUR)) renderPage();
+  if($("cdc").style.display !== "none" && CUR_CDC && chById(CUR_CDC)) renderCdc();
+  else if(CUR && chById(CUR)) renderPage();
   else { CUR = null; showView(VIEW); }
 }
 
 // ---- vues ----------------------------------------------------------------
 let VIEW = "board";
 function showView(v){
-  if(["board", "charge", "people", "dash", "contacts", "risques", "planning", "activite"].includes(v)) VIEW = v;
+  if(["board", "charge", "people", "dash", "contacts", "risques", "planning", "activite", "cahiers"].includes(v)) VIEW = v;
   $("board").style.display = v === "board" ? "flex" : "none";
   $("planning").style.display = v === "planning" ? "block" : "none";
   $("dash").style.display = v === "dash" ? "block" : "none";
@@ -121,6 +122,8 @@ function showView(v){
   $("risques").style.display = v === "risques" ? "block" : "none";
   $("people").style.display = v === "people" ? "grid" : "none";
   $("contacts").style.display = v === "contacts" ? "block" : "none";
+  $("cahiers").style.display = v === "cahiers" ? "block" : "none";
+  $("cdc").style.display = v === "cdc" ? "block" : "none";
   $("page").style.display = v === "page" ? "block" : "none";
   document.querySelectorAll(".nav button").forEach(b => {
     const grp = b.dataset.group ? b.dataset.group.split(",") : (b.dataset.v ? [b.dataset.v] : []);
@@ -135,6 +138,8 @@ function showView(v){
   if(v === "risques") renderRisques();
   if(v === "people") renderPeople();
   if(v === "contacts") renderContacts();
+  if(v === "cahiers") renderCahiers();
+  if(v === "cdc") renderCdc();
 }
 function setView(v){ CUR = null; showView(v); }
 
@@ -647,6 +652,8 @@ function renderBoard(){
           : `<span class="bdg b-wait">⌛ En attente · ${esc(names)}</span>`); }
       if(col.key === "recette"){ const it = currentIter(c), or = openRetours(c).length;
         bdg.push(`<span class="bdg b-rec">↻ Recette · it.${it ? it.num : 1}${or ? ` · ${or} retour${or > 1 ? "s" : ""}` : ""}</span>`); }
+      if(c.cdc){ const sc = CDC_ST[c.cdc.statut] || CDC_ST.brouillon;
+        bdg.push(`<span class="bdg b-cdc ${sc.cls}">📄 CdC ${sc.lbl}</span>`); }
       if(bdg.length) h += `<div class="c-badges">${bdg.join("")}</div>`;
       card.innerHTML = h; body.appendChild(card);
     });
@@ -886,6 +893,8 @@ function renderPage(){
 
   h += card("Objectif", `<textarea onblur="mutate({op:'update_chantier',id:'${c.id}',objectif:this.value})" ` +
             `placeholder="Décris l'objectif…">${esc(c.objectif || "")}</textarea>`);
+
+  h += card("Cahier des charges", cdcSummary(c));
 
   h += card("Avancement", `<div class="ring-wrap">${donut(p)}<div class="ring-meta">` +
             `<div><b>${c.taches.filter(t => t.done).length}</b> / ${c.taches.length} tâches</div>` +
@@ -1773,6 +1782,237 @@ function renderActivite(){
     h += `</div>`;
   });
   $("activite").innerHTML = h;
+}
+
+// ======================================================================== //
+//  Cahier des charges — document libre + révisions (indices) + validation
+// ======================================================================== //
+let CUR_CDC = null;   // id du chantier dont le CdC est ouvert dans l'éditeur
+const CDC_ST = {
+  brouillon:     {lbl: "Brouillon",     cls: "cdc-draft"},
+  en_validation: {lbl: "En validation", cls: "cdc-review"},
+  valide:        {lbl: "Validé",        cls: "cdc-valid"},
+  obsolete:      {lbl: "Obsolète",      cls: "cdc-obsolete"},
+};
+const CDC_STATUTS_ARR = [["brouillon", "Brouillon"], ["en_validation", "En validation"],
+                         ["valide", "Validé"], ["obsolete", "Obsolète"]];
+
+function openCdc(cid){ CUR_CDC = cid; showView("cdc"); window.scrollTo(0, 0); }
+function backFromCdc(){ if(CUR_CDC) openChantier(CUR_CDC); else setView("cahiers"); }
+
+// Carte de synthèse affichée sur la page chantier
+function cdcSummary(c){
+  if(!c.cdc)
+    return `<div class="empty">Aucun cahier des charges.</div>` +
+      `<button class="btn sm primary" onclick="cdcCreate('${c.id}')">+ Créer le cahier des charges</button>`;
+  const cdc = c.cdc, st = CDC_ST[cdc.statut] || CDC_ST.brouillon;
+  let h = `<div class="cdc-sum"><span class="cdc-badge ${st.cls}">${st.lbl}</span> ` +
+    `<span class="muted">indice ${esc(cdc.indice)} · maj ${fmt(cdc.date_maj)}</span></div>`;
+  if(cdc.reference) h += `<div class="kv"><span class="k">Réf.</span><span class="v">${esc(cdc.reference)}</span></div>`;
+  if(cdc.statut === "valide" && cdc.date_validation)
+    h += `<div class="kv"><span class="k">Validé</span><span class="v">${fmt(cdc.date_validation)}${cdc.valide_par ? ` · ${esc(cdc.valide_par)}` : ""}</span></div>`;
+  if(cdc.parties_prenantes.length)
+    h += `<div class="kv"><span class="k">Parties</span><span class="v">${cdc.parties_prenantes.length} partie(s) prenante(s)</span></div>`;
+  h += `<button class="btn sm primary" onclick="openCdc('${c.id}')">Ouvrir le cahier des charges</button>`;
+  return h;
+}
+
+function cdcHeader(c, cdc){
+  let h = `<div class="cdc-top">`;
+  h += `<button class="ghost" onclick="backFromCdc()">← ${esc(c.titre)}</button>`;
+  h += `<div class="cdc-toptitle"><div class="d-status">Cahier des charges</div>` +
+       `<h2 class="pg-title">${esc((cdc && cdc.titre) || c.titre)}</h2></div>`;
+  h += `<div class="grow"></div>`;
+  if(cdc){
+    h += `<button class="ghost" onclick="cdcRevise('${c.id}')" title="Figer l'indice courant et passer à l'indice suivant (la validation est réinitialisée)">Émettre une révision</button>`;
+    h += `<button class="ghost" onclick="cdcPrint()" title="Imprimer ou enregistrer en PDF">Imprimer / PDF</button>`;
+    h += `<span class="danger-link" onclick="cdcDelete('${c.id}')">Supprimer</span>`;
+  }
+  h += `</div>`;
+  return h;
+}
+
+function cdcInput(c, field, label, val, ph, full){
+  return `<label class="cdc-f${full ? " full" : ""}"><span class="cdc-fl">${label}</span>` +
+    `<input value="${esc(val || "")}" placeholder="${esc(ph || "")}" onblur="cdcField('${c.id}','${field}',this.value)"></label>`;
+}
+
+function renderCdc(){
+  const c = chById(CUR_CDC);
+  if(!c){ setView("cahiers"); return; }
+  if(!c.cdc){
+    $("cdc").innerHTML = cdcHeader(c, null) +
+      `<div class="cdc-doc"><div class="cdc-card"><div class="empty">Ce chantier n'a pas encore de cahier des charges.</div>` +
+      `<button class="btn primary" onclick="cdcCreate('${c.id}')">+ Créer le cahier des charges</button></div></div>`;
+    return;
+  }
+  const cdc = c.cdc, st = CDC_ST[cdc.statut] || CDC_ST.brouillon;
+  let h = cdcHeader(c, cdc);
+  h += `<div class="cdc-doc">`;
+
+  // En-tête de document : méta + validation
+  h += `<div class="cdc-card"><div class="cdc-fields">`;
+  h += cdcInput(c, "reference", "Référence", cdc.reference, "ex. CDC-2026-001");
+  h += cdcInput(c, "redacteur", "Rédigé par", cdc.redacteur, "");
+  h += cdcInput(c, "titre", "Titre du document", cdc.titre, "", true);
+  h += cdcInput(c, "lien", "Lien du document maître (Word/PDF, SharePoint, réseau…)", cdc.lien, "https://…  ou  \\\\serveur\\partage\\…", true);
+  h += `</div>`;
+
+  h += `<div class="cdc-valid-block">`;
+  h += `<div class="cdc-vrow"><span class="cdc-badge ${st.cls} big">${st.lbl}</span>` +
+       `<label class="lab">Statut</label><select class="sel" onchange="cdcStatut('${c.id}',this.value)">` +
+       CDC_STATUTS_ARR.map(([k, l]) => `<option value="${k}" ${cdc.statut === k ? "selected" : ""}>${l}</option>`).join("") + `</select>` +
+       `<span class="muted">indice ${esc(cdc.indice)} · mis à jour le ${fmt(cdc.date_maj)}</span></div>`;
+  if(cdc.statut === "valide"){
+    h += `<div class="cdc-vrow"><label class="lab">Validé par</label>` +
+      `<input value="${esc(cdc.valide_par || "")}" placeholder="nom / instance" onblur="cdcField('${c.id}','valide_par',this.value)">` +
+      `<label class="lab">le</label><input type="date" value="${cdc.date_validation || ""}" onchange="cdcField('${c.id}','date_validation',this.value)"></div>`;
+  }
+  h += `<div class="cdc-pp"><div class="lab">Parties prenantes <span class="add" onclick="cdcAddPartie('${c.id}')">+ ajouter</span></div>`;
+  h += (cdc.parties_prenantes.length ? cdc.parties_prenantes.map(pp =>
+      `<div class="row-line"><span>${esc(pp.nom)}${pp.role ? ` <span class="muted">· ${esc(pp.role)}</span>` : ""}</span>` +
+      `<span class="del" onclick="mutate({op:'cdc_partie_remove',chantier_id:'${c.id}',partie_id:'${pp.id}'})">×</span></div>`).join("")
+      : `<div class="empty">Personne pour l'instant.</div>`);
+  h += `</div></div>`;   // cdc-pp + cdc-valid-block
+  h += `</div>`;         // cdc-card
+
+  // Document libre : sections rédigeables
+  h += `<div class="cdc-sections">`;
+  cdc.sections.forEach((sec, i) => {
+    h += `<section class="cdc-sec">` +
+      `<div class="cdc-sec-h"><span class="cdc-sec-n">${i + 1}.</span>` +
+      `<input class="cdc-sec-titre" value="${esc(sec.titre)}" placeholder="Titre de la section" onblur="cdcSectionField('${c.id}','${sec.id}','titre',this.value)">` +
+      `<span class="cdc-sec-acts"><a onclick="mutate({op:'cdc_section_move',chantier_id:'${c.id}',section_id:'${sec.id}',dir:-1})" title="Monter">↑</a>` +
+      `<a onclick="mutate({op:'cdc_section_move',chantier_id:'${c.id}',section_id:'${sec.id}',dir:1})" title="Descendre">↓</a>` +
+      `<a class="danger" onclick="cdcRemoveSection('${c.id}','${sec.id}')" title="Supprimer la section">×</a></span></div>` +
+      `<textarea class="cdc-sec-corps" placeholder="Rédige cette section…" onblur="cdcSectionField('${c.id}','${sec.id}','corps',this.value)">${esc(sec.corps)}</textarea>` +
+      `</section>`;
+  });
+  h += `<button class="btn sm" onclick="cdcAddSection('${c.id}')">+ Ajouter une section</button>`;
+  h += `</div>`;
+
+  // Suivi des modifications (table d'indices)
+  h += `<div class="cdc-card"><div class="cdc-rev-h">Suivi des modifications — révisions</div>`;
+  h += `<table class="ptable cdc-rev"><thead><tr><th>Indice</th><th>Date</th><th>Auteur</th><th>Objet de la modification</th><th></th></tr></thead><tbody>`;
+  cdc.revisions.slice().reverse().forEach(r => {
+    const isCur = r.indice === cdc.indice;
+    h += `<tr><td><b>${esc(r.indice)}</b>${isCur ? ` <span class="cdc-cur">courant</span>` : ""}</td>` +
+      `<td>${fmt(r.date)}</td><td>${esc(r.auteur || "—")}</td><td>${esc(r.objet || "")}</td>` +
+      `<td class="pacts">${(isCur || r.snapshot) ? `<a onclick="cdcViewRevision('${c.id}','${r.id}')">Voir</a>` : ""}</td></tr>`;
+  });
+  h += `</tbody></table><div class="muted small" style="margin-top:6px">« Émettre une révision » fige l'indice courant et passe au suivant (la validation repart à zéro).</div></div>`;
+
+  h += `</div>`;   // cdc-doc
+  $("cdc").innerHTML = h;
+}
+
+// ---- actions CdC ----
+async function cdcCreate(cid){ await mutate({op: "cdc_create", chantier_id: cid}); openCdc(cid); }
+function cdcField(cid, field, val){ mutate({op: "cdc_update", chantier_id: cid, [field]: val}); }
+function cdcStatut(cid, statut){ mutate({op: "cdc_update", chantier_id: cid, statut}); }
+function cdcSectionField(cid, sid, field, val){ mutate({op: "cdc_section_update", chantier_id: cid, section_id: sid, [field]: val}); }
+function cdcAddSection(cid){
+  const t = prompt("Titre de la nouvelle section :", "");
+  if(t === null) return;
+  mutate({op: "cdc_section_add", chantier_id: cid, titre: t.trim() || "Nouvelle section"});
+}
+function cdcRemoveSection(cid, sid){
+  if(confirm("Supprimer cette section ?")) mutate({op: "cdc_section_remove", chantier_id: cid, section_id: sid});
+}
+function cdcAddPartie(cid){
+  const n = prompt("Partie prenante (nom) :"); if(!n || !n.trim()) return;
+  const r = (prompt("Rôle (ex. Approbateur, Vérificateur, Destinataire) :") || "").trim();
+  mutate({op: "cdc_partie_add", chantier_id: cid, nom: n.trim(), role: r});
+}
+function cdcRevise(cid){
+  const o = prompt("Objet de la révision (qu'est-ce qui change ?) :");
+  if(o === null) return;
+  if(!o.trim()){ alert("L'objet de la révision est requis."); return; }
+  const a = (prompt("Auteur de la révision :", "") || "").trim();
+  mutate({op: "cdc_revise", chantier_id: cid, objet: o.trim(), auteur: a});
+}
+async function cdcDelete(cid){
+  if(!confirm("Supprimer définitivement le cahier des charges de ce chantier ?")) return;
+  await mutate({op: "cdc_delete", chantier_id: cid});
+  openChantier(cid);
+}
+
+// Vue lecture seule d'une révision (snapshot ou contenu courant)
+function cdcViewRevision(cid, rid){
+  const c = chById(cid); if(!c || !c.cdc) return;
+  const cdc = c.cdc, r = cdc.revisions.find(x => x.id === rid); if(!r) return;
+  const snap = r.snapshot || {titre: cdc.titre, reference: cdc.reference, sections: cdc.sections,
+                              valide_par: cdc.valide_par, date_validation: cdc.date_validation};
+  let h = `<div class="cdc-modal-bg" onclick="closeCdcModal()"><div class="cdc-modal" onclick="event.stopPropagation()">`;
+  h += `<div class="cdc-modal-h"><b>Indice ${esc(r.indice)}</b> · ${fmt(r.date)}${r.auteur ? ` · ${esc(r.auteur)}` : ""}` +
+       `<span class="add" onclick="closeCdcModal()">Fermer ✕</span></div>`;
+  h += `<div class="cdc-modal-b"><h1 class="cdc-h1">${esc(snap.titre || c.titre)}</h1>` +
+       `<div class="cdc-sub">${snap.reference ? esc(snap.reference) + " · " : ""}Indice ${esc(r.indice)} · ${fmt(r.date)}</div>`;
+  (snap.sections || []).forEach((s, i) => {
+    h += `<h3 class="cdc-h3">${i + 1}. ${esc(s.titre)}</h3>` +
+      `<div class="cdc-corps">${(esc(s.corps || "").replace(/\n/g, "<br>")) || "<span class='empty'>—</span>"}</div>`;
+  });
+  h += `<div class="cdc-objet muted">Objet de cette révision : ${esc(r.objet || "—")}</div>`;
+  h += `</div></div></div>`;
+  const m = document.createElement("div"); m.id = "cdcModal"; m.innerHTML = h; document.body.appendChild(m);
+}
+function closeCdcModal(){ const m = $("cdcModal"); if(m) m.remove(); }
+
+// Document imprimable (→ PDF via le navigateur)
+function cdcDocHTML(c){
+  const cdc = c.cdc;
+  const secs = cdc.sections.map((s, i) =>
+    `<h2>${i + 1}. ${esc(s.titre)}</h2><div class="corps">${esc(s.corps || "").replace(/\n/g, "<br>")}</div>`).join("");
+  const pp = cdc.parties_prenantes.map(p => `<li>${esc(p.nom)}${p.role ? ` — ${esc(p.role)}` : ""}</li>`).join("");
+  const revs = cdc.revisions.map(r =>
+    `<tr><td>${esc(r.indice)}</td><td>${fmt(r.date)}</td><td>${esc(r.auteur || "")}</td><td>${esc(r.objet || "")}</td></tr>`).join("");
+  const stLbl = (CDC_ST[cdc.statut] || CDC_ST.brouillon).lbl;
+  const meta = `${cdc.reference ? esc(cdc.reference) + " · " : ""}Indice ${esc(cdc.indice)} · ${stLbl} · Mis à jour le ${fmt(cdc.date_maj)}` +
+    `${cdc.redacteur ? ` · Rédigé par ${esc(cdc.redacteur)}` : ""}` +
+    `${cdc.statut === "valide" && cdc.date_validation ? ` · Validé le ${fmt(cdc.date_validation)}${cdc.valide_par ? ` par ${esc(cdc.valide_par)}` : ""}` : ""}`;
+  return `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>${esc(cdc.titre || c.titre)}</title>` +
+    `<style>@page{margin:2cm}body{font-family:Inter,"Segoe UI",Arial,sans-serif;color:#111;line-height:1.55;max-width:820px;margin:0 auto;padding:24px}` +
+    `h1{font-size:24px;margin:0 0 4px;letter-spacing:-.02em}.meta{color:#555;font-size:12.5px;margin-bottom:18px;border-bottom:2px solid #111;padding-bottom:12px}` +
+    `h2{font-size:15px;margin:18px 0 4px;border-bottom:1px solid #e5e7eb;padding-bottom:3px}.corps{white-space:pre-wrap;font-size:13px;margin-bottom:8px}` +
+    `table{border-collapse:collapse;width:100%;font-size:12px;margin-top:6px}th,td{border:1px solid #ccc;padding:4px 8px;text-align:left}` +
+    `.vis{margin:16px 0;font-size:13px}ul{margin:4px 0}.lien{font-size:12px;color:#374151}</style></head><body>` +
+    `<h1>${esc(cdc.titre || c.titre)}</h1><div class="meta">${meta}</div>` +
+    (cdc.lien ? `<div class="lien"><b>Document maître :</b> ${esc(cdc.lien)}</div>` : "") +
+    secs +
+    (pp ? `<div class="vis"><b>Parties prenantes</b><ul>${pp}</ul></div>` : "") +
+    `<div class="vis"><b>Suivi des modifications</b><table><thead><tr><th>Indice</th><th>Date</th><th>Auteur</th><th>Objet</th></tr></thead><tbody>${revs}</tbody></table></div>` +
+    `</body></html>`;
+}
+function cdcPrint(){
+  const c = chById(CUR_CDC); if(!c || !c.cdc) return;
+  const w = window.open("", "_blank");
+  if(!w){ alert("Autorise les pop-ups pour imprimer / exporter en PDF."); return; }
+  w.document.write(cdcDocHTML(c)); w.document.close(); w.focus();
+  setTimeout(() => { try { w.print(); } catch(e){} }, 350);
+}
+
+// Vue d'ensemble : tous les cahiers des charges
+function renderCahiers(){
+  if(!STORE.chantiers.length){ $("cahiers").innerHTML = `<div class="ch-h">Cahiers des charges</div><div class="empty">Aucun chantier.</div>`; return; }
+  const n = STORE.chantiers.filter(c => c.cdc).length;
+  let h = `<div class="ch-h">Cahiers des charges <span class="muted small">· ${n}/${STORE.chantiers.length} chantier(s)</span></div>`;
+  h += `<table class="ptable"><thead><tr><th>Chantier</th><th>Référence</th><th>Indice</th><th>Statut</th><th>Mis à jour</th><th>Validé</th><th></th></tr></thead><tbody>`;
+  STORE.chantiers.forEach(c => {
+    if(c.cdc){
+      const cdc = c.cdc, st = CDC_ST[cdc.statut] || CDC_ST.brouillon;
+      h += `<tr class="cdc-clk" onclick="openCdc('${c.id}')"><td><b>${esc(c.titre)}</b></td>` +
+        `<td>${esc(cdc.reference || "—")}</td><td>${esc(cdc.indice)}</td>` +
+        `<td><span class="cdc-badge ${st.cls}">${st.lbl}</span></td>` +
+        `<td>${fmt(cdc.date_maj)}</td>` +
+        `<td>${cdc.statut === "valide" && cdc.date_validation ? fmt(cdc.date_validation) + (cdc.valide_par ? ` · ${esc(cdc.valide_par)}` : "") : "—"}</td>` +
+        `<td class="pacts"><a onclick="event.stopPropagation();openCdc('${c.id}')">Ouvrir</a></td></tr>`;
+    } else {
+      h += `<tr><td><b>${esc(c.titre)}</b></td><td colspan="5" class="muted">Pas de cahier des charges</td>` +
+        `<td class="pacts"><a onclick="cdcCreate('${c.id}')">+ Créer</a></td></tr>`;
+    }
+  });
+  h += `</tbody></table>`;
+  $("cahiers").innerHTML = h;
 }
 
 loadStore();
