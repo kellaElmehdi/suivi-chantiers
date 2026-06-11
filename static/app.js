@@ -270,7 +270,7 @@ function dkpi(label, val, sub, cls, onclick){
 function dsection(t){ return `<div class="ch-h">${t}</div>`; }
 function topPersAll(m){ return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 8); }
 function chartBox(title, svg){ return `<div class="cardx"><div class="cardx-h">${title}</div><div class="cardx-b">${svg}</div></div>`; }
-const STATUT_COLOR = {todo: "var(--gray)", doing: "var(--blue)", block: "var(--red)", recette: "#7a5ea8", done: "var(--green)"};
+const STATUT_COLOR = {todo: "var(--gray)", doing: "var(--blue)", block: "var(--red)", recette: "#8b5cf6", done: "var(--green)"};
 
 function hbar(rows, opts){   // barres horizontales [{label,value,color,disp}]
   opts = opts || {};
@@ -343,7 +343,7 @@ function thresholdBar(value, limit, max, unit, over){   // jauge linéaire avec 
   const fill = Math.min(value, max) / max, lm = limit / max;
   let g = `<svg width="${W}" height="58">`;
   g += `<text x="${padL}" y="18" font-size="20" font-weight="700" fill="${over ? "var(--red)" : "var(--ink)"}">${value}${unit}</text>`;
-  g += `<rect x="${padL}" y="${y}" width="${barW}" height="${bh}" fill="#eee" stroke="var(--line-soft)"/>`;
+  g += `<rect x="${padL}" y="${y}" width="${barW}" height="${bh}" fill="#f3f4f6" stroke="var(--line-soft)"/>`;
   g += `<rect x="${padL}" y="${y}" width="${(barW * fill).toFixed(1)}" height="${bh}" fill="${over ? "var(--red)" : "var(--blue)"}"/>`;
   if(limit > 0){
     const lx = padL + barW * lm;
@@ -374,10 +374,10 @@ function gauge(value, max, sub, over, unit){   // jauge radiale (demi-cercle)
 }
 
 function heatColor(cnt, cap){
-  if(cnt <= 0) return "#f0f0f0";
+  if(cnt <= 0) return "#f3f4f6";
   if(cnt > cap) return "var(--red)";
   const t = cnt / Math.max(1, cap);
-  return t <= 0.34 ? "#cfe0ef" : t <= 0.67 ? "#86b0d6" : "var(--blue)";
+  return t <= 0.34 ? "#dbeafe" : t <= 0.67 ? "#93c5fd" : "var(--blue)";
 }
 function heatmapCalendar(cd){   // calendrier façon GitHub de la charge quotidienne
   if(!cd.days.length) return `<div class="empty">—</div>`;
@@ -399,8 +399,8 @@ function heatmapCalendar(cd){   // calendrier façon GitHub de la charge quotidi
   const wdl = ["L", "M", "M", "J", "V", "S", "D"]; let lab = "";
   for(let i = 0; i < rowsN; i++) lab += `<text x="${padL - 5}" y="${padT + i * (cell + gap) + 11}" font-size="8" fill="var(--faint)" text-anchor="end">${wdl[i]}</text>`;
   return `<div class="scrollx"><svg width="${W}" height="${H}">${lab}${cells}</svg></div>` +
-    `<div class="legend"><span>peu</span><span><i class="sq" style="background:#cfe0ef;border-color:#cfe0ef"></i></span>` +
-    `<span><i class="sq" style="background:#86b0d6;border-color:#86b0d6"></i></span><span><i class="sq" style="background:var(--blue);border-color:var(--blue)"></i></span>` +
+    `<div class="legend"><span>peu</span><span><i class="sq" style="background:#dbeafe;border-color:#dbeafe"></i></span>` +
+    `<span><i class="sq" style="background:#93c5fd;border-color:#93c5fd"></i></span><span><i class="sq" style="background:var(--blue);border-color:var(--blue)"></i></span>` +
     `<span><i class="sq" style="background:var(--red);border-color:var(--red)"></i>&gt;${cd.cap}</span><span>chargé</span></div>`;
 }
 
@@ -1107,7 +1107,7 @@ function ganttSVG(c, S){
   const x = d => labelW + d * dayW;
   let g = `<div class="scrollx"><svg width="${W}" height="${H}" class="gantt">`;
   g += `<defs><marker id="ah" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">` +
-       `<path d="M0,0 L6,3 L0,6 Z" fill="#b9b6ad"/></marker></defs>`;
+       `<path d="M0,0 L6,3 L0,6 Z" fill="#9ca3af"/></marker></defs>`;
   const step = days > 40 ? 5 : 1;
   for(let d = 0; d <= days; d += step){
     g += `<line x1="${x(d)}" y1="${top}" x2="${x(d)}" y2="${H - 12}" stroke="var(--line-soft)"/>`;
@@ -1120,7 +1120,7 @@ function ganttSVG(c, S){
       const j = tasks.indexOf(p); if(j < 0) return;
       const x1 = x(S.fc[p].ffIdx), y1 = top + j * rowH + rowH / 2;
       const x2 = x(S.fc[id].fsIdx), y2 = top + i * rowH + rowH / 2;
-      g += `<path d="M${x1},${y1} C${x1 + 12},${y1} ${x2 - 12},${y2} ${x2},${y2}" fill="none" stroke="#cdcabf" stroke-width="1" marker-end="url(#ah)"/>`;
+      g += `<path d="M${x1},${y1} C${x1 + 12},${y1} ${x2 - 12},${y2} ${x2},${y2}" fill="none" stroke="#d1d5db" stroke-width="1" marker-end="url(#ah)"/>`;
     });
   });
   // barres
@@ -1131,9 +1131,9 @@ function ganttSVG(c, S){
     if(hasBl && blById[id]){
       const bs = workOffset(S.start, blById[id].start), be = workOffset(S.start, blById[id].end);
       if(t.is_milestone){
-        g += `<path d="M${x(bs)},${y0 + 4} L${x(bs) + 5},${y0 + 9} L${x(bs)},${y0 + 14} L${x(bs) - 5},${y0 + 9} Z" fill="none" stroke="#c9c6bc"/>`;
+        g += `<path d="M${x(bs)},${y0 + 4} L${x(bs) + 5},${y0 + 9} L${x(bs)},${y0 + 14} L${x(bs) - 5},${y0 + 9} Z" fill="none" stroke="#d1d5db"/>`;
       } else {
-        g += `<rect x="${x(bs)}" y="${y0 + 1}" width="${Math.max(2, (be - bs) * dayW)}" height="6" rx="1" fill="#e3e0d7"/>`;
+        g += `<rect x="${x(bs)}" y="${y0 + 1}" width="${Math.max(2, (be - bs) * dayW)}" height="6" rx="1" fill="#e5e7eb"/>`;
       }
     }
     const y = hasBl ? y0 + 9 : y0;
@@ -1165,7 +1165,7 @@ function pertSVG(c, S){
   depths.forEach((d, ci) => cols[d].forEach((id, ri) => pos[id] = {x: padX + ci * COLW, y: padY + ri * ROWH}));
   let g = `<div class="scrollx"><svg width="${W}" height="${H}" class="pert">`;
   g += `<defs><marker id="ap" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">` +
-       `<path d="M0,0 L6,3 L0,6 Z" fill="#9d9a90"/></marker>` +
+       `<path d="M0,0 L6,3 L0,6 Z" fill="#9ca3af"/></marker>` +
        `<marker id="apc" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">` +
        `<path d="M0,0 L6,3 L0,6 Z" fill="var(--red)"/></marker></defs>`;
   // arcs
@@ -1175,7 +1175,7 @@ function pertSVG(c, S){
     const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2;
     const crit = S.sched[p].critical && S.sched[id].critical;
     g += `<path d="M${x1},${y1} C${x1 + 28},${y1} ${x2 - 28},${y2} ${x2},${y2}" fill="none" ` +
-         `stroke="${crit ? "var(--red)" : "#bdbab0"}" stroke-width="${crit ? 2 : 1}" marker-end="url(#${crit ? "apc" : "ap"})"/>`;
+         `stroke="${crit ? "var(--red)" : "#d1d5db"}" stroke-width="${crit ? 2 : 1}" marker-end="url(#${crit ? "apc" : "ap"})"/>`;
   }));
   // noeuds
   tasks.forEach(id => {
@@ -1343,7 +1343,7 @@ function progressCurve(c, S){
   g += `<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${y(0)}" stroke="var(--line-soft)"/>`;
   g += `<text x="6" y="${y(total) + 4}" font-size="9" fill="var(--faint)">${total}</text>`;
   g += `<text x="10" y="${y(0) + 4}" font-size="9" fill="var(--faint)">0</text>`;
-  g += `<line x1="${padL}" y1="${y(0)}" x2="${x(idealEnd)}" y2="${y(total)}" stroke="#cdcabf" stroke-dasharray="4 3"/>`;
+  g += `<line x1="${padL}" y1="${y(0)}" x2="${x(idealEnd)}" y2="${y(total)}" stroke="#d1d5db" stroke-dasharray="4 3"/>`;
   const tIdx = x(TODAY);
   if(daysBetween(start, TODAY) >= 0) g += `<line x1="${tIdx}" y1="${padT}" x2="${tIdx}" y2="${y(0)}" stroke="var(--red)" stroke-dasharray="3 3"/>`;
   g += `<polyline points="${pts}" fill="none" stroke="var(--ink)" stroke-width="2"/>`;
@@ -1665,7 +1665,7 @@ function portfolioGantt(){
     const st = c.date_debut || S.start, en = S.fend;
     const blocked = colOf(c) === "block";
     const col = c.statut === "done" ? "var(--green)" : blocked ? "var(--red)"
-              : c.statut === "recette" ? "#7a5ea8" : "var(--blue)";
+              : c.statut === "recette" ? "#8b5cf6" : "var(--blue)";
     g += `<text x="${labelW - 8}" y="${y + 11}" font-size="11" text-anchor="end" fill="var(--ink)" ` +
          `style="cursor:pointer" onclick="openChantier('${c.id}')">${esc(c.titre.slice(0, 30))}</text>`;
     const bx = x(st), bw = Math.max(3, x(en) - bx);
@@ -1679,7 +1679,7 @@ function portfolioGantt(){
   });
   g += `</svg></div><div class="legend">` +
     `<span><i class="sq blue"></i>en cours</span><span><i class="sq red"></i>bloqué</span>` +
-    `<span><i class="sq" style="background:#7a5ea8;border-color:#7a5ea8"></i>recette</span>` +
+    `<span><i class="sq" style="background:#8b5cf6;border-color:#8b5cf6"></i>recette</span>` +
     `<span><i class="sq green"></i>terminé</span><span><i class="dia"></i>échéance (rouge = dépassée)</span></div>`;
   return g;
 }

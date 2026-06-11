@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Suivi des chantiers</title>
+<!-- Inter (corps) + Manrope (titres, substitut de Cal Sans). Réseau optionnel :
+     si hors-ligne, on retombe sur la pile système définie dans le CSS. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -58,6 +63,13 @@
     <div class="page" id="page" style="display:none"></div>
   </div>
 </div>
+
+<footer class="app-footer">
+  <span class="fdot"></span><span class="fbrand">Suivi</span>
+  <span>· pilotage des chantiers</span>
+  <span class="fgrow"></span>
+  <span>Tout en local · données dans <code>data/store.json</code></span>
+</footer>
 
 <script src="/static/app.js"></script>
 </body>
