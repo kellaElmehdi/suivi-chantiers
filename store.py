@@ -28,6 +28,7 @@ LIV_STATUTS = {"attente", "recu", "partiel", "annule"}
 RETOUR_STATUTS = {"a_traiter", "en_cours", "fait", "rejete"}
 RISQUE_STATUTS = {"ouvert", "maitrise", "avere", "clos"}   # cote / maitrise / avere / clos
 CDC_STATUTS = {"brouillon", "en_validation", "valide", "obsolete"}   # cycle de vie d'un cahier des charges
+RAPPEL_FREQS = {"jour", "semaine", "mois", "ponctuel"}              # recurrence d'une routine/rappel
 
 
 def _uid(prefix: str) -> str:
@@ -44,6 +45,57 @@ def _clamp15(v, default=3) -> int:
 
 def today() -> str:
     return date.today().isoformat()
+
+
+def _hm(dt: datetime | None = None) -> str:
+    return (dt or datetime.now()).strftime("%H:%M")
+
+
+# --------------------------------------------------------------------------- #
+# Suivi du temps (chrono unifié) : une session = une plage de travail horodatée
+# sur une tâche, une routine, ou libre. Un seul chrono actif (fin=None) à la fois.
+# --------------------------------------------------------------------------- #
+def _clock_active(store: dict) -> list:
+    return [s for s in store.get("timelog", []) if s.get("fin") is None]
+
+
+def _close_session(store: dict, s: dict) -> None:
+    # ferme la session ; on borne à la fin de journée de travail (chrono oublié) :
+    # jour antérieur -> fin de journée ; aujourd'hui -> min(maintenant, fin de journée).
+    jf = store.get("settings", {}).get("jour_fin", "17:51")
+    now = _hm()
+    s["fin"] = jf if (s.get("date") != today() or now > jf) else now
+
+
+def _clock_close_all(store: dict) -> None:
+    for s in _clock_active(store):
+        _close_session(store, s)
+
+
+def _clock_close_tache(store: dict, tache_id: str) -> None:
+    for s in _clock_active(store):
+        if s.get("tache_id") == tache_id:
+            _close_session(store, s)
+
+
+def _clock_close_chantier(store: dict, chantier_id: str) -> None:
+    for s in _clock_active(store):
+        if s.get("chantier_id") == chantier_id:
+            _close_session(store, s)
+
+
+def _clock_start(store: dict, kind: str, label: str, **refs) -> dict:
+    _clock_close_all(store)                 # un seul chrono à la fois → la journée est continue
+    now = datetime.now()
+    sess = {"id": _uid("tl_"), "date": now.date().isoformat(),
+            "debut": now.strftime("%H:%M"), "fin": None, "kind": kind, "label": label,
+            "chantier_id": refs.get("chantier_id"), "tache_id": refs.get("tache_id"),
+            "rappel_id": refs.get("rappel_id")}
+    log = store.setdefault("timelog", [])
+    log.append(sess)
+    if len(log) > 5000:
+        del log[:len(log) - 5000]
+    return sess
 
 
 # --------------------------------------------------------------------------- #
@@ -91,7 +143,11 @@ def _new_cdc(ch: dict) -> dict:
 # Journal d'actions (suivi de progression hebdo). Chaque mutation y dépose une
 # ligne horodatée — le message lisible est déjà produit par _apply_op.
 # --------------------------------------------------------------------------- #
-JOURNAL_SKIP = {"set_settings", "cdc_section_update", "cdc_section_move"}   # bruit d'édition : pas une "action" à tracer
+JOURNAL_SKIP = {"set_settings", "cdc_section_update", "cdc_section_move",
+                "add_rappel", "update_rappel", "toggle_rappel", "remove_rappel",
+                "clock_start", "clock_stop", "clock_edit", "clock_delete", "clock_add",
+                "update_subtask", "apply_template"}   # bruit d'édition : pas une "action" à tracer
+# (add/toggle/remove_subtask SONT journalisés : traçabilité des étapes voulue par l'utilisateur)
 JOURNAL_MAX = 3000                # garde les N dernières lignes
 
 
@@ -327,6 +383,42 @@ def _normalize(store: dict) -> dict:
     s.setdefault("wip_max", 3)           # max chantiers "En cours" simultanes
     s.setdefault("jours_ouvres", True)   # planning en jours ouvres (exclut samedi/dimanche)
     s.setdefault("relance_jours", 7)     # relance suggeree apres N jours
+    s.setdefault("rappel_stale_jours", 3)  # nudge si un chantier "en cours" n'a rien enregistre depuis N jours
+    s.setdefault("jour_debut", "07:00")  # debut de journee de travail (borne le chrono)
+    s.setdefault("jour_fin", "17:51")    # fin de journee : une session oubliee est fermee a cette heure
+    jd, jf = s["jour_debut"], s["jour_fin"]
+    for r in store.setdefault("rappels", []):   # routines/rappels (hors chantier) : checklist recurrente unifiee
+        r.setdefault("id", _uid("rp_"))
+        r.setdefault("label", "")
+        r.setdefault("freq", "jour")        # jour | semaine | mois | ponctuel
+        r.setdefault("jours", [])           # hebdo : jours de semaine 0=lundi..6=dimanche (vide = 1x/semaine glissante)
+        r.setdefault("jour_mois", None)     # mensuel : jour du mois 1..28
+        r.setdefault("date", None)          # ponctuel : echeance ISO
+        r.setdefault("heure", None)         # "HH:MM" pour declencher la notif bureau
+        r.setdefault("actif", True)
+        r.setdefault("ticks", [])           # dates cochees (recurrent) ; ponctuel : non-vide => fait
+        r.setdefault("note", "")
+    for s in store.setdefault("timelog", []):   # sessions de suivi du temps (chrono)
+        s.setdefault("id", _uid("tl_"))
+        s.setdefault("date", today())
+        s.setdefault("debut", "00:00")
+        s.setdefault("fin", None)
+        s.setdefault("kind", "libre")           # tache | rappel | libre
+        s.setdefault("label", "")
+        s.setdefault("chantier_id", None)
+        s.setdefault("tache_id", None)
+        s.setdefault("rappel_id", None)
+        # auto-réparation : un chrono oublié un jour passé est fermé à la fin de journée
+        if s["fin"] is None and s["date"] < today():
+            s["fin"] = jf
+        # borne la plage à la journée de travail (comparaison lexicale d'heures "HH:MM" zéro-paddées)
+        if s["debut"] and s["debut"] < jd:
+            s["debut"] = jd
+        if s["fin"] is not None:
+            if s["fin"] > jf:
+                s["fin"] = jf
+            if s["fin"] < s["debut"]:
+                s["fin"] = s["debut"]
     for c in store.get("chantiers", []):
         if c.get("statut") == "block":   # "Bloqué" est desormais calcule, plus un statut manuel
             c["statut"] = "doing"
@@ -339,6 +431,8 @@ def _normalize(store: dict) -> dict:
         c.setdefault("histo", [])
         c.setdefault("baseline", None)
         c.setdefault("baseline_edits", 0)
+        c.setdefault("hold", False)          # mise en pause volontaire (sort des compteurs)
+        c.setdefault("hold_until", None)     # date de reprise prévue (optionnelle, déclenche un rappel)
         for rk in c.setdefault("risques", []):       # registre de risques (proba x gravite 5x5)
             rk.setdefault("id", _uid("rk_"))
             rk.setdefault("libelle", "")
@@ -380,10 +474,17 @@ def _normalize(store: dict) -> dict:
         for t in c.setdefault("taches", []):
             t.setdefault("done", False)
             t.setdefault("done_date", None)
+            t.setdefault("desc", "")           # description / notes libres de la tache
+            t.setdefault("start_date", None)   # debut REEL (None tant que pas demarree)
             t.setdefault("is_milestone", False)
             t.setdefault("duree", 0 if t.get("is_milestone") else 1)
             t.setdefault("preds", [])
             t.setdefault("start_fix", None)
+            for st in t.setdefault("subtasks", []):   # checklist d'étapes (sans planning propre)
+                st.setdefault("id", _uid("st_"))
+                st.setdefault("label", "")
+                st.setdefault("done", False)
+                st.setdefault("done_at", None)        # horodatage de complétion (ISO date+heure)
         for l in c["livrables"]:
             l.setdefault("tache_id", None)
         for p in c["parties"]:
@@ -476,10 +577,15 @@ def apply_op(store: dict, op: dict) -> str:
     name = op.get("op")
     NON_EDIT = {"set_baseline", "clear_baseline", "set_settings", "add_contact",
                 "rename_person", "remove_person", "set_person_role", "create_chantier",
+                "apply_template",
                 "delete_chantier", "add_risque", "update_risque", "remove_risque",
                 "cdc_create", "cdc_delete", "cdc_update", "cdc_section_add",
                 "cdc_section_update", "cdc_section_remove", "cdc_section_move",
-                "cdc_partie_add", "cdc_partie_remove", "cdc_revise"}
+                "cdc_partie_add", "cdc_partie_remove", "cdc_revise",
+                "add_rappel", "update_rappel", "toggle_rappel", "remove_rappel",
+                "set_hold",
+                "clock_start", "clock_stop", "clock_edit", "clock_delete", "clock_add",
+                "add_subtask", "toggle_subtask", "update_subtask", "remove_subtask"}
     if name not in NON_EDIT:
         cid = op.get("chantier_id") or op.get("id")
         if cid:
@@ -508,7 +614,8 @@ def _apply_op(store: dict, op: dict) -> str:
             lbl = (lbl or "").strip()
             if lbl:
                 taches.append({"id": _uid("t_"), "label": lbl, "done": False, "done_date": None,
-                               "duree": 1, "preds": [], "is_milestone": False, "start_fix": None})
+                               "desc": "", "start_date": None, "duree": 1, "preds": [],
+                               "is_milestone": False, "start_fix": None, "subtasks": []})
         ch = {
             "id": _uid("ch_"), "titre": titre, "statut": statut, "prio": prio,
             "echeance": op.get("echeance") or None,
@@ -519,6 +626,88 @@ def _apply_op(store: dict, op: dict) -> str:
         }
         store["chantiers"].append(ch)
         return f"Chantier cree : « {titre} »"
+
+    if name == "apply_template":
+        # Applique un modele standardise : cree un chantier (create) ou peuple un existant
+        # (chantier_id), avec taches (preds par INDICE dans le lot), livrables, parties, risques.
+        if op.get("create"):
+            cc = op["create"]
+            titre = (cc.get("titre") or "").strip()
+            if not titre:
+                raise ValueError("Titre requis pour creer un chantier.")
+            prio = cc.get("prio") or "m"
+            if prio not in PRIOS:
+                raise ValueError(f"Priorite invalide: {prio}")
+            ch = {
+                "id": _uid("ch_"), "titre": titre, "statut": cc.get("statut") or "todo", "prio": prio,
+                "echeance": cc.get("echeance") or None, "date_debut": cc.get("date_debut") or today(),
+                "objectif": (cc.get("objectif") or "").strip(), "blocage": "", "tags": [], "parties": [],
+                "taches": [], "livrables": [], "histo": [], "iterations": [], "risques": [], "cdc": None,
+                "ordre": len(store["chantiers"]),
+            }
+            store["chantiers"].append(ch)
+        else:
+            ch = _chantier(store, op["chantier_id"])
+
+        src = op.get("taches") or []
+        new_tasks = []
+        for t in src:
+            label = (t.get("label") or "").strip()
+            if not label:
+                new_tasks.append(None); continue
+            is_ms = bool(t.get("is_milestone"))
+            new_tasks.append({"id": _uid("t_"), "label": label, "done": False, "done_date": None,
+                              "desc": (t.get("desc") or "").strip(), "start_date": None,
+                              "duree": 0 if is_ms else max(0, int(t.get("duree") or 1)),
+                              "preds": [], "is_milestone": is_ms, "start_fix": None, "subtasks": []})
+        for i, t in enumerate(src):                       # resout les preds par indice du lot
+            if new_tasks[i] is None:
+                continue
+            for pidx in (t.get("preds") or []):
+                if isinstance(pidx, int) and 0 <= pidx < len(new_tasks) and pidx != i and new_tasks[pidx]:
+                    new_tasks[i]["preds"].append(new_tasks[pidx]["id"])
+        added_t = [t for t in new_tasks if t]
+        ch.setdefault("taches", []).extend(added_t)
+
+        added_l = 0
+        for l in (op.get("livrables") or []):
+            quoi = (l.get("quoi") or "").strip()
+            if not quoi:
+                continue
+            ch.setdefault("livrables", []).append({
+                "id": _uid("l_"), "contact_id": None, "personne": (l.get("personne") or "").strip(),
+                "role": l.get("role") or "", "quoi": quoi, "date": l.get("date") or None,
+                "statut": "attente", "relances": 0, "derniere": None, "impact": l.get("impact") or "",
+                "tache_id": None})
+            added_l += 1
+
+        added_p = 0
+        for p in (op.get("parties") or []):
+            nom = (p.get("nom") or "").strip()
+            if not nom:
+                continue
+            ch.setdefault("parties", []).append({"id": _uid("p_"), "nom": nom, "role": p.get("role") or ""})
+            added_p += 1
+
+        added_r = 0
+        for r in (op.get("risques") or []):
+            lib = (r.get("libelle") or "").strip()
+            if not lib:
+                continue
+            ch.setdefault("risques", []).append({
+                "id": _uid("rk_"), "libelle": lib, "categorie": (r.get("categorie") or "Autre").strip() or "Autre",
+                "probabilite": _clamp15(r.get("probabilite"), 3), "gravite": _clamp15(r.get("gravite"), 3),
+                "parade": (r.get("parade") or "").strip(), "responsable": (r.get("responsable") or "").strip(),
+                "echeance_revue": None, "statut": "ouvert", "tache_id": None})
+            added_r += 1
+
+        parts = []
+        if added_t: parts.append(f"{len(added_t)} tâche(s)")
+        if added_l: parts.append(f"{added_l} livrable(s)")
+        if added_p: parts.append(f"{added_p} partie(s)")
+        if added_r: parts.append(f"{added_r} risque(s)")
+        verb = "Chantier créé depuis un modèle" if op.get("create") else "Modèle appliqué"
+        return f"{verb} — « {ch['titre']} » : {', '.join(parts) or 'rien à ajouter'}"
 
     if name == "update_chantier":
         ch = _chantier(store, op["id"])
@@ -542,6 +731,7 @@ def _apply_op(store: dict, op: dict) -> str:
 
     if name == "delete_chantier":
         ch = _chantier(store, op["id"])
+        _clock_close_chantier(store, ch["id"])    # solde un éventuel chrono actif du chantier
         store["chantiers"] = [c for c in store["chantiers"] if c["id"] != op["id"]]
         return f"Chantier supprime : « {ch['titre']} »"
 
@@ -555,6 +745,15 @@ def _apply_op(store: dict, op: dict) -> str:
                                      "date": today(), "note": "", "retours": []})
         return f"« {ch['titre']} » deplace vers {op['statut']}"
 
+    if name == "set_hold":   # met en pause / reprend un chantier entier
+        ch = _chantier(store, op["chantier_id"])
+        ch["hold"] = bool(op.get("hold"))
+        ch["hold_until"] = (op.get("until") or None) if ch["hold"] else None
+        if ch["hold"]:
+            _clock_close_chantier(store, ch["id"])   # parquer le chantier arrête son chrono
+            return f"« {ch['titre']} » mis en pause" + (f" jusqu'au {ch['hold_until']}" if ch["hold_until"] else "")
+        return f"« {ch['titre']} » repris"
+
     if name == "add_tache":
         ch = _chantier(store, op["chantier_id"])
         label = (op.get("label") or "").strip()
@@ -563,8 +762,9 @@ def _apply_op(store: dict, op: dict) -> str:
         is_ms = bool(op.get("is_milestone"))
         duree = 0 if is_ms else max(0, int(op.get("duree") or 1))
         t = {"id": _uid("t_"), "label": label, "done": False, "done_date": None,
-             "duree": duree, "preds": [], "is_milestone": is_ms,
-             "start_fix": op.get("start_fix") or None}
+             "desc": (op.get("desc") or "").strip(), "start_date": None, "duree": duree,
+             "preds": [], "is_milestone": is_ms, "start_fix": op.get("start_fix") or None,
+             "subtasks": []}
         t["preds"] = _clean_preds(ch, op.get("preds"), t["id"])
         ch["taches"].append(t)
         return f"Tache ajoutee a « {ch['titre']} » : {label}"
@@ -578,23 +778,51 @@ def _apply_op(store: dict, op: dict) -> str:
             if miss:
                 raise ValueError(f"Impossible de terminer « {t['label']} » : "
                                  f"prédécesseur(s) non terminé(s) : {', '.join(miss)}.")
+            if not t.get("is_milestone") and not t.get("start_date"):   # flux imposé : démarrer avant de terminer
+                raise ValueError(f"Démarre d'abord « {t['label']} » avant de la terminer (ou marque-la comme jalon).")
+        was_done = t["done"]
         t["done"] = new_done
-        t["done_date"] = (op.get("done_date") or today()) if t["done"] else None
+        if new_done and not was_done:             # transition -> fait : on fixe la date réelle
+            t["done_date"] = op.get("done_date") or today()
+            _clock_close_tache(store, t["id"])    # terminer arrête le chrono de la tâche
+        elif not new_done:
+            t["done_date"] = None                 # ré-ouverte : plus de date de fin
+        # déjà fait et on re-confirme "fait" : on NE réécrit PAS done_date (préserve l'historique)
         return f"Tache « {t['label']} » -> {'faite' if t['done'] else 'a faire'}"
+
+    if name == "start_tache":
+        ch = _chantier(store, op["chantier_id"])
+        t = _sub(ch["taches"], op["tache_id"], "Tache")
+        if t["done"]:
+            raise ValueError("Cette tache est deja terminee.")
+        if "date" in op and not op.get("date"):       # date null explicite -> annule le demarrage
+            t["start_date"] = None
+            _clock_close_tache(store, t["id"])
+            return f"Tache « {t['label']} » remise a faire"
+        t["start_date"] = op.get("date") or today()
+        _clock_start(store, "tache", t["label"], chantier_id=ch["id"], tache_id=t["id"])   # ouvre le chrono
+        return f"Tache « {t['label']} » demarree le {t['start_date']}"
 
     if name == "update_tache":
         ch = _chantier(store, op["chantier_id"])
         t = _sub(ch["taches"], op["tache_id"], "Tache")
         if op.get("label"):
             t["label"] = op["label"]
+        if "desc" in op and op["desc"] is not None:
+            t["desc"] = op["desc"]
         if "is_milestone" in op:
             t["is_milestone"] = bool(op["is_milestone"])
             if t["is_milestone"]:
                 t["duree"] = 0
+                if not t["done"]:                  # devient un jalon : pas de "en cours" → on solde le chrono/début réel
+                    _clock_close_tache(store, t["id"])
+                    t["start_date"] = None
         if "duree" in op and not t["is_milestone"]:
             t["duree"] = max(0, int(op["duree"] or 0))
         if "start_fix" in op:
             t["start_fix"] = op["start_fix"] or None
+        if "start_date" in op:                 # correction du debut REEL
+            t["start_date"] = op["start_date"] or None
         if "preds" in op:
             t["preds"] = _clean_preds(ch, op["preds"], t["id"])
         if "done" in op:
@@ -604,8 +832,15 @@ def _apply_op(store: dict, op: dict) -> str:
                 if miss:
                     raise ValueError(f"Impossible de terminer « {t['label']} » : "
                                      f"prédécesseur(s) non terminé(s) : {', '.join(miss)}.")
+                if not t.get("is_milestone") and not t.get("start_date"):
+                    raise ValueError(f"Démarre d'abord « {t['label']} » avant de la terminer (ou marque-la comme jalon).")
+            was_done = t["done"]
             t["done"] = new_done
-            t["done_date"] = (op.get("done_date") or today()) if t["done"] else None
+            if new_done and not was_done:
+                t["done_date"] = op.get("done_date") or today()
+                _clock_close_tache(store, t["id"])
+            elif not new_done:
+                t["done_date"] = None
         return f"Tache mise a jour dans « {ch['titre']} »"
 
     if name == "remove_tache":
@@ -618,6 +853,42 @@ def _apply_op(store: dict, op: dict) -> str:
             if l.get("tache_id") == op["tache_id"]:
                 l["tache_id"] = None
         return f"Tache supprimee : {t['label']}"
+
+    # ---- Sous-taches (checklist d'etapes, sans planning propre) ---------- #
+    if name == "add_subtask":
+        ch = _chantier(store, op["chantier_id"])
+        t = _sub(ch["taches"], op["tache_id"], "Tache")
+        label = (op.get("label") or "").strip()
+        if not label:
+            raise ValueError("Libellé de l'étape requis.")
+        t.setdefault("subtasks", []).append({"id": _uid("st_"), "label": label, "done": False, "done_at": None})
+        return f"Étape ajoutée à « {t['label']} » : {label}"
+
+    if name == "toggle_subtask":
+        ch = _chantier(store, op["chantier_id"])
+        t = _sub(ch["taches"], op["tache_id"], "Tache")
+        st = _sub(t.setdefault("subtasks", []), op["subtask_id"], "Étape")
+        st["done"] = bool(op.get("done", not st["done"]))
+        st["done_at"] = datetime.now().isoformat(timespec="minutes") if st["done"] else None
+        return f"Étape « {st['label']} » de « {t['label']} » → {'faite' if st['done'] else 'à refaire'}"
+
+    if name == "update_subtask":
+        ch = _chantier(store, op["chantier_id"])
+        t = _sub(ch["taches"], op["tache_id"], "Tache")
+        st = _sub(t.setdefault("subtasks", []), op["subtask_id"], "Étape")
+        if op.get("label"):
+            st["label"] = op["label"].strip()
+        if "done" in op:
+            st["done"] = bool(op["done"])
+            st["done_at"] = datetime.now().isoformat(timespec="minutes") if st["done"] else None
+        return "Étape mise à jour"
+
+    if name == "remove_subtask":
+        ch = _chantier(store, op["chantier_id"])
+        t = _sub(ch["taches"], op["tache_id"], "Tache")
+        st = _sub(t.setdefault("subtasks", []), op["subtask_id"], "Étape")
+        t["subtasks"] = [x for x in t["subtasks"] if x["id"] != op["subtask_id"]]
+        return f"Étape supprimée : {st['label']}"
 
     if name == "add_livrable":
         ch = _chantier(store, op["chantier_id"])
@@ -978,6 +1249,124 @@ def _apply_op(store: dict, op: dict) -> str:
         cdc["revisions"].append({"id": _uid("rev_"), "indice": nxt, "date": today(),
                                  "auteur": auteur, "objet": objet, "snapshot": None})
         return f"Révision {nxt} émise — « {ch['titre']} » (validation réinitialisée)"
+
+    # ---- Routines / rappels (hors chantier) ------------------------------ #
+    if name == "add_rappel":
+        label = (op.get("label") or "").strip()
+        if not label:
+            raise ValueError("Libellé de la routine requis.")
+        freq = op.get("freq") or "jour"
+        if freq not in RAPPEL_FREQS:
+            raise ValueError(f"Fréquence invalide: {freq}")
+        if freq == "ponctuel" and not op.get("date"):
+            raise ValueError("Un rappel ponctuel nécessite une date.")
+        jours = [int(x) for x in (op.get("jours") or []) if str(x).isdigit() and 0 <= int(x) <= 6]
+        jm = op.get("jour_mois")
+        store.setdefault("rappels", []).append({
+            "id": _uid("rp_"), "label": label, "freq": freq, "jours": jours,
+            "jour_mois": (min(28, max(1, int(jm))) if jm else None),
+            "date": op.get("date") or None, "heure": op.get("heure") or None,
+            "actif": True, "ticks": [], "note": (op.get("note") or "").strip(),
+        })
+        return f"Routine ajoutée : {label}"
+
+    if name == "update_rappel":
+        r = _sub(store.setdefault("rappels", []), op["id"], "Rappel")
+        if "label" in op and op["label"] is not None:
+            r["label"] = str(op["label"]).strip() or r["label"]
+        if op.get("freq"):
+            if op["freq"] not in RAPPEL_FREQS:
+                raise ValueError(f"Fréquence invalide: {op['freq']}")
+            r["freq"] = op["freq"]
+        if "jours" in op:
+            r["jours"] = [int(x) for x in (op.get("jours") or []) if str(x).isdigit() and 0 <= int(x) <= 6]
+        if "jour_mois" in op:
+            jm = op.get("jour_mois")
+            r["jour_mois"] = (min(28, max(1, int(jm))) if jm else None)
+        if "date" in op:
+            r["date"] = op["date"] or None
+        if "heure" in op:
+            r["heure"] = op["heure"] or None
+        if "actif" in op:
+            r["actif"] = bool(op["actif"])
+        if "note" in op and op["note"] is not None:
+            r["note"] = str(op["note"]).strip()
+        return f"Routine mise à jour : {r['label']}"
+
+    if name == "toggle_rappel":
+        r = _sub(store.setdefault("rappels", []), op["id"], "Rappel")
+        d = op.get("date") or today()
+        ticks = r.setdefault("ticks", [])
+        if d in ticks:
+            ticks.remove(d)
+            return f"Routine décochée : {r['label']}"
+        ticks.append(d)
+        if len(ticks) > 400:           # borne l'historique des cases cochées
+            del ticks[:len(ticks) - 400]
+        return f"Routine faite : {r['label']}"
+
+    if name == "remove_rappel":
+        r = _sub(store.setdefault("rappels", []), op["id"], "Rappel")
+        store["rappels"] = [x for x in store["rappels"] if x["id"] != op["id"]]
+        return f"Routine supprimée : {r['label']}"
+
+    # ---- Suivi du temps (chrono) ----------------------------------------- #
+    if name == "clock_start":
+        kind = op.get("kind") or "libre"
+        label = (op.get("label") or "").strip()
+        refs = {k: op.get(k) for k in ("chantier_id", "tache_id", "rappel_id") if op.get(k)}
+        if not label and kind == "tache" and refs.get("chantier_id") and refs.get("tache_id"):
+            ch = _chantier(store, refs["chantier_id"])
+            label = _sub(ch["taches"], refs["tache_id"], "Tache")["label"]
+        if not label and kind == "rappel" and refs.get("rappel_id"):
+            label = _sub(store.setdefault("rappels", []), refs["rappel_id"], "Rappel")["label"]
+        if not label:
+            raise ValueError("Libellé requis pour démarrer le chrono.")
+        _clock_start(store, kind, label, **refs)
+        return f"Chrono démarré : {label}"
+
+    if name == "clock_stop":
+        if op.get("id"):
+            s = _sub(store.setdefault("timelog", []), op["id"], "Session")
+            if s.get("fin") is None:
+                s["fin"] = _hm()
+            return "Chrono arrêté"
+        act = _clock_active(store)
+        if not act:
+            return "Aucun chrono en cours"
+        _clock_close_all(store)
+        return f"Chrono arrêté : {act[-1].get('label', '')}"
+
+    if name == "clock_edit":
+        s = _sub(store.setdefault("timelog", []), op["id"], "Session")
+        if "label" in op and op["label"] is not None:
+            s["label"] = str(op["label"]).strip() or s["label"]
+        if "debut" in op and op["debut"]:
+            s["debut"] = str(op["debut"]).strip()
+        if "fin" in op:
+            s["fin"] = (str(op["fin"]).strip() or None) if op["fin"] else None
+        if "date" in op and op["date"]:
+            s["date"] = op["date"]
+        return "Session modifiée"
+
+    if name == "clock_delete":
+        _sub(store.setdefault("timelog", []), op["id"], "Session")
+        store["timelog"] = [x for x in store["timelog"] if x["id"] != op["id"]]
+        return "Session supprimée"
+
+    if name == "clock_add":   # saisie manuelle d'une plage (chose faite hors de l'appli)
+        label = (op.get("label") or "").strip()
+        if not label:
+            raise ValueError("Libellé requis.")
+        if not op.get("debut"):
+            raise ValueError("Heure de début requise (HH:MM).")
+        store.setdefault("timelog", []).append({
+            "id": _uid("tl_"), "date": op.get("date") or today(),
+            "debut": str(op["debut"]).strip(), "fin": (str(op.get("fin")).strip() or None) if op.get("fin") else None,
+            "kind": op.get("kind") or "libre", "label": label,
+            "chantier_id": op.get("chantier_id"), "tache_id": op.get("tache_id"), "rappel_id": op.get("rappel_id"),
+        })
+        return f"Plage ajoutée : {label}"
 
     if name == "set_settings":
         store.setdefault("settings", {}).update(op.get("settings") or {})

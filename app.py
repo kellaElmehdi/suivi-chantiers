@@ -119,6 +119,8 @@ class Handler(BaseHTTPRequestHandler):
                 msg = store.apply_op(st, body)
             except ValueError as e:
                 return self._send(400, {"error": str(e)})
+            except KeyError as e:                      # champ requis manquant -> 400 propre (pas un 500 muet)
+                return self._send(400, {"error": f"Champ requis manquant : {e}"})
             store.save(st)
             return self._send(200, {"ok": True, "message": msg, **self._store_payload()})
 

@@ -38,6 +38,10 @@
     </div>
   </div>
   <button class="ghost primary" onclick="newChantier()">Nouveau chantier</button>
+  <div class="menu right" id="notifMenu">
+    <button class="ghost bell" onclick="toggleMenu(event,'notifMenu')" title="Rappels">🔔<span class="badge" id="notifBadge" style="display:none">0</span></button>
+    <div class="menu-list notif-list" id="notifList"></div>
+  </div>
   <div class="menu right" id="excelMenu">
     <button class="ghost" onclick="toggleMenu(event,'excelMenu')">Excel ▾</button>
     <div class="menu-list">

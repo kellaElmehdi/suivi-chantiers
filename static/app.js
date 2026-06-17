@@ -3,7 +3,7 @@
 let STORE = {chantiers: [], contacts: []};
 let TODAY = "2025-01-01";
 let CUR = null;            // id du chantier ouvert en page detaillee (sinon null)
-let SETTINGS = {capacite_jour: 3, wip_max: 3, jours_ouvres: true, relance_jours: 7};
+let SETTINGS = {capacite_jour: 3, wip_max: 3, jours_ouvres: true, relance_jours: 7, jour_debut: "07:00", jour_fin: "17:51"};
 
 const COLS = [
   {key: "todo",    label: "À faire"},
@@ -21,8 +21,200 @@ const currentIter = c => (c.iterations || []).find(it => it.ouverte) || (c.itera
 
 // ---- risques (cotation 5×5 : criticité = proba × gravité, 1..25) ----------
 const RISK = {ouvert: "Ouvert", maitrise: "Maîtrisé", avere: "Avéré", clos: "Clos"};
-const RISK_CATS = ["Délai", "Technique", "Dépendance/IT", "Fournisseur/Externe",
-                   "Budget", "Ressources/RH", "Qualité", "Périmètre", "Autre"];
+// Échelles 1-5 explicites (cotation type PMBOK / PRINCE2)
+const PROBA_LBL = {1: "Très improbable", 2: "Peu probable", 3: "Possible", 4: "Probable", 5: "Quasi certain"};
+const GRAV_LBL  = {1: "Négligeable", 2: "Mineur", 3: "Modéré", 4: "Majeur", 5: "Critique"};
+const proba5 = v => [1, 2, 3, 4, 5].map(x => `<option value="${x}" ${+x === +v ? "selected" : ""}>${x} · ${PROBA_LBL[x]}</option>`).join("");
+const grav5  = v => [1, 2, 3, 4, 5].map(x => `<option value="${x}" ${+x === +v ? "selected" : ""}>${x} · ${GRAV_LBL[x]}</option>`).join("");
+// Catalogue standard de risques projet (RBS PMBOK + PRINCE2) — ~90% des cas. {l: libellé, p: proba, g: gravité, m: parade}
+const RISK_CATALOG = {
+  "Délais & planning": [
+    {l: "Estimations de durée trop optimistes", p: 4, g: 3, m: "Estimer en 3 points (optimiste/probable/pessimiste) et garder une marge."},
+    {l: "Jalon clé non tenu", p: 3, g: 4, m: "Suivi rapproché du chemin critique, alerte précoce."},
+    {l: "Dépendances entre tâches sous-estimées", p: 3, g: 3, m: "Cartographier les liens et les valider avec l'équipe."},
+    {l: "Livraison externe bloquante en retard", p: 3, g: 4, m: "Engagement de date écrit + plan B / relances planifiées."},
+    {l: "Chemin critique sans aucune marge", p: 3, g: 4, m: "Ajouter des tampons sur les tâches critiques."},
+    {l: "Élargissement progressif du périmètre (effet tunnel)", p: 3, g: 3, m: "Gel du périmètre + procédure de changement."},
+    {l: "Indisponibilité d'une ressource au moment voulu", p: 3, g: 3, m: "Réserver les ressources à l'avance, prévoir un back-up."},
+    {l: "Absences / congés non anticipés", p: 2, g: 2, m: "Planifier autour des congés connus, lisser la charge."},
+  ],
+  "Périmètre & exigences": [
+    {l: "Exigences floues ou incomplètes", p: 4, g: 4, m: "Atelier de cadrage + critères d'acceptation écrits."},
+    {l: "Changements de périmètre fréquents (scope creep)", p: 4, g: 3, m: "Comité de changement, chaque demande tracée et arbitrée."},
+    {l: "Besoin mal compris / mauvaise interprétation", p: 3, g: 4, m: "Reformuler et faire valider par le métier (maquettes)."},
+    {l: "Absence de critères d'acceptation clairs", p: 3, g: 3, m: "Définir la définition de « terminé » par livrable."},
+    {l: "Exigences contradictoires entre parties prenantes", p: 3, g: 3, m: "Arbitrage formel par le sponsor."},
+    {l: "Fonctionnalités non priorisées", p: 3, g: 2, m: "Prioriser (MoSCoW) avant de lancer la réalisation."},
+  ],
+  "Technique & solution": [
+    {l: "Complexité technique sous-estimée", p: 3, g: 4, m: "Spike / preuve de concept en amont."},
+    {l: "Technologie nouvelle ou non maîtrisée", p: 3, g: 4, m: "Montée en compétence + appui d'un expert."},
+    {l: "Intégration entre systèmes plus difficile que prévu", p: 3, g: 3, m: "Tester les interfaces tôt, contrats d'API clairs."},
+    {l: "Problèmes de performance / montée en charge", p: 2, g: 4, m: "Tests de charge avant la mise en production."},
+    {l: "Dette technique / qualité de code insuffisante", p: 3, g: 3, m: "Revues de code, refactoring planifié."},
+    {l: "Architecture inadaptée à l'évolution", p: 2, g: 4, m: "Revue d'architecture, choix justifiés et documentés."},
+    {l: "Bugs critiques découverts tardivement", p: 3, g: 4, m: "Tests automatisés + recette continue."},
+    {l: "Environnements (dev/test/prod) instables", p: 2, g: 3, m: "Industrialiser les environnements (IaC)."},
+  ],
+  "Dépendances & IT": [
+    {l: "Accès / habilitations non fournis à temps", p: 3, g: 4, m: "Demander les accès dès le démarrage, escalade si retard."},
+    {l: "Données sources indisponibles ou incomplètes", p: 3, g: 4, m: "Valider la disponibilité et la qualité en amont."},
+    {l: "Dépendance à une autre équipe interne", p: 3, g: 3, m: "Engagement de service (SLA) et points réguliers."},
+    {l: "Indisponibilité d'un environnement / serveur", p: 2, g: 3, m: "Redondance + fenêtre de maintenance planifiée."},
+    {l: "Composant tiers / API qui change", p: 2, g: 3, m: "Figer les versions, veille sur les changements."},
+    {l: "Panne d'infrastructure", p: 2, g: 4, m: "Sauvegardes + plan de reprise testé."},
+  ],
+  "Fournisseurs & externe": [
+    {l: "Retard de livraison fournisseur", p: 3, g: 4, m: "Jalons contractuels + pénalités + relances."},
+    {l: "Prestataire défaillant / qualité insuffisante", p: 2, g: 4, m: "Critères de qualité, recette à chaque livraison."},
+    {l: "Dépendance à un fournisseur unique", p: 2, g: 4, m: "Identifier une alternative / clause de réversibilité."},
+    {l: "Conditions contractuelles défavorables", p: 2, g: 3, m: "Relecture juridique avant signature."},
+    {l: "Sous-traitant indisponible", p: 2, g: 3, m: "Carnet de prestataires de secours."},
+  ],
+  "Ressources & équipe": [
+    {l: "Départ / turnover d'une personne clé", p: 2, g: 4, m: "Documentation + binômage pour éviter le point unique."},
+    {l: "Compétence manquante dans l'équipe", p: 3, g: 3, m: "Formation, recrutement ou renfort externe."},
+    {l: "Équipe partagée sur plusieurs projets", p: 4, g: 3, m: "Engagement de capacité, arbitrage des priorités."},
+    {l: "Surcharge / sur-allocation", p: 3, g: 3, m: "Lisser la charge, limiter le WIP."},
+    {l: "Manque de disponibilité du sponsor", p: 2, g: 3, m: "Comité de pilotage régulier, décisions cadrées."},
+    {l: "Montée en compétence plus longue que prévu", p: 2, g: 2, m: "Prévoir une phase d'apprentissage dans le planning."},
+  ],
+  "Budget & coûts": [
+    {l: "Budget initial sous-évalué", p: 3, g: 4, m: "Chiffrage détaillé + provision pour aléas."},
+    {l: "Dérive / dépassement de coûts", p: 3, g: 3, m: "Suivi budgétaire régulier (réel vs prévu)."},
+    {l: "Coûts cachés (licences, infra, run)", p: 3, g: 3, m: "Inclure le coût complet (TCO) dès le départ."},
+    {l: "Financement non sécurisé ou gelé", p: 2, g: 4, m: "Sécuriser l'engagement budgétaire par écrit."},
+    {l: "Variation de prix / change", p: 2, g: 2, m: "Clause de révision, achats anticipés."},
+  ],
+  "Qualité & conformité": [
+    {l: "Tests insuffisants", p: 3, g: 4, m: "Plan de tests + couverture minimale exigée."},
+    {l: "Recette / validation tardive", p: 3, g: 3, m: "Impliquer le métier tôt, recette par incréments."},
+    {l: "Régression non détectée", p: 2, g: 3, m: "Tests de non-régression automatisés."},
+    {l: "Non-conformité aux standards / normes", p: 2, g: 3, m: "Checklist de conformité, revue qualité."},
+    {l: "Documentation incomplète", p: 3, g: 2, m: "Documentation au fil de l'eau, critère de « terminé »."},
+  ],
+  "Données & sécurité": [
+    {l: "Fuite ou perte de données", p: 2, g: 5, m: "Chiffrement, contrôle d'accès, sauvegardes testées."},
+    {l: "Faille de sécurité / vulnérabilité", p: 2, g: 5, m: "Revue de sécurité, tests d'intrusion."},
+    {l: "Mauvaise qualité des données", p: 3, g: 4, m: "Contrôles de qualité, règles de validation."},
+    {l: "Non-conformité RGPD / données personnelles", p: 2, g: 4, m: "Analyse d'impact (DPIA), minimisation des données."},
+    {l: "Sauvegarde / reprise non testée", p: 2, g: 4, m: "Exercice de restauration planifié."},
+  ],
+  "Parties prenantes & adhésion": [
+    {l: "Manque d'adhésion des utilisateurs", p: 3, g: 4, m: "Conduite du changement, implication précoce."},
+    {l: "Décisions tardives / circuit de validation lent", p: 3, g: 3, m: "Instances de décision cadencées, délégations."},
+    {l: "Priorités de la direction qui changent", p: 3, g: 4, m: "Réaligner via le comité de pilotage."},
+    {l: "Conflit entre parties prenantes", p: 2, g: 3, m: "Médiation, rôles et responsabilités clarifiés (RACI)."},
+    {l: "Communication insuffisante", p: 3, g: 2, m: "Plan de communication, points réguliers."},
+  ],
+  "Juridique & réglementaire": [
+    {l: "Évolution réglementaire impactante", p: 2, g: 4, m: "Veille réglementaire, marge d'adaptation."},
+    {l: "Problème de propriété intellectuelle / licence", p: 2, g: 3, m: "Vérifier les licences et droits d'usage."},
+    {l: "Clause contractuelle non respectée", p: 2, g: 3, m: "Suivi des obligations contractuelles."},
+    {l: "Contrainte légale découverte tardivement", p: 2, g: 4, m: "Revue juridique en amont du cadrage."},
+  ],
+};
+const RISK_CATS = [...Object.keys(RISK_CATALOG), "Autre"];
+
+// ---- Catalogues standard (PMBOK / PRINCE2) : livrables, parties prenantes, WBS, modèles de chantier ----
+// Livrables types (PRINCE2 management products + classiques) — {l: libellé, role, impact}
+const LIVRABLE_CATALOG = {
+  "Cadrage": [
+    {l: "Note de cadrage / Project Brief", role: "Chef de projet", impact: "Cadre le besoin et le périmètre"},
+    {l: "Business case (justification)", role: "Sponsor", impact: "Valide l'opportunité / la rentabilité"},
+    {l: "Plan projet (PID)", role: "Chef de projet", impact: "Référence de pilotage"},
+    {l: "Cahier des charges", role: "MOA", impact: "Exigences à satisfaire"},
+  ],
+  "Conception": [
+    {l: "Spécifications fonctionnelles", role: "MOA", impact: "Base de la réalisation"},
+    {l: "Spécifications techniques", role: "MOE", impact: "Architecture de la solution"},
+    {l: "Maquettes / prototypes", role: "MOE", impact: "Validation de l'IHM"},
+  ],
+  "Réalisation & tests": [
+    {l: "Solution développée / livrée", role: "MOE", impact: "Le produit"},
+    {l: "Plan de tests", role: "Recette", impact: "Couverture de la validation"},
+    {l: "Jeu de données de test", role: "MOA", impact: "Conditions de recette"},
+    {l: "PV de recette", role: "MOA", impact: "Acceptation formelle"},
+  ],
+  "Déploiement & clôture": [
+    {l: "Plan de déploiement / bascule", role: "MOE", impact: "Mise en production maîtrisée"},
+    {l: "Documentation utilisateur", role: "MOE", impact: "Autonomie des utilisateurs"},
+    {l: "Plan de conduite du changement", role: "Chef de projet", impact: "Adhésion des utilisateurs"},
+    {l: "Bilan de fin de projet / REX", role: "Chef de projet", impact: "Capitalisation"},
+  ],
+};
+// Parties prenantes / rôles standard (PMBOK + rôles PRINCE2) — {nom, role}
+const PARTIE_CATALOG = [
+  {nom: "Sponsor / Commanditaire", role: "Décideur (Executive)"},
+  {nom: "Comité de pilotage", role: "Pilotage / arbitrage"},
+  {nom: "MOA / Métier", role: "Exprime le besoin (Senior User)"},
+  {nom: "MOE / Équipe technique", role: "Réalise (Senior Supplier)"},
+  {nom: "Chef de projet", role: "Coordination (Project Manager)"},
+  {nom: "Utilisateurs finaux", role: "Recette / usage"},
+  {nom: "Référent technique / Architecte", role: "Conseil technique"},
+  {nom: "DSI / IT", role: "Infra & accès"},
+  {nom: "Achats", role: "Contractualisation fournisseurs"},
+  {nom: "Direction", role: "Validation stratégique"},
+  {nom: "Fournisseur / Prestataire", role: "Livraison externe"},
+  {nom: "Contrôle de gestion", role: "Suivi budgétaire"},
+];
+// Modèles de tâches (WBS) — preds par INDICE dans le lot ; is_milestone pour les jalons
+const WBS_TEMPLATES = {
+  "Cycle PMBOK (générique)": [
+    {label: "Initialisation / cadrage", duree: 3},
+    {label: "Planification", duree: 3, preds: [0]},
+    {label: "Exécution / réalisation", duree: 10, preds: [1]},
+    {label: "Suivi & maîtrise", duree: 10, preds: [1]},
+    {label: "Recette", duree: 3, preds: [2]},
+    {label: "Clôture", is_milestone: true, preds: [4]},
+  ],
+  "Projet data / BI": [
+    {label: "Cadrage du besoin", duree: 3},
+    {label: "Modélisation des données", duree: 4, preds: [0]},
+    {label: "Développement des rapports", duree: 6, preds: [1]},
+    {label: "Recette métier", duree: 3, preds: [2]},
+    {label: "Documentation & formation", duree: 2, preds: [3]},
+    {label: "Mise en production", is_milestone: true, preds: [3]},
+  ],
+  "Déploiement logiciel": [
+    {label: "Analyse des besoins", duree: 3},
+    {label: "Conception", duree: 4, preds: [0]},
+    {label: "Développement", duree: 10, preds: [1]},
+    {label: "Tests & recette", duree: 4, preds: [2]},
+    {label: "Déploiement", duree: 2, preds: [3]},
+    {label: "Go-live", is_milestone: true, preds: [4]},
+  ],
+};
+// Modèles de chantier complets : WBS + livrables + parties + risques (short-list)
+const CHANTIER_TEMPLATES = {
+  "Projet générique (PMBOK)": {
+    taches: WBS_TEMPLATES["Cycle PMBOK (générique)"],
+    livrables: [{quoi: "Note de cadrage / Project Brief", role: "Chef de projet"}, {quoi: "Plan projet (PID)", role: "Chef de projet"},
+                {quoi: "PV de recette", role: "MOA"}, {quoi: "Bilan de fin de projet / REX", role: "Chef de projet"}],
+    parties: [{nom: "Sponsor / Commanditaire", role: "Décideur"}, {nom: "Chef de projet", role: "Coordination"},
+              {nom: "MOA / Métier", role: "Exprime le besoin"}, {nom: "Comité de pilotage", role: "Arbitrage"}],
+    risques: [{libelle: "Exigences floues ou incomplètes", categorie: "Périmètre & exigences", probabilite: 4, gravite: 4, parade: "Atelier de cadrage + critères d'acceptation"},
+              {libelle: "Décisions tardives / circuit de validation lent", categorie: "Parties prenantes & adhésion", probabilite: 3, gravite: 3, parade: "Instances de décision cadencées"}],
+  },
+  "Projet data / BI": {
+    taches: WBS_TEMPLATES["Projet data / BI"],
+    livrables: [{quoi: "Cahier des charges", role: "MOA"}, {quoi: "Spécifications techniques", role: "MOE"},
+                {quoi: "PV de recette", role: "MOA"}, {quoi: "Documentation utilisateur", role: "MOE"}],
+    parties: [{nom: "MOA / Métier", role: "Exprime le besoin"}, {nom: "DSI / IT", role: "Infra & accès"},
+              {nom: "Référent technique / Architecte", role: "Conseil technique"}, {nom: "Utilisateurs finaux", role: "Recette"}],
+    risques: [{libelle: "Données sources indisponibles ou incomplètes", categorie: "Dépendances & IT", probabilite: 3, gravite: 4, parade: "Valider disponibilité & qualité en amont"},
+              {libelle: "Accès / habilitations non fournis à temps", categorie: "Dépendances & IT", probabilite: 3, gravite: 4, parade: "Demander les accès dès le démarrage"}],
+  },
+  "Déploiement logiciel": {
+    taches: WBS_TEMPLATES["Déploiement logiciel"],
+    livrables: [{quoi: "Spécifications fonctionnelles", role: "MOA"}, {quoi: "Plan de tests", role: "Recette"},
+                {quoi: "Plan de déploiement / bascule", role: "MOE"}, {quoi: "Documentation utilisateur", role: "MOE"}],
+    parties: [{nom: "Sponsor / Commanditaire", role: "Décideur"}, {nom: "MOE / Équipe technique", role: "Réalise"},
+              {nom: "Utilisateurs finaux", role: "Recette / usage"}, {nom: "DSI / IT", role: "Infra & accès"}],
+    risques: [{libelle: "Complexité technique sous-estimée", categorie: "Technique & solution", probabilite: 3, gravite: 4, parade: "Preuve de concept en amont"},
+              {libelle: "Manque d'adhésion des utilisateurs", categorie: "Parties prenantes & adhésion", probabilite: 3, gravite: 4, parade: "Conduite du changement, implication précoce"}],
+  },
+};
 const crit = r => (r.probabilite || 0) * (r.gravite || 0);
 const riskActive = r => r.statut === "ouvert" || r.statut === "avere";   // pèse encore
 function critLevel(n){   // 5×5 → 4 niveaux + couleur
@@ -52,7 +244,7 @@ const gatedLivrable = c => (c.livrables || []).find(l => l.tache_id
   && (l.statut === "attente" || l.statut === "partiel")
   && (c.taches || []).some(t => t.id === l.tache_id && !t.done));
 function isBlocked(c){
-  if(c.statut === "done") return false;
+  if(c.statut === "done" || c.hold) return false;   // un chantier en pause n'est pas "bloqué"
   if(c.blocage && c.blocage.trim()) return true;
   if(gatedLivrable(c)) return true;
   return lateAtt(c).length > 0;   // livrable non reçu et en retard
@@ -71,7 +263,8 @@ const dstr = dt => dt.toISOString().slice(0, 10);
 function addDays(s, n){ const dt = dparse(s); dt.setUTCDate(dt.getUTCDate() + n); return dstr(dt); }
 function daysBetween(a, b){ return Math.round((dparse(b) - dparse(a)) / 86400000); }
 function fmt(d){ if(!d) return "—"; const p = d.split("-"); return `${p[2]}/${p[1]}/${p[0]}`; }
-function fmtShort(d){ const p = d.split("-"); return `${p[2]}/${p[1]}`; }
+function fmtShort(d){ if(!d) return "—"; const p = d.split("-"); return `${p[2]}/${p[1]}`; }
+function fmtDT(iso){ if(!iso) return ""; const [d, tm] = iso.split("T"); return fmtShort(d) + (tm ? " à " + tm.slice(0, 5) : ""); }   // "15/06 à 14:30"
 const isWeekend = dt => { const d = dt.getUTCDay(); return d === 0 || d === 6; };
 // Unités de planning : jours ouvrés (si réglé) ou calendaires. Les échéances/compteurs réels restent en daysBetween.
 function addUnits(s, n){
@@ -99,6 +292,7 @@ async function loadStore(){
   STORE = d.store; TODAY = d.today;
   if(STORE.settings) SETTINGS = {...SETTINGS, ...STORE.settings};
   if(CUR && chById(CUR)) renderPage(); else { CUR = null; showView("board"); }
+  renderNotif(); checkDesktopNotifs();
 }
 async function mutate(op){
   const d = await api("POST", "/api/mutate", op);
@@ -108,6 +302,7 @@ async function mutate(op){
   if($("cdc").style.display !== "none" && CUR_CDC && chById(CUR_CDC)) renderCdc();
   else if(CUR && chById(CUR)) renderPage();
   else { CUR = null; showView(VIEW); }
+  renderNotif();
 }
 
 // ---- vues ----------------------------------------------------------------
@@ -151,11 +346,93 @@ function toggleMenu(e, id){
   if(willOpen) m.classList.add("open");
 }
 document.addEventListener("click", () => document.querySelectorAll(".menu.open").forEach(m => m.classList.remove("open")));
-function renderAll(){ renderAlert(); renderBoard(); renderPeople(); }
+// fermer tout menu ouvert au scroll (les popups en position:fixed se détacheraient sinon)
+document.addEventListener("scroll", () => {
+  const open = document.querySelector(".menu.open");
+  if(open) open.classList.remove("open");
+}, true);
+// Menu en position:fixed (échappe au overflow:hidden des cartes) — pour le statut de risque
+function fixedMenu(e, id){
+  e.stopPropagation();
+  const m = $(id); if(!m) return;
+  const list = m.querySelector(".menu-list"), willOpen = !m.classList.contains("open");
+  document.querySelectorAll(".menu.open").forEach(x => x.classList.remove("open"));
+  if(willOpen && list){
+    m.classList.add("open");
+    const r = m.getBoundingClientRect();
+    list.style.position = "fixed";
+    list.style.top = (r.bottom + 4) + "px";
+    list.style.left = r.left + "px";
+    list.style.right = "auto";
+  }
+}
+
+// ---- Listes déroulantes stylées : remplace l'apparence native de TOUS les <select> ----
+// On garde le <select> (masqué) pour la valeur + l'onchange existant ; un bouton + menu
+// stylé le pilotent. Popup en position:fixed → jamais rogné par une carte.
+function enhanceSelects(){
+  document.querySelectorAll("select:not([data-cse])").forEach(sel => {
+    sel.setAttribute("data-cse", "1");
+    const wrap = document.createElement("span");
+    wrap.className = "cse menu";
+    sel.parentNode.insertBefore(wrap, sel);
+    wrap.appendChild(sel);
+    const btn = document.createElement("button");
+    btn.type = "button"; btn.className = "cse-btn";
+    btn.innerHTML = `<span class="cse-val"></span><span class="cse-car">▾</span>`;
+    const valEl = btn.firstChild;
+    const list = document.createElement("div");
+    list.className = "menu-list cse-list";
+    const rebuild = () => {
+      const cur = sel.options[sel.selectedIndex];
+      valEl.textContent = cur ? cur.text : "";
+      list.textContent = "";
+      [...sel.options].forEach((o, i) => {
+        const a = document.createElement("a");
+        a.className = "cse-opt" + (i === sel.selectedIndex ? " on" : "") + (o.disabled ? " dis" : "");
+        a.textContent = o.text;
+        a.addEventListener("click", ev => {
+          ev.stopPropagation();
+          if(o.disabled) return;
+          sel.selectedIndex = i;
+          sel.dispatchEvent(new Event("change", {bubbles: true}));
+          wrap.classList.remove("open");
+          if(wrap.isConnected) rebuild();   // si pas de re-render (ex. aperçu), maj du libellé
+        });
+        list.appendChild(a);
+      });
+    };
+    rebuild();
+    sel.addEventListener("change", rebuild);   // valeur changée (clic option OU code) → maj du libellé
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const willOpen = !wrap.classList.contains("open");
+      document.querySelectorAll(".menu.open").forEach(x => x.classList.remove("open"));
+      if(willOpen){
+        rebuild();
+        wrap.classList.add("open");
+        const r = btn.getBoundingClientRect();
+        list.style.position = "fixed";
+        list.style.top = (r.bottom + 4) + "px";
+        list.style.left = r.left + "px";
+        list.style.minWidth = r.width + "px";
+        list.style.right = "auto";
+      }
+    });
+    wrap.appendChild(btn);
+    wrap.appendChild(list);
+  });
+}
+let _cseQueued = false;
+new MutationObserver(() => {
+  if(_cseQueued) return; _cseQueued = true;
+  requestAnimationFrame(() => { _cseQueued = false; enhanceSelects(); });
+}).observe(document.body, {childList: true, subtree: true});
 
 // ---- bandeau + board + personnes ----------------------------------------
 // ---- règles globales -----------------------------------------------------
 function lateTasks(c){   // tâches/jalons non finis dont la fin PRÉVUE est déjà passée
+  if(c.hold) return [];   // chantier en pause : aucune tâche n'est "en retard"
   const S = computeSchedule(c);
   return c.taches.filter(t => !t.done && S.sched[t.id] && S.sched[t.id].endDate < TODAY);
 }
@@ -169,6 +446,7 @@ function retoursLate(c){
 function chargeData(){
   const items = [];
   STORE.chantiers.forEach(c => {
+    if(c.hold) return;   // chantier en pause : hors plan de charge
     const S = computeSchedule(c);
     c.taches.forEach(t => {
       if(t.done || t.is_milestone) return;
@@ -246,10 +524,12 @@ async function applyAllLeveling(){
 function renderAlert(){
   let openL = 0, lateL = 0, lateT = 0, relances = 0, retL = 0;
   STORE.chantiers.forEach(c => {
+    if(c.hold) return;   // chantier en pause : exclu des compteurs d'alerte
     openL += openAtt(c).length; lateL += lateAtt(c).length; lateT += lateTasks(c).length;
     relances += relancesDues(c).length; retL += retoursLate(c).length;
   });
-  const wip = STORE.chantiers.filter(c => colOf(c) === "doing").length;
+  const wip = STORE.chantiers.filter(c => colOf(c) === "doing" && !c.hold).length;
+  const onhold = STORE.chantiers.filter(c => c.hold && c.statut !== "done").length;
   const over = chargeData().overload;
   $("subtitle").textContent = `${STORE.chantiers.length} chantiers`;
   const seg = [];
@@ -258,10 +538,126 @@ function renderAlert(){
   if(relances) seg.push(`<a class="seg" onclick="setView('people')">${relances} relance(s) à faire</a>`);
   if(retL) seg.push(`<span class="lt">${retL} retour(s) en retard</span>`);
   seg.push(`WIP <b class="${wip > SETTINGS.wip_max ? "lt" : ""}">${wip}</b>/${SETTINGS.wip_max} en cours`);
+  if(onhold) seg.push(`<span class="muted">${onhold} en pause</span>`);
   if(over) seg.push(`<a class="seg lt" onclick="setView('charge')">${over} jour(s) en surcharge</a>`);
   const critRisk = STORE.chantiers.reduce((a, c) => a + openRisques(c).filter(r => crit(r) >= 15).length, 0);
   if(critRisk) seg.push(`<a class="seg lt" onclick="setView('risques')">${critRisk} risque(s) critique(s)</a>`);
+  const act = activeSession();
+  if(act) seg.unshift(`<a class="seg run" onclick="mutate({op:'clock_stop'})" title="Chrono en cours — cliquer pour arrêter">⏱ ${esc(act.label)} (depuis ${act.debut}) — stop</a>`);
   $("alert").innerHTML = seg.join("&nbsp;·&nbsp;");
+  renderNotif();
+}
+
+// ======================================================================== //
+//  Centre de rappels (cloche) : agrège tout ce qui est "à faire" + notif bureau
+// ======================================================================== //
+function lastActivity(c){   // dernière trace d'activité enregistrée sur le chantier
+  const dates = [];
+  (c.histo || []).forEach(h => h.d && dates.push(h.d));
+  (c.taches || []).forEach(t => { if(t.done_date) dates.push(t.done_date); if(t.start_date) dates.push(t.start_date); });
+  (STORE.journal || []).forEach(j => { if(j.chantier_id === c.id && j.date) dates.push(j.date); });
+  const past = dates.filter(d => d <= TODAY).sort();
+  return past.length ? past[past.length - 1] : null;
+}
+function buildReminders(){
+  const out = [];
+  // routines / rappels du jour non cochés
+  rappelsAFaire(TODAY).forEach(r => {
+    const late = r.freq === "ponctuel" && r.date && isLate(r.date);
+    out.push({type: "routine", icon: late ? "⏰" : "🔁", label: r.label, sub: rappelMeta(r),
+              late, key: "rp:" + r.id, go: () => setView("planning")});
+  });
+  // tâches en retard (fin prévue déjà passée)
+  STORE.chantiers.forEach(c => lateTasks(c).forEach(t =>
+    out.push({type: "tache", icon: "⏰", label: t.label, sub: "tâche en retard · " + c.titre,
+              late: true, key: "lt:" + t.id, go: () => openChantier(c.id)})));
+  // relances à faire (hors chantiers en pause)
+  STORE.chantiers.forEach(c => { if(c.hold) return; relancesDues(c).forEach(l =>
+    out.push({type: "relance", icon: "📞", label: "Relancer " + l.personne, sub: l.quoi + " · " + c.titre,
+              key: "rl:" + l.id, go: () => setView("people")})); });
+  // retours de recette en retard (hors chantiers en pause)
+  STORE.chantiers.forEach(c => { if(c.hold) return; retoursLate(c).forEach(r =>
+    out.push({type: "retour", icon: "↩️", label: r.quoi, sub: "retour en retard · " + c.titre,
+              late: true, key: "re:" + r.id, go: () => openChantier(c.id)})); });
+  // chantiers en pause dont la date de reprise est arrivée → "à reprendre"
+  STORE.chantiers.forEach(c => {
+    if(c.hold && c.hold_until && c.hold_until <= TODAY)
+      out.push({type: "resume", icon: "⏯️", label: "À reprendre : " + c.titre,
+                sub: "reprise prévue le " + fmt(c.hold_until), late: true, key: "hr:" + c.id, go: () => openChantier(c.id)});
+  });
+  // revues de risque échues
+  allRisques().forEach(r => {
+    if(riskActive(r) && r.echeance_revue && isLate(r.echeance_revue))
+      out.push({type: "risque", icon: "⚠️", label: "Revoir le risque : " + r.libelle, sub: r._c.titre,
+                late: true, key: "rk:" + r.id, go: () => setView("risques")});
+  });
+  // chantiers "en cours" sans avancement enregistré depuis N jours (action dans l'appli)
+  const stale = SETTINGS.rappel_stale_jours || 3;
+  STORE.chantiers.forEach(c => {
+    if(colOf(c) !== "doing" || c.hold) return;
+    const last = lastActivity(c);
+    const n = last ? daysBetween(last, TODAY) : null;
+    if(last && n >= stale)
+      out.push({type: "stale", icon: "📝", label: "Enregistrer l'avancement : " + c.titre,
+                sub: "rien enregistré depuis " + n + " j", key: "st:" + c.id, go: () => openChantier(c.id)});
+    else if(!last)
+      out.push({type: "stale", icon: "📝", label: "Enregistrer l'avancement : " + c.titre,
+                sub: "aucune activité enregistrée", key: "st:" + c.id, go: () => openChantier(c.id)});
+  });
+  return out;
+}
+function renderNotif(){
+  const items = buildReminders();
+  window._reminders = items;
+  const badge = $("notifBadge");
+  if(badge){
+    badge.style.display = items.length ? "inline-flex" : "none";
+    badge.textContent = items.length > 99 ? "99+" : items.length;
+  }
+  const list = $("notifList"); if(!list) return;
+  const perm = ("Notification" in window) ? Notification.permission : "unsupported";
+  let h = `<div class="notif-head"><b>Rappels</b> <span class="muted small">${items.length} élément(s)</span>` +
+    (perm === "granted" ? `<span class="muted small okperm">notifs bureau ✓</span>`
+     : perm === "unsupported" ? ``
+     : `<a class="lnk" onclick="event.stopPropagation();enableDesktopNotifs()">Activer les notifs bureau</a>`) + `</div>`;
+  if(!items.length){
+    h += `<div class="notif-empty">Rien à signaler — tout est à jour 👍</div>`;
+  } else {
+    h += items.map((it, i) => `<a class="notif-item${it.late ? " late" : ""}" onclick="notifGo(${i})">` +
+      `<span class="ni-ic">${it.icon}</span><span class="ni-tx">` +
+      `<span class="ni-lib">${esc(it.label)}</span><span class="ni-sub">${esc(it.sub || "")}</span>` +
+      `</span></a>`).join("");
+  }
+  list.innerHTML = h;
+}
+function notifGo(i){
+  const it = (window._reminders || [])[i]; if(!it) return;
+  $("notifMenu").classList.remove("open");
+  if(it.go) it.go();
+}
+function enableDesktopNotifs(){
+  if(!("Notification" in window)){ alert("Notifications bureau non supportées par ce navigateur."); return; }
+  Notification.requestPermission().then(() => { renderNotif(); checkDesktopNotifs(); });
+}
+function checkDesktopNotifs(){
+  if(!("Notification" in window) || Notification.permission !== "granted") return;
+  const items = buildReminders();
+  const k = "notif_sent_" + TODAY;
+  let sent = {}; try { sent = JSON.parse(localStorage.getItem(k) || "{}"); } catch(e){ sent = {}; }
+  const now = new Date();
+  const hhmm = String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
+  items.forEach(it => {
+    if(sent[it.key]) return;
+    if(it.type === "routine"){   // routine avec heure : attendre l'heure prévue
+      const r = RAPPELS().find(x => "rp:" + x.id === it.key);
+      if(r && r.heure && hhmm < r.heure) return;
+    }
+    try { new Notification("Suivi des chantiers", {body: it.label + (it.sub ? " — " + it.sub : ""), tag: it.key}); } catch(e){}
+    sent[it.key] = 1;
+  });
+  // purge les marqueurs des autres jours pour ne pas saturer localStorage
+  Object.keys(localStorage).forEach(key => { if(key.startsWith("notif_sent_") && key !== k) localStorage.removeItem(key); });
+  localStorage.setItem(k, JSON.stringify(sent));
 }
 
 function saveSetting(k, v){ mutate({op: "set_settings", settings: {[k]: v}}); }
@@ -367,17 +763,6 @@ function wipDots(value, limit){   // une pastille par chantier en cours ; au-del
   return `<div class="wipdots">${dots}</div><div class="wlbl ${value > limit ? "bad-t" : ""}">${value} / ${limit}</div>`;
 }
 
-function gauge(value, max, sub, over, unit){   // jauge radiale (demi-cercle)
-  unit = unit || ""; const W = 150, H = 92, cx = 75, cy = 80, R = 58;
-  const frac = Math.max(0, Math.min(1, max ? value / max : 0));
-  const pol = a => `${(cx + R * Math.cos(a)).toFixed(1)},${(cy - R * Math.sin(a)).toFixed(1)}`;
-  const arc = (a0, a1, col, w) => `<path d="M${pol(a0)} A${R},${R} 0 0 0 ${pol(a1)}" fill="none" stroke="${col}" stroke-width="${w}"/>`;
-  const col = over ? "var(--red)" : "var(--blue)";
-  return `<svg width="${W}" height="${H}">` + arc(Math.PI, 0, "var(--line-soft)", 12) + arc(Math.PI, Math.PI * (1 - frac), col, 12) +
-    `<text x="${cx}" y="${cy - 4}" text-anchor="middle" font-size="22" font-weight="700" fill="${over ? "var(--red)" : "var(--ink)"}">${value}${unit}</text>` +
-    (sub ? `<text x="${cx}" y="${cy + 11}" text-anchor="middle" font-size="9" fill="var(--muted)">${esc(sub)}</text>` : "") + `</svg>`;
-}
-
 function heatColor(cnt, cap){
   if(cnt <= 0) return "#f3f4f6";
   if(cnt > cap) return "var(--red)";
@@ -439,6 +824,7 @@ function renderDashboard(){
   // B. Délais
   let enRetard = 0, retardCumule = 0, lateTtl = 0; const ech7 = []; let jalon = null;
   scheds.forEach(({c, S}) => {
+    if(c.hold) return;   // chantier en pause : hors métriques de retard
     if(colOf(c) !== "done" && c.echeance && S.fend > c.echeance) enRetard++;
     if(c.baseline){ const g = daysBetween(c.baseline.project_end, S.fend); if(g > 0) retardCumule += g; }
     lateTtl += c.taches.filter(t => !t.done && S.sched[t.id] && S.sched[t.id].endDate < TODAY).length;
@@ -465,6 +851,18 @@ function renderDashboard(){
   scheds.forEach(({c, S}) => c.taches.forEach(t => { if(!t.done){ taskN++; if(S.sched[t.id] && S.sched[t.id].critical) critN++; } }));
   const sansEch = active.filter(c => !c.echeance).length, sansRef = active.filter(c => !c.baseline).length;
   const critPct = taskN ? Math.round(100 * critN / taskN) : 0;
+  // F2. En cours & temps de cycle réel (start_date → done_date) ; repère les tâches qui ont traîné
+  let enCours = 0, traineuses = 0; const cycles = [];
+  chs.forEach(c => c.taches.forEach(t => {
+    if(t.start_date && !t.done && !c.hold) enCours++;
+    if(t.done && t.start_date && t.done_date){
+      const cyc = Math.max(0, daysBetween(t.start_date, t.done_date));
+      cycles.push(cyc);
+      const planned = t.is_milestone ? 0 : Math.max(1, t.duree || 1);
+      if(cyc > planned * 1.5 && cyc - planned >= 2) traineuses++;   // réel nettement > planifié
+    }
+  }));
+  const cycleMoy = cycles.length ? Math.round(10 * cycles.reduce((a, b) => a + b, 0) / cycles.length) / 10 : 0;
 
   // données graphes additionnelles
   const persLate = {}; chs.forEach(c => openAtt(c).forEach(l => { if(isLate(l.date)) persLate[l.personne] = true; }));
@@ -526,6 +924,9 @@ function renderDashboard(){
   h += `<div class="dash-row">` + chartBox("Tâches terminées par semaine", vbar(weekRows)) +
        chartBox("% chemin critique", `<div class="center">${donut(critPct)}<div class="muted small">${critN}/${taskN} tâches actives</div></div>`) + `</div>`;
   h += `<div class="kpis6">` +
+    dkpi("Tâches en cours", enCours, "démarrées, non finies") +
+    dkpi("Temps de cycle moyen", cycleMoy + " j", cycles.length + " tâche(s) mesurée(s)") +
+    dkpi("Ont traîné", traineuses, "cycle réel ≫ durée planifiée", traineuses ? "bad" : "good") +
     dkpi("Terminées (7 j)", done7, done30 + " sur 30 j", "good") +
     dkpi("Sans échéance", sansEch, "chantiers actifs", sansEch ? "bad" : "good") +
     dkpi("Sans référence figée", sansRef, "chantiers actifs") + `</div>`;
@@ -540,7 +941,10 @@ function renderCharge(){
     fldNum("Max chantiers en cours", "wip_max", 1) +
     fldNum("Relance après (j)", "relance_jours", 1) +
     `<label class="fld"><input type="checkbox" ${SETTINGS.jours_ouvres ? "checked" : ""} ` +
-    `onchange="saveSetting('jours_ouvres',this.checked)"> Jours ouvrés (exclure week-ends)</label></div>`;
+    `onchange="saveSetting('jours_ouvres',this.checked)"> Jours ouvrés (exclure week-ends)</label>` +
+    `<label class="fld"><span class="fl">Journée de travail</span>` +
+    `<input type="time" value="${SETTINGS.jour_debut || "07:00"}" title="Début" onchange="saveSetting('jour_debut',this.value)"> → ` +
+    `<input type="time" value="${SETTINGS.jour_fin || "17:51"}" title="Fin (un chrono oublié est fermé à cette heure)" onchange="saveSetting('jour_fin',this.value)"></label></div>`;
   h += `<div class="ch-h">Plan de charge — tâches actives par jour · limite <b>${cd.cap}</b> · horizon 120 j</div>`;
   if(!cd.days.length){ $("charge").innerHTML = h + `<div class="empty">Aucune tâche active planifiée.</div>`; return; }
   h += chargeChart(cd);
@@ -624,7 +1028,7 @@ function renderBoard(){
     cards.forEach(c => {
       const open = openAtt(c), late = lateAtt(c);
       const card = document.createElement("div");
-      card.className = `card p-${c.prio}`;
+      card.className = `card p-${c.prio}${c.hold ? " on-hold" : ""}`;
       card.draggable = true;
       card.addEventListener("dragstart", e => { e.dataTransfer.setData("id", c.id); card.classList.add("drag"); });
       card.addEventListener("dragend", () => card.classList.remove("drag"));
@@ -640,6 +1044,7 @@ function renderBoard(){
       // Carte bloquée : on montre DIRECTEMENT la raison (point bloquant, livrable attendu/en retard).
       if(col.key === "block") h += `<div class="c-blk">⛔ <b>Bloqué</b> — ${esc(blockReason(c))}</div>`;
       const bdg = [];
+      if(c.hold) bdg.push(`<span class="bdg b-hold">⏸ En pause${c.hold_until ? ` · reprise ${fmtShort(c.hold_until)}` : ""}</span>`);
       // Chaque type a une icône + une couleur dédiées → reconnaissable d'un coup d'œil.
       const tc = topCrit(c);
       if(tc >= 10){ const lv = critLevel(tc);
@@ -705,14 +1110,13 @@ function renderContacts(){
   const rows = peopleStats();
   let h = `<div class="ch-h">Personnes <button class="btn sm primary" onclick="addPerson()">+ Ajouter une personne</button></div>`;
   if(!rows.length){ $("contacts").innerHTML = h + `<div class="empty">Aucune personne. Ajoute-en une, ou crée un livrable.</div>`; return; }
-  const jq = s => esc(s).replace(/'/g, "\\'");
   h += `<table class="ptable"><thead><tr><th>Nom</th><th>Rôle</th><th>Livrables</th><th></th></tr></thead><tbody>`;
   rows.forEach(p => {
     h += `<tr><td><b>${esc(p.nom)}</b></td>` +
-      `<td><input class="role-edit" value="${esc(p.role || "")}" placeholder="rôle" onchange="setPersonRole('${jq(p.nom)}',this.value)"></td>` +
+      `<td><input class="role-edit" value="${esc(p.role || "")}" placeholder="rôle" onchange="setPersonRole('${jqs(p.nom)}',this.value)"></td>` +
       `<td>${p.total}${p.open ? ` <span class="muted">(${p.open} ouvert${p.open > 1 ? "s" : ""})</span>` : ""}</td>` +
-      `<td class="pacts"><a onclick="renamePerson('${jq(p.nom)}')">Renommer</a>` +
-      `<a class="danger" onclick="removePerson('${jq(p.nom)}',${p.total})">Supprimer</a></td></tr>`;
+      `<td class="pacts"><a onclick="renamePerson('${jqs(p.nom)}')">Renommer</a>` +
+      `<a class="danger" onclick="removePerson('${jqs(p.nom)}',${p.total})">Supprimer</a></td></tr>`;
   });
   h += `</tbody></table>`;
   $("contacts").innerHTML = h;
@@ -817,9 +1221,14 @@ function computeSchedule(c){
     const t = byId[id];
     let predFin = 0; preds[id].forEach(p => predFin = Math.max(predFin, fc[p] ? fc[p].ffIdx : 0));
     let fsIdx, ffIdx;
+    const realStart = t.start_date ? Math.max(0, workOffset(start, t.start_date)) : null;
     if(t.done && t.done_date){
       ffIdx = Math.max(0, workOffset(start, t.done_date));   // fin = date reelle de completion
-      fsIdx = Math.max(0, ffIdx - dur(t));                    // barre = sa duree (pas un trou geant)
+      // debut = debut REEL si connu, sinon reconstitue depuis la duree (pas un trou geant)
+      fsIdx = realStart != null ? Math.min(realStart, ffIdx) : Math.max(0, ffIdx - dur(t));
+    } else if(realStart != null){
+      fsIdx = realStart;                       // EN COURS : le debut reel prime sur le previsionnel
+      ffIdx = Math.max(fsIdx + dur(t), todayIdx);   // au moins jusqu'a aujourd'hui tant qu'inachevee
     } else {
       fsIdx = Math.max(predFin, todayIdx);   // une tache non finie ne peut pas finir dans le passe
       if(sfix[id] != null) fsIdx = Math.max(fsIdx, sfix[id]);   // debut impose
@@ -842,6 +1251,14 @@ function computeSchedule(c){
 // ======================================================================== //
 function openChantier(id){ CUR = id; renderPage(); showView("page"); window.scrollTo(0, 0); }
 function backToBoard(){ CUR = null; showView("board"); }
+// Mise en pause (hold) : reprise manuelle ; date de reprise optionnelle (déclenche un rappel).
+function toggleHold(id){
+  const c = chById(id); if(!c) return;
+  if(c.hold){ mutate({op: "set_hold", chantier_id: id, hold: false}); return; }
+  const d = prompt("Mettre ce chantier en pause.\nDate de reprise prévue (AAAA-MM-JJ) — laisser vide pour aucune :", "");
+  if(d === null) return;
+  mutate({op: "set_hold", chantier_id: id, hold: true, until: (d || "").trim() || null});
+}
 document.addEventListener("keydown", e => { if(e.key === "Escape" && CUR) backToBoard(); });
 
 function renderPage(){
@@ -857,10 +1274,12 @@ function renderPage(){
   // En-tete
   h += `<div class="pg-top">`;
   h += `<button class="ghost" onclick="backToBoard()">← Tableau</button>`;
-  const statusTxt = blocked ? `Bloqué (auto) — ${esc(blockReason(c))}` : col.label;
-  h += `<div class="pg-titlewrap"><div class="d-status ${blocked ? "block" : c.statut}">${statusTxt} · priorité ${PRIO[c.prio]}</div>` +
+  const statusTxt = c.hold ? `En pause${c.hold_until ? ` — reprise prévue le ${fmt(c.hold_until)}` : ""}`
+                  : blocked ? `Bloqué (auto) — ${esc(blockReason(c))}` : col.label;
+  h += `<div class="pg-titlewrap"><div class="d-status ${c.hold ? "hold" : blocked ? "block" : c.statut}">${statusTxt} · priorité ${PRIO[c.prio]}</div>` +
        `<h2 class="pg-title" contenteditable="true" onblur="saveField('titre',this.textContent)">${esc(c.titre)}</h2></div>`;
   h += `<div class="grow"></div>`;
+  h += `<button class="ghost ${c.hold ? "held" : ""}" onclick="toggleHold('${c.id}')" title="${c.hold ? "Reprendre ce chantier" : "Mettre en pause : sort le chantier des retards, de la charge et du WIP"}">${c.hold ? "▶ Reprendre" : "⏸ Mettre en pause"}</button>`;
   h += `<select onchange="mutate({op:'move_chantier',id:'${c.id}',statut:this.value})" class="sel" title="État d'avancement (Bloqué est calculé)">` +
        COLS.filter(k => k.key !== "block").map(k => `<option value="${k.key}" ${c.statut === k.key ? "selected" : ""}>${k.label}</option>`).join("") + `</select>`;
   h += `<select onchange="mutate({op:'update_chantier',id:'${c.id}',prio:this.value})" class="sel">` +
@@ -913,7 +1332,7 @@ function renderPage(){
   // Tags
   h += card(`Tags <span class="add" onclick="showAddTag('${c.id}')">+ ajouter</span>`,
     `<div class="chips edit">` + (c.tags.length ? c.tags.map(t =>
-      `<span class="chip">${esc(t)} <span class="x" onclick="mutate({op:'remove_tag',chantier_id:'${c.id}',tag:'${esc(t)}'})">×</span></span>`).join("")
+      `<span class="chip">${esc(t)} <span class="x" onclick="mutate({op:'remove_tag',chantier_id:'${c.id}',tag:'${jqs(t)}'})">×</span></span>`).join("")
       : `<span class="empty">Aucun tag.</span>`) + `</div><div id="addTag_${c.id}"></div>`);
 
   // Blocage
@@ -923,7 +1342,7 @@ function renderPage(){
   h += `</div><div class="pg-right">`;
 
   // Tâches (checklist enrichie)
-  h += card(`Plan de tâches <span class="add" onclick="showAddTache('${c.id}')">+ tâche</span>`, taskTable(c, S));
+  h += card(`Plan de tâches <span class="add" onclick="showAddTache('${c.id}')">+ tâche</span> <span class="add" onclick="showWbs('${c.id}')">+ modèle</span>`, taskTable(c, S));
 
   // Risques
   h += card(`Risques <span class="add" onclick="showAddRisque('${c.id}')">+ risque</span>`, risquesBlock(c));
@@ -1035,11 +1454,39 @@ function taskTable(c, S){
     h += `<div class="trow ${s.critical ? "crit" : ""}">`;
     // ligne 1 : etat + libelle + jalon + suppr
     h += `<div class="trow-main">`;
-    h += `<span class="box ${t.done ? "ok" : ""}" title="Fait / à faire" onclick="mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})"></span>`;
+    // case Fait : active pour un jalon ou une tâche démarrée/terminée ; sinon désactivée (il faut Démarrer)
+    if(t.is_milestone || t.start_date || t.done){
+      h += `<span class="box ${t.done ? "ok" : ""}" title="Fait / à faire" onclick="mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})"></span>`;
+    } else {
+      h += `<span class="box disabled" title="Démarre la tâche avant de pouvoir la cocher"></span>`;
+    }
     h += `<input class="tlabel ${t.done ? "done" : ""}" value="${esc(t.label)}" ` +
          `onblur="if(this.value.trim()&&this.value!=='${esc(t.label)}')mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',label:this.value.trim()})">`;
     h += `<label class="ms" title="Jalon (durée 0)"><input type="checkbox" ${t.is_milestone ? "checked" : ""} ` +
          `onchange="mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',is_milestone:this.checked})"> jalon</label>`;
+    // etat d'avancement : à faire → Démarrer → en cours (chrono ⏸ Pause / ▶ Reprendre) → Fait
+    if(!t.is_milestone){
+      const tmin = tacheMin(t.id);
+      if(t.done){
+        if(t.start_date)
+          h += `<span class="tstate real" title="Début → fin réels${tmin ? " · temps chrono " + fmtDur(tmin) : ""}">réel ${fmtShort(t.start_date)} → ${fmtShort(t.done_date)}${tmin ? " · ⏱ " + fmtDur(tmin) : ""}</span>`;
+        else if(tmin)
+          h += `<span class="tstate real" title="Temps chronométré">⏱ ${fmtDur(tmin)}</span>`;
+      } else if(t.start_date){
+        const act = activeForTache(t.id);
+        h += `<span class="tstate inprog${act ? " running" : ""}" title="${act ? "Chrono en cours (depuis " + act.debut + ")" : "Démarrée — chrono en pause"}">${act ? "⏱ en cours" : "● en cours"}</span>`;
+        h += `<input type="date" class="tstart-date" value="${t.start_date}" title="Début réel (corrigeable)" ` +
+             `onchange="mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',start_date:this.value||null})">`;
+        h += act
+          ? `<button class="tstart stop" title="Mettre le chrono en pause (démarré à ${act.debut})" onclick="mutate({op:'clock_stop',id:'${act.id}'})">⏸ Pause</button>`
+          : `<button class="chrono" title="Reprendre le chrono sur cette tâche" onclick="mutate({op:'clock_start',kind:'tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">▶ Reprendre${tmin ? " · " + fmtDur(tmin) : ""}</button>`;
+        h += `<span class="tstart-undo" title="Annuler le démarrage (revenir à « à faire »)" ` +
+             `onclick="mutate({op:'start_tache',chantier_id:'${c.id}',tache_id:'${t.id}',date:null})">↺</span>`;
+      } else {
+        h += `<button class="tstart" title="Démarrer — lance le chrono et enregistre le début réel" ` +
+             `onclick="mutate({op:'start_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">▶ Démarrer</button>`;
+      }
+    }
     h += `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer cette tâche ?'))mutate({op:'remove_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">×</span>`;
     h += `</div>`;
     // ligne 2 : debut (impose ou auto) / duree / fin / predecesseurs / marge
@@ -1074,7 +1521,27 @@ function taskTable(c, S){
         ? `<span class="gate wait gate-row">⊘ attend : ${pend.map(l => esc(l.quoi) + " (" + esc(l.personne) + (l.date ? ", " + fmtShort(l.date) : "") + ")").join(" · ")}</span>`
         : `<span class="gate ok gate-row">✓ livrable reçu</span>`;
     }
-    h += `</div></div>`;
+    h += `</div>`;   // fin trow-sub
+    // description / notes (éditable inline ; sauvegarde au blur si modifiée, vide autorisé)
+    h += `<textarea class="tdesc" rows="1" placeholder="+ description / notes…" ` +
+         `onblur="if(this.value!==this.defaultValue)mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',desc:this.value})">${esc(t.desc || "")}</textarea>`;
+    // checklist d'étapes (sous-tâches) — sans planning propre, juste un découpage cochable
+    const subs = t.subtasks || [];
+    const sdone = subs.filter(x => x.done).length;
+    h += `<div class="subtasks">`;
+    if(subs.length) h += `<div class="sub-head">Étapes · <b>${sdone}/${subs.length}</b>${sdone === subs.length ? " ✓" : ""}</div>`;
+    subs.forEach(st => {
+      h += `<div class="strow${st.done ? " done" : ""}">` +
+        `<span class="sbox ${st.done ? "ok" : ""}" title="Fait / à faire" onclick="mutate({op:'toggle_subtask',chantier_id:'${c.id}',tache_id:'${t.id}',subtask_id:'${st.id}'})"></span>` +
+        `<input class="slabel${st.done ? " done" : ""}" value="${esc(st.label)}" ` +
+          `onblur="if(this.value.trim()&&this.value!==this.defaultValue)mutate({op:'update_subtask',chantier_id:'${c.id}',tache_id:'${t.id}',subtask_id:'${st.id}',label:this.value.trim()})">` +
+        (st.done && st.done_at ? `<span class="sdate" title="Étape cochée le ${fmtDT(st.done_at)}">✓ ${fmtDT(st.done_at)}</span>` : ``) +
+        `<span class="sdel" title="Supprimer l'étape" onclick="mutate({op:'remove_subtask',chantier_id:'${c.id}',tache_id:'${t.id}',subtask_id:'${st.id}'})">×</span>` +
+        `</div>`;
+    });
+    h += `<input class="sadd" placeholder="+ étape…" onkeydown="if(event.key==='Enter')addSubtask('${c.id}','${t.id}',this)">`;
+    h += `</div>`;
+    h += `</div>`;   // fin trow
   });
   h += `</div><div id="addTache_${c.id}"></div>`;
   return h;
@@ -1102,63 +1569,122 @@ function removePred(cid, tid, pid){
   const preds = (t.preds || []).filter(x => x !== pid);
   mutate({op: "update_tache", chantier_id: cid, tache_id: tid, preds});
 }
+function addSubtask(cid, tid, el){
+  const v = el.value.trim(); if(!v) return;
+  mutate({op: "add_subtask", chantier_id: cid, tache_id: tid, label: v});
+}
 
 function ganttSVG(c, S){
   const tasks = S.order; if(!tasks.length) return `<div class="empty">—</div>`;
-  const bl = S.baseline;
+  const bl = S.baseline, hasBl = !!bl;
   const blById = {}; if(bl) bl.tasks.forEach(b => blById[b.id] = b);
   const tIdx = workOffset(S.start, TODAY);
-  let days = Math.max(1, S.projectDays, S.fendIdx, tIdx);
-  if(bl) bl.tasks.forEach(b => days = Math.max(days, workOffset(S.start, b.end)));
-  const hasBl = !!bl;
-  const labelW = 180, dayW = Math.max(9, Math.min(28, Math.floor(740 / days))), rowH = hasBl ? 30 : 26, top = 28;
+  const off = d => Math.max(0, workOffset(S.start, d));
+  // référence (plan) : baseline figée si présente, sinon plan CPM courant
+  const refOf = id => { const b = blById[id], s = S.sched[id]; return b ? {s: off(b.start), e: off(b.end)} : {s: s.es, e: s.ef}; };
+  // réalisé : réel pour fait/en cours, sinon posé sur le plan
+  // réalisé/prévisionnel : passe AVANT qui propage les retards réels sur l'aval
+  // (une tâche démarrée en retard repousse le début de ses successeurs non démarrés)
+  const actMap = {};
+  S.order.slice().sort((a, b) => S.sched[a].depth - S.sched[b].depth).forEach(id => {
+    const t = S.byId[id], r = refOf(id), rs = t.start_date ? off(t.start_date) : null;
+    const dur = Math.max(0, r.e - r.s);
+    const predEnd = (S.preds[id] || []).reduce((m, p) => actMap[p] ? Math.max(m, actMap[p].e) : m, 0);
+    if(t.done && t.done_date){
+      const de = off(t.done_date), a = rs != null ? Math.min(rs, de) : Math.max(0, de - dur);
+      actMap[id] = {s: a, e: Math.max(a, de)};
+    } else if(rs != null){
+      actMap[id] = {s: rs, e: Math.max(rs + dur, tIdx)};                 // en cours
+    } else {
+      const s = Math.max(r.s, predEnd);                                  // pas démarré : décalé par les preds en retard
+      actMap[id] = {s, e: s + dur};
+    }
+  });
+  const actOf = id => actMap[id] || refOf(id);
+  let days = Math.max(1, S.projectDays, tIdx);
+  tasks.forEach(id => { const r = refOf(id), a = actOf(id); days = Math.max(days, r.e, a.e); });
+  const labelW = 180, dayW = Math.max(9, Math.min(28, Math.floor(740 / days))), rowH = 34, top = 28;
   const W = labelW + days * dayW + 30, H = top + tasks.length * rowH + 16;
   const x = d => labelW + d * dayW;
   let g = `<div class="scrollx"><svg width="${W}" height="${H}" class="gantt">`;
   g += `<defs><marker id="ah" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">` +
-       `<path d="M0,0 L6,3 L0,6 Z" fill="#9ca3af"/></marker></defs>`;
+       `<path d="M0,0 L6,3 L0,6 Z" fill="#9ca3af"/></marker>` +
+       `<pattern id="ov" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">` +
+       `<rect width="6" height="6" fill="#fde2cf"/><line x1="0" y1="0" x2="0" y2="6" stroke="#ea580c" stroke-width="3"/></pattern>` +
+       `<pattern id="crit" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">` +
+       `<rect width="6" height="6" fill="#a7f3d0"/><line x1="0" y1="0" x2="0" y2="6" stroke="#059669" stroke-width="3"/></pattern></defs>`;
   const step = days > 40 ? 5 : 1;
   for(let d = 0; d <= days; d += step){
     g += `<line x1="${x(d)}" y1="${top}" x2="${x(d)}" y2="${H - 12}" stroke="var(--line-soft)"/>`;
     g += `<text x="${x(d)}" y="${top - 8}" font-size="9" fill="var(--faint)" text-anchor="middle">${fmtShort(addUnits(S.start, d))}</text>`;
   }
   if(tIdx >= 0 && tIdx <= days) g += `<line x1="${x(tIdx)}" y1="${top}" x2="${x(tIdx)}" y2="${H - 12}" stroke="var(--red)" stroke-dasharray="3 3"/>`;
-  // fleches de dependance (positions previsionnelles)
+  // fleches de dependance — suivent les positions RÉELLES des barres (réalisé), pas le plan
+  const barCy = k => top + k * rowH + 21;   // centre vertical de la barre "réalisé"
   tasks.forEach((id, i) => {
     S.preds[id].forEach(p => {
       const j = tasks.indexOf(p); if(j < 0) return;
-      const x1 = x(S.fc[p].ffIdx), y1 = top + j * rowH + rowH / 2;
-      const x2 = x(S.fc[id].fsIdx), y2 = top + i * rowH + rowH / 2;
+      const x1 = x(actOf(p).e), y1 = barCy(j);
+      const x2 = x(actOf(id).s), y2 = barCy(i);
       g += `<path d="M${x1},${y1} C${x1 + 12},${y1} ${x2 - 12},${y2} ${x2},${y2}" fill="none" stroke="#d1d5db" stroke-width="1" marker-end="url(#ah)"/>`;
     });
   });
-  // barres
+  // barres : référence (plan, fin grise) + réalisé (réel) + dépassement (hachuré orange)
   tasks.forEach((id, i) => {
-    const s = S.sched[id], f = S.fc[id], t = s.task, y0 = top + i * rowH + 5;
+    const s = S.sched[id], t = s.task, y0 = top + i * rowH + 5, r = refOf(id), a = actOf(id);
     g += `<text x="${labelW - 8}" y="${y0 + 10}" font-size="11" text-anchor="end" fill="var(--ink)">${esc(t.label.slice(0, 26))}</text>`;
-    // reference (fantome) derriere
-    if(hasBl && blById[id]){
-      const bs = workOffset(S.start, blById[id].start), be = workOffset(S.start, blById[id].end);
-      if(t.is_milestone){
-        g += `<path d="M${x(bs)},${y0 + 4} L${x(bs) + 5},${y0 + 9} L${x(bs)},${y0 + 14} L${x(bs) - 5},${y0 + 9} Z" fill="none" stroke="#d1d5db"/>`;
-      } else {
-        g += `<rect x="${x(bs)}" y="${y0 + 1}" width="${Math.max(2, (be - bs) * dayW)}" height="6" rx="1" fill="#e5e7eb"/>`;
-      }
-    }
-    const y = hasBl ? y0 + 9 : y0;
+    const yRef = y0 + 1, yAct = y0 + 9;
+    const inprog = !t.done && !!t.start_date;
+    const late = !t.done && !inprog && r.e < tIdx;
+    // dépassement = DURÉE propre de la tâche (réelle vs prévue), pas la fin calendaire
+    const plannedDur = Math.max(0, r.e - r.s), actualDur = Math.max(0, a.e - a.s);
+    const over = !t.is_milestone && actualDur > plannedDur;
+    const extra = over ? actualDur - plannedDur : 0;
+    const lateStart = Math.max(0, a.s - r.s);   // retard de démarrage (jours ouvrés)
+    const dlabel = t.done ? "terminé" : inprog ? "en cours" : late ? "en retard" : s.critical ? "critique" : "à faire";
+    const real = (t.start_date || t.done) ? fmt(addUnits(S.start, a.s)) + " → " + (t.done ? fmt(addUnits(S.start, a.e)) : "…") : "—";
+    const durTxt = (t.start_date || t.done) && !t.is_milestone
+      ? `\nDurée : ${actualDur} j réel vs ${plannedDur} j prévu` + (over ? ` (+${extra}, plus long)` : actualDur < plannedDur ? ` (−${plannedDur - actualDur}, plus rapide)` : " (conforme)")
+      : "";
+    const tip = `${esc(t.label)}\nPlanifié : ${fmt(addUnits(S.start, r.s))} → ${fmt(addUnits(S.start, r.e))}\nRéel : ${real}` +
+                (lateStart ? `\nDémarrage : +${lateStart} j de retard` : "") + durTxt + `\n(${dlabel})`;
     if(t.is_milestone){
-      const cx = x(f.fsIdx), cy = y + 8, r = 6;
-      g += `<path d="M${cx},${cy - r} L${cx + r},${cy} L${cx},${cy + r} L${cx - r},${cy} Z" fill="${s.critical ? "var(--red)" : "var(--ink)"}"/>`;
+      g += `<path d="M${x(r.s)},${yRef + 3} L${x(r.s) + 4},${yRef + 7} L${x(r.s)},${yRef + 11} L${x(r.s) - 4},${yRef + 7} Z" fill="none" stroke="#cbd5e1"/>`;
+      const mx = x(t.done ? a.e : r.s), cy = yAct + 7, rr = 6;
+      g += `<path d="M${mx},${cy - rr} L${mx + rr},${cy} L${mx},${cy + rr} L${mx - rr},${cy} Z" fill="${t.done ? "var(--green)" : late ? "var(--red)" : s.critical ? "#059669" : "var(--ink)"}"><title>${tip}</title></path>`;
     } else {
-      const bx = x(f.fsIdx), bw = Math.max(3, (f.ffIdx - f.fsIdx) * dayW);
-      const fill = t.done ? "var(--green)" : (s.critical ? "var(--red)" : (f.late ? "var(--amber)" : "var(--blue)"));
-      g += `<rect x="${bx}" y="${y}" width="${bw}" height="14" rx="2" fill="${fill}" opacity="${t.done ? .85 : 1}"/>`;
+      // référence (plan) — barre fine grise
+      g += `<rect x="${x(r.s)}" y="${yRef}" width="${Math.max(2, (r.e - r.s) * dayW)}" height="5" rx="1" fill="#e5e7eb"><title>${tip}</title></rect>`;
+      // réalisé — segment dans le plan ; priorité : terminé > en cours > en retard > critique > à faire
+      let fill, stroke = "";
+      if(t.done) fill = "var(--green)";
+      else if(inprog){ fill = "var(--inprog)"; stroke = ` stroke="var(--inprog-d)" stroke-width="1.5"`; }   // bleu
+      else if(late) fill = "var(--red)";                                                                     // en retard
+      else if(s.critical){ fill = "url(#crit)"; stroke = ` stroke="#047857" stroke-width=".8"`; }            // vert texturé
+      else { fill = "#a78bfa"; stroke = ` stroke="#7c3aed" stroke-width=".8"`; }                             // à faire (violet, distinct du gris du plan)
+      // segment "dans la durée prévue" (à partir du début RÉEL) + queue de dépassement de DURÉE
+      const overStart = a.s + plannedDur, mainEnd = over ? overStart : a.e;
+      g += `<rect x="${x(a.s)}" y="${yAct}" width="${Math.max(3, (mainEnd - a.s) * dayW)}" height="14" rx="2" fill="${fill}"${stroke} opacity="${t.done ? .9 : 1}"><title>${tip}</title></rect>`;
+      // dépassement = la tâche a pris plus de temps que prévu (queue hachurée orange)
+      if(over) g += `<rect x="${x(overStart)}" y="${yAct}" width="${Math.max(2, extra * dayW)}" height="14" rx="2" fill="url(#ov)" stroke="#ea580c" stroke-width=".6"><title>A pris +${extra} j de plus que prévu — ${esc(t.label)}</title></rect>`;
+    }
+    // DÉRIVE calendaire : écart de FIN réelle/projetée vs plan (fin trait sous la barre).
+    // Rouge = fini/projeté plus tard que prévu, vert = plus tôt. La dérive s'accumule le long de la chaîne.
+    const endSlip = a.e - r.e;
+    if(endSlip !== 0){
+      const dyl = y0 + 26, xa = x(Math.min(r.e, a.e)), xb = x(Math.max(r.e, a.e));
+      const dc = endSlip > 0 ? "rgba(220,38,38,.55)" : "rgba(5,150,105,.55)";
+      g += `<line x1="${xa}" y1="${dyl}" x2="${xb}" y2="${dyl}" stroke="${dc}" stroke-width="3" stroke-linecap="round">` +
+           `<title>Dérive de fin vs plan : ${endSlip > 0 ? "+" + endSlip : endSlip} j ${endSlip > 0 ? "(en retard)" : "(en avance)"}</title></line>`;
     }
   });
   g += `</svg></div>`;
-  g += `<div class="legend"><span><i class="sq red"></i>critique</span><span><i class="sq blue"></i>tâche</span>` +
-       `<span><i class="sq amberb"></i>en glissement</span><span><i class="sq green"></i>terminée</span>` +
-       (hasBl ? `<span><i class="sq refb"></i>référence figée</span>` : ``) + `<span><i class="dia"></i>jalon</span></div>`;
+  g += `<div class="legend"><span><i class="sq refb"></i>plan${hasBl ? " (figé)" : ""}</span>` +
+       `<span><i class="sq todob"></i>à faire</span><span><i class="sq inprogb"></i>en cours</span>` +
+       `<span><i class="sq red"></i>en retard</span><span><i class="sq critb"></i>critique</span>` +
+       `<span><i class="sq green"></i>terminée</span><span><i class="sq ovb"></i>dépassement (durée)</span>` +
+       `<span><i class="drift-lg"></i>dérive de fin (rouge=retard, vert=avance)</span>` +
+       `<span><i class="dia"></i>jalon</span></div>`;
   return g;
 }
 
@@ -1221,7 +1747,7 @@ function livrablesBlock(c){
       g += `<text x="${tIdx}" y="10" font-size="9" fill="var(--red)" text-anchor="middle">auj.</text>`;
       c.livrables.forEach((l, i) => {
         const y = 24 + i * 24;
-        g += `<text x="${labelW - 8}" y="${y + 4}" font-size="10.5" text-anchor="end" fill="var(--ink)">${esc(l.personne.slice(0, 18))}</text>`;
+        g += `<text x="${labelW - 8}" y="${y + 4}" font-size="10.5" text-anchor="end" fill="var(--ink)">${esc((l.personne || "").slice(0, 18))}</text>`;
         g += `<line x1="${labelW}" y1="${y}" x2="${labelW + 520}" y2="${y}" stroke="var(--line-soft)"/>`;
         if(l.date){
           const late = (l.statut === "attente" || l.statut === "partiel") && isLate(l.date);
@@ -1384,6 +1910,22 @@ function addTache(id){
   mutate({op: "add_tache", chantier_id: id, label: v, is_milestone: $("ntm").checked,
           duree: $("ntd").value, start_fix: $("nts").value || null, preds: pv ? [pv] : []});
 }
+// Insérer un modèle de tâches (WBS) standard
+function showWbs(id){
+  const items = Object.keys(WBS_TEMPLATES).map(name => {
+    const ts = WBS_TEMPLATES[name], steps = ts.map(t => esc(t.label)).join(" → ");
+    return `<button class="tpl-item" onclick="applyWbs('${id}','${jqs(name)}')"><b>${esc(name)}</b>` +
+      `<span class="muted small">${ts.length} tâches · ${steps}</span></button>`;
+  }).join("");
+  $("addTache_" + id).innerHTML =
+    `<div class="miniform"><div class="tpl-h">Insérer un modèle de tâches (WBS) — durées &amp; dépendances pré-câblées :</div>` +
+    `<div class="tpl-list">${items}</div>` +
+    `<div class="actions"><button class="btn sm" onclick="hide('addTache_${id}')">Annuler</button></div></div>`;
+}
+function applyWbs(id, name){
+  const ts = WBS_TEMPLATES[name]; if(!ts) return;
+  mutate({op: "apply_template", chantier_id: id, taches: ts});
+}
 
 // ---- import / modele Excel ----------------------------------------------
 function importExcel(input){
@@ -1395,7 +1937,7 @@ function importExcel(input){
     if(d.error){ alert(d.error); return; }
     STORE = d.store; TODAY = d.today;
     alert(d.message || "Import terminé.");
-    CUR = null; renderAll(); showView("board");
+    CUR = null; showView("board");   // showView peint déjà l'alerte + le board
   };
   reader.readAsDataURL(file);
 }
@@ -1409,12 +1951,16 @@ function showAddNote(id){
 function addNote(id){ const v = $("nnt").value.trim(); if(v) mutate({op: "add_note", chantier_id: id, texte: v}); }
 
 function showAddPartie(id){
+  const chips = PARTIE_CATALOG.map(p =>
+    `<button class="tpl-chip" title="${esc(p.role)}" onclick="partieFill('${jqs(p.nom)}','${jqs(p.role)}')">${esc(p.nom)}</button>`).join("");
   $("addPartie_" + id).innerHTML =
-    `<div class="miniform"><div class="row"><input id="ppn" placeholder="Nom"><input id="ppr" placeholder="Rôle"></div>` +
+    `<div class="miniform"><div class="tpl-h">Rôle standard (clic pour pré-remplir) :</div><div class="tpl-chips">${chips}</div>` +
+    `<div class="row"><input id="ppn" placeholder="Nom / entité"><input id="ppr" placeholder="Rôle"></div>` +
     `<div class="actions"><button class="btn sm" onclick="hide('addPartie_${id}')">Annuler</button>` +
     `<button class="btn sm primary" onclick="addPartie('${id}')">Ajouter</button></div></div>`;
   $("ppn").focus();
 }
+function partieFill(nom, role){ $("ppn").value = nom; $("ppr").value = role; }
 function addPartie(id){ const v = $("ppn").value.trim(); if(v) mutate({op: "add_partie", chantier_id: id, nom: v, role: $("ppr").value.trim()}); }
 
 function showAddTag(id){
@@ -1436,8 +1982,14 @@ function knownPeople(){
 }
 function showAddLiv(id){
   const opts = knownPeople().map(p => `<option value="${esc(p.nom)}" data-role="${esc(p.role)}">${esc(p.nom)}${p.role ? " (" + esc(p.role) + ")" : ""}</option>`).join("");
+  let cat = `<div class="tpl-h">Livrable type (clic pour pré-remplir) :</div><div class="tpl-chips tpl-chips-sc">`;
+  Object.entries(LIVRABLE_CATALOG).forEach(([g, items]) => {
+    cat += `<span class="tpl-grp">${esc(g)}</span>`;
+    items.forEach(it => cat += `<button class="tpl-chip" title="${esc(it.impact || "")}" onclick="livFill('${jqs(it.l)}','${jqs(it.impact || "")}')">${esc(it.l)}</button>`);
+  });
+  cat += `</div>`;
   $("addLiv_" + id).innerHTML =
-    `<div class="miniform">` +
+    `<div class="miniform">` + cat +
     `<div class="row"><select id="lvperson" onchange="lvPersonChange()"><option value="">— choisir une personne —</option>${opts}<option value="__new__">+ nouvelle personne…</option></select></div>` +
     `<div class="row" id="lvname" style="display:none"><input id="lvp" placeholder="Nom"><input id="lvr" placeholder="Rôle / service"></div>` +
     `<input id="lvq" placeholder="Ce que tu attends (le livrable)">` +
@@ -1447,6 +1999,7 @@ function showAddLiv(id){
     `<div class="actions"><button class="btn sm" onclick="hide('addLiv_${id}')">Annuler</button>` +
     `<button class="btn sm primary" onclick="addLiv('${id}')">Ajouter</button></div></div>`;
 }
+function livFill(quoi, impact){ $("lvq").value = quoi; if(impact && !$("lvi").value.trim()) $("lvi").value = impact; }
 function lvPersonChange(){
   const nw = $("lvperson").value === "__new__";
   $("lvname").style.display = nw ? "flex" : "none";
@@ -1478,13 +2031,46 @@ function assignPerson(cid, lid, sel){   // liste déroulante d'un livrable
 function hide(id){ if($(id)) $(id).innerHTML = ""; }
 
 function newChantier(){
-  const titre = prompt("Titre du nouveau chantier :");
-  if(titre && titre.trim()) mutate({op: "create_chantier", titre: titre.trim(), statut: "todo", prio: "m"});
+  let h = `<div class="modal-bg" onclick="closeModal(event)"><div class="modal" onclick="event.stopPropagation()">`;
+  h += `<h3>Nouveau chantier</h3>`;
+  h += `<input id="ncTitre" class="modal-inp" placeholder="Titre du chantier">`;
+  h += `<div class="tpl-h">Partir d'un modèle standard (optionnel) :</div><div class="tpl-list">`;
+  h += `<button class="tpl-item sel" onclick="ncPick(this,'')"><b>Vierge</b><span class="muted small">aucun pré-remplissage</span></button>`;
+  Object.keys(CHANTIER_TEMPLATES).forEach(name => {
+    const t = CHANTIER_TEMPLATES[name];
+    h += `<button class="tpl-item" onclick="ncPick(this,'${jqs(name)}')"><b>${esc(name)}</b>` +
+      `<span class="muted small">${t.taches.length} tâches · ${t.livrables.length} livrables · ${t.parties.length} parties · ${t.risques.length} risques</span></button>`;
+  });
+  h += `</div><div class="actions"><button class="btn sm" onclick="closeModal()">Annuler</button>` +
+    `<button class="btn sm primary" onclick="createNc()">Créer</button></div></div></div>`;
+  const d = document.createElement("div"); d.id = "ncModal"; d.innerHTML = h;
+  document.body.appendChild(d);
+  window._ncTpl = ""; $("ncTitre").focus();
+  $("ncTitre").addEventListener("keydown", e => { if(e.key === "Enter") createNc(); });
+}
+function ncPick(btn, name){
+  window._ncTpl = name;
+  document.querySelectorAll("#ncModal .tpl-item").forEach(x => x.classList.remove("sel"));
+  btn.classList.add("sel");
+}
+function closeModal(e){ if(e && e.target !== e.currentTarget) return; const m = $("ncModal"); if(m) m.remove(); }
+function createNc(){
+  const titre = $("ncTitre").value.trim(); if(!titre){ $("ncTitre").focus(); return; }
+  const tpl = window._ncTpl;
+  if(!tpl){ mutate({op: "create_chantier", titre, statut: "todo", prio: "m"}); }
+  else { const t = CHANTIER_TEMPLATES[tpl];
+    mutate({op: "apply_template", create: {titre, prio: "m", statut: "todo"},
+            taches: t.taches, livrables: t.livrables, parties: t.parties, risques: t.risques}); }
+  closeModal();
 }
 
 // ======================================================================== //
 //  Risques (registre par chantier + vue globale avec matrice de criticité)
 // ======================================================================== //
+let RK_EDIT = new Set();   // ids de risques en mode édition (sinon lecture seule)
+function rkEdit(id){ RK_EDIT.add(id); renderPage(); }
+function rkDone(id){ RK_EDIT.delete(id); renderPage(); }
+
 function risquesBlock(c){
   const rs = risquesOf(c).slice().sort((a, b) => (riskActive(b) - riskActive(a)) || (crit(b) - crit(a)));
   let h = "";
@@ -1493,24 +2079,47 @@ function risquesBlock(c){
     const n = crit(r), lv = critLevel(n), off = !riskActive(r);
     const late = riskActive(r) && isLate(r.echeance_revue);
     const u = extra => `mutate({op:'update_risque',chantier_id:'${c.id}',risque_id:'${r.id}',${extra}})`;
-    const opt15 = cur => [1, 2, 3, 4, 5].map(v => `<option value="${v}" ${r[cur] === v ? "selected" : ""}>${v}</option>`).join("");
+    const delx = `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer ce risque ?'))mutate({op:'remove_risque',chantier_id:'${c.id}',risque_id:'${r.id}'})">×</span>`;
     h += `<div class="rk ${off ? "rk-off" : ""}">`;
-    h += `<div class="rk-top"><span class="rk-crit" style="color:${lv.col};background:${lv.bg}" title="Proba ${r.probabilite} × Gravité ${r.gravite}">${n} · ${lv.lbl}</span>` +
-      `<input class="rk-lib" value="${esc(r.libelle)}" placeholder="Risque" onchange="${u("libelle:this.value")}">` +
-      `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer ce risque ?'))mutate({op:'remove_risque',chantier_id:'${c.id}',risque_id:'${r.id}'})">×</span></div>`;
-    h += `<div class="rk-meta">` +
-      `<span class="fld"><span class="fl">Proba</span><select onchange="${u("probabilite:this.value")}">${opt15("probabilite")}</select></span>` +
-      `<span class="fld"><span class="fl">Gravité</span><select onchange="${u("gravite:this.value")}">${opt15("gravite")}</select></span>` +
-      `<span class="fld"><span class="fl">Catégorie</span><select onchange="${u("categorie:this.value")}">` +
-        RISK_CATS.map(x => `<option ${r.categorie === x ? "selected" : ""}>${esc(x)}</option>`).join("") + `</select></span>` +
-      `<span class="fld"><span class="fl">Statut</span><select onchange="${u("statut:this.value")}">` +
-        Object.keys(RISK).map(s => `<option value="${s}" ${r.statut === s ? "selected" : ""}>${RISK[s]}</option>`).join("") + `</select></span>` +
-      `<span class="fld"><span class="fl">Revue</span><input type="date" class="liv-d" value="${r.echeance_revue || ""}" onchange="${u("echeance_revue:this.value")}"></span>` +
-      (late ? `<span class="lt-badge">REVUE EN RETARD</span>` : "") + `</div>`;
-    const psel = `<select class="liv-psel" onchange="${u("responsable:this.value")}"><option value="">— responsable —</option>` +
-      knownPeople().map(p => `<option value="${esc(p.nom)}" ${p.nom === (r.responsable || "") ? "selected" : ""}>${esc(p.nom)}</option>`).join("") + `</select>`;
-    h += `<div class="rk-meta"><span class="fld"><span class="fl">Responsable</span>${psel}</span></div>`;
-    h += `<input class="rk-parade" value="${esc(r.parade)}" placeholder="Parade / mitigation" onchange="${u("parade:this.value")}">`;
+    if(!RK_EDIT.has(r.id)){
+      // ----- LECTURE SEULE (par défaut) : un risque ajouté ne s'édite pas par accident -----
+      h += `<div class="rk-top"><span class="rk-crit" style="color:${lv.col};background:${lv.bg}" title="Proba ${r.probabilite} × Gravité ${r.gravite}">${n} · ${lv.lbl}</span>` +
+        `<span class="rk-lib-ro">${esc(r.libelle)}</span>` +
+        `<a class="lnk rk-edit" onclick="rkEdit('${r.id}')">Modifier</a>` + delx + `</div>`;
+      // statut modifiable inline via un menu STYLÉ (pas de <select> natif → popup hors-style)
+      const stMenu = `<div class="menu rk-stm" id="rkstm_${r.id}">` +
+        `<button class="rk-st-pill rk-st-${r.statut}" title="Changer le statut" onclick="fixedMenu(event,'rkstm_${r.id}')">${RISK[r.statut] || r.statut}<span class="rk-st-car">▾</span></button>` +
+        `<div class="menu-list rk-stm-list">` +
+          Object.keys(RISK).map(s => `<a class="rk-stm-opt ${s === r.statut ? "on" : ""}" onclick="mutate({op:'update_risque',chantier_id:'${c.id}',risque_id:'${r.id}',statut:'${s}'})"><span class="rk-dot rk-st-${s}"></span>${RISK[s]}</a>`).join("") +
+        `</div></div>`;
+      h += `<div class="rk-ro-meta">` + stMenu +
+        `<span class="rk-chip">${esc(r.categorie || "—")}</span>` +
+        `<span class="rk-chip" title="Probabilité">Proba <b>${r.probabilite}</b>/5 · ${PROBA_LBL[r.probabilite] || ""}</span>` +
+        `<span class="rk-chip" title="Gravité (impact)">Gravité <b>${r.gravite}</b>/5 · ${GRAV_LBL[r.gravite] || ""}</span>` +
+        (r.responsable ? `<span class="rk-chip">👤 ${esc(r.responsable)}</span>` : "") +
+        (r.echeance_revue ? `<span class="rk-chip ${late ? "rk-chip-late" : ""}">📅 revue ${fmt(r.echeance_revue)}${late ? " — en retard" : ""}</span>` : "") +
+        `</div>`;
+      if(r.parade) h += `<div class="rk-ro-parade"><span class="fl">Parade</span> ${esc(r.parade)}</div>`;
+    } else {
+      // ----- ÉDITION (après clic sur « Modifier ») -----
+      const rcats = RISK_CATS.includes(r.categorie) ? RISK_CATS : [r.categorie || "Autre", ...RISK_CATS];
+      h += `<div class="rk-top"><span class="rk-crit" style="color:${lv.col};background:${lv.bg}">${n} · ${lv.lbl}</span>` +
+        `<input class="rk-lib" value="${esc(r.libelle)}" placeholder="Risque" onchange="${u("libelle:this.value")}">` +
+        `<a class="lnk rk-edit" onclick="rkDone('${r.id}')">Terminé</a>` + delx + `</div>`;
+      h += `<div class="rk-meta">` +
+        `<span class="fld"><span class="fl">Probabilité</span><select onchange="${u("probabilite:this.value")}">${proba5(r.probabilite)}</select></span>` +
+        `<span class="fld"><span class="fl">Gravité</span><select onchange="${u("gravite:this.value")}">${grav5(r.gravite)}</select></span>` +
+        `<span class="fld"><span class="fl">Catégorie</span><select onchange="${u("categorie:this.value")}">` +
+          rcats.map(x => `<option ${r.categorie === x ? "selected" : ""}>${esc(x)}</option>`).join("") + `</select></span>` +
+        `<span class="fld"><span class="fl">Statut</span><select onchange="${u("statut:this.value")}">` +
+          Object.keys(RISK).map(s => `<option value="${s}" ${r.statut === s ? "selected" : ""}>${RISK[s]}</option>`).join("") + `</select></span>` +
+        `<span class="fld"><span class="fl">Revue</span><input type="date" class="liv-d" value="${r.echeance_revue || ""}" onchange="${u("echeance_revue:this.value")}"></span>` +
+        (late ? `<span class="lt-badge">REVUE EN RETARD</span>` : "") + `</div>`;
+      const psel = `<select class="liv-psel" onchange="${u("responsable:this.value")}"><option value="">— responsable —</option>` +
+        knownPeople().map(p => `<option value="${esc(p.nom)}" ${p.nom === (r.responsable || "") ? "selected" : ""}>${esc(p.nom)}</option>`).join("") + `</select>`;
+      h += `<div class="rk-meta"><span class="fld"><span class="fl">Responsable</span>${psel}</span></div>`;
+      h += `<input class="rk-parade" value="${esc(r.parade)}" placeholder="Parade / mitigation" onchange="${u("parade:this.value")}">`;
+    }
     h += `</div>`;
   });
   h += `<div id="addRisque_${c.id}"></div>`;
@@ -1584,27 +2193,266 @@ function renderRisques(){
   $("risques").innerHTML = h;
 }
 
+// Création de risque en 2 panneaux. Gauche : catégorie (en haut) → risques de cette
+// catégorie (en dessous, sans niveau, pas de scroll). Droite : détail + niveau + ajout.
+function riskBrowseHtml(cid, ci){
+  const cats = Object.keys(RISK_CATALOG);
+  let h = `<div class="rk-cats">`;
+  cats.forEach((cat, i) => { h += `<button class="rk-cat ${i === ci ? "sel" : ""}" onclick="riskCat('${cid}',${i})">${esc(cat)}</button>`; });
+  h += `</div><div class="rk-cat-risks">`;
+  RISK_CATALOG[cats[ci]].forEach((it, ii) => {
+    h += `<button class="rk-opt" id="rkopt_${cid}_${ci}_${ii}" onclick="riskFill('${cid}',${ci},${ii})"><span class="rk-opt-l">${esc(it.l)}</span></button>`;
+  });
+  h += `</div>`;
+  return h;
+}
+function riskCat(cid, ci){ const el = $("rkbrowse_" + cid); if(el) el.innerHTML = riskBrowseHtml(cid, ci); }
 function showAddRisque(cid){
-  const opt = v => [1, 2, 3, 4, 5].map(x => `<option value="${x}" ${x === v ? "selected" : ""}>${x}</option>`).join("");
-  $("addRisque_" + cid).innerHTML =
-    `<div class="miniform"><input id="rkl" placeholder="Risque (ex. Export non livré à temps)">` +
-    `<div class="row"><span class="fld"><span class="fl">Proba 1-5</span><select id="rkp">${opt(3)}</select></span>` +
-    `<span class="fld"><span class="fl">Gravité 1-5</span><select id="rkg">${opt(3)}</select></span>` +
-    `<select id="rkc">${RISK_CATS.map(x => `<option ${x === "Autre" ? "selected" : ""}>${esc(x)}</option>`).join("")}</select>` +
-    `<span class="fld"><span class="fl">Revue</span><input id="rke" type="date"></span></div>` +
-    `<div class="row"><select id="rkr"><option value="">— responsable —</option>` +
-      knownPeople().map(p => `<option value="${esc(p.nom)}">${esc(p.nom)}</option>`).join("") + `</select>` +
-    `<input id="rkpa" placeholder="Parade / mitigation (optionnel)"></div>` +
-    `<div class="actions"><button class="btn sm" onclick="hide('addRisque_${cid}')">Annuler</button>` +
-    `<button class="btn sm primary" onclick="addRisque('${cid}')">Ajouter</button></div></div>`;
-  $("rkl").focus();
-  $("rkl").addEventListener("keydown", e => { if(e.key === "Enter") addRisque(cid); });
+  let h = `<div class="miniform rk-pick">`;
+  h += `<div class="rk-step">1 · Choisis la catégorie, puis le risque — il se détaille à droite.</div>`;
+  h += `<div class="rk-2pane"><div class="rk-browse" id="rkbrowse_${cid}">${riskBrowseHtml(cid, 0)}</div>`;
+  // formulaire (panneau droit) : détail + niveau + un seul bouton de soumission
+  const lv0 = critLevel(9);
+  h += `<div class="rk-form"><div class="rk-step">2 · Le risque à ajouter :</div>`;
+  h += `<input id="rkl" placeholder="Libellé du risque (ou choisis-en un ci-dessus)">`;
+  h += `<div class="row">` +
+    `<span class="fld"><span class="fl">Probabilité</span><select id="rkp" onchange="riskCritPreview('${cid}')">${proba5(3)}</select></span>` +
+    `<span class="fld"><span class="fl">Gravité (impact)</span><select id="rkg" onchange="riskCritPreview('${cid}')">${grav5(3)}</select></span>` +
+    `<span class="rk-crit-live" id="rkcrit_${cid}" style="color:${lv0.col};background:${lv0.bg}">9 · ${lv0.lbl}</span></div>`;
+  h += `<div class="row">` +
+    `<span class="fld"><span class="fl">Catégorie</span><select id="rkc">${RISK_CATS.map(x => `<option ${x === "Autre" ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></span>` +
+    `<span class="fld"><span class="fl">Revue</span><input id="rke" type="date"></span>` +
+    `<span class="fld"><span class="fl">Responsable</span><select id="rkr"><option value="">—</option>` +
+      knownPeople().map(p => `<option value="${esc(p.nom)}">${esc(p.nom)}</option>`).join("") + `</select></span></div>`;
+  h += `<textarea id="rkpa" rows="2" placeholder="Parade / mitigation"></textarea></div>`;   // rk-form
+  h += `</div>`;   // rk-2pane
+  h += `<div class="actions"><button class="btn sm" onclick="hide('addRisque_${cid}')">Annuler</button>` +
+    `<button class="btn sm primary" onclick="addRisque('${cid}')">Ajouter le risque</button></div></div>`;
+  $("addRisque_" + cid).innerHTML = h;
+}
+// remplit un select + notifie (change) pour rafraîchir le bouton stylé
+function setSel(id, v){ const s = $(id); if(!s) return; s.value = String(v); s.dispatchEvent(new Event("change", {bubbles: true})); }
+// clic sur un risque du catalogue : remplit le formulaire (pas de changement d'écran)
+function riskFill(cid, ci, ii){
+  const cat = Object.keys(RISK_CATALOG)[ci], it = RISK_CATALOG[cat][ii];
+  $("rkl").value = it.l;
+  $("rkpa").value = it.m || "";
+  setSel("rkp", it.p); setSel("rkg", it.g); setSel("rkc", cat);
+  riskCritPreview(cid);
+  document.querySelectorAll(".rk-opt.sel").forEach(e => e.classList.remove("sel"));
+  const el = $("rkopt_" + cid + "_" + ci + "_" + ii); if(el) el.classList.add("sel");
+}
+function riskCritPreview(cid){
+  const n = (+$("rkp").value) * (+$("rkg").value), lv = critLevel(n), el = $("rkcrit_" + cid);
+  if(el){ el.textContent = n + " · " + lv.lbl; el.style.color = lv.col; el.style.background = lv.bg; }
 }
 function addRisque(cid){
-  const lib = $("rkl").value.trim(); if(!lib){ alert("Décris le risque."); return; }
+  const lib = $("rkl").value.trim(); if(!lib){ alert("Décris le risque."); $("rkl").focus(); return; }
   mutate({op: "add_risque", chantier_id: cid, libelle: lib, probabilite: $("rkp").value, gravite: $("rkg").value,
           categorie: $("rkc").value, responsable: $("rkr").value, parade: $("rkpa").value.trim(),
           echeance_revue: $("rke").value || null});
+}
+
+// ======================================================================== //
+//  Routines / rappels — checklist récurrente unifiée (hors chantier)
+// ======================================================================== //
+const RAPPELS = () => (STORE.rappels || []);
+const RFREQ = {jour: "Chaque jour", semaine: "Chaque semaine", mois: "Chaque mois", ponctuel: "Ponctuel"};
+const JSEM = ["lun", "mar", "mer", "jeu", "ven", "sam", "dim"];   // 0 = lundi
+const weekdayIdx = ds => (dparse(ds).getUTCDay() + 6) % 7;        // 0=lundi .. 6=dimanche
+
+function rappelFait(r, d){   // coché pour l'itération courante (jour / semaine ISO / mois)
+  const ticks = r.ticks || [];
+  if(r.freq === "ponctuel") return ticks.length > 0;
+  // hebdo à jours précis (lun+mer+ven) : on coche au jour, pas à la semaine
+  if(r.freq === "semaine")  return (r.jours && r.jours.length) ? ticks.includes(d) : ticks.some(t => weekStart(t) === weekStart(d));
+  if(r.freq === "mois")     return ticks.some(t => t.slice(0, 7) === d.slice(0, 7));
+  return ticks.includes(d);   // jour
+}
+function rappelDue(r, d){   // doit-il apparaître à la date d ?
+  if(!r.actif) return false;
+  if(r.freq === "jour") return true;
+  if(r.freq === "semaine"){
+    if(r.jours && r.jours.length) return r.jours.includes(weekdayIdx(d));
+    return !rappelFait(r, d);                       // sans jour précis : dû tant que pas fait cette semaine
+  }
+  if(r.freq === "mois"){
+    if(r.jour_mois) return Number(d.slice(8, 10)) === r.jour_mois || (!rappelFait(r, d) && Number(d.slice(8, 10)) > r.jour_mois);
+    return !rappelFait(r, d);
+  }
+  return !rappelFait(r, d) && (!r.date || d >= r.date);   // ponctuel : dû dès l'échéance, jusqu'à fait
+}
+const rappelsDus    = d => RAPPELS().filter(r => rappelDue(r, d));
+const rappelsAFaire = d => rappelsDus(d).filter(r => !rappelFait(r, d));
+function rappelMeta(r){
+  const m = [RFREQ[r.freq] || r.freq];
+  if(r.freq === "semaine" && r.jours && r.jours.length) m.push(r.jours.slice().sort().map(j => JSEM[j]).join(", "));
+  if(r.freq === "mois" && r.jour_mois) m.push("le " + r.jour_mois);
+  if(r.freq === "ponctuel" && r.date) m.push("échéance " + fmt(r.date));
+  if(r.heure) m.push(r.heure);
+  return m.join(" · ");
+}
+
+// ======================================================================== //
+//  Suivi du temps (chrono) — sessions horodatées + récap "Ma journée"
+// ======================================================================== //
+let DAY_OPEN = false;   // état déplié/replié de la section "Ma journée" (mémorisé entre rendus)
+const TIMELOG = () => STORE.timelog || [];
+const activeSession = () => TIMELOG().find(s => !s.fin) || null;
+const sessionsOn = d => TIMELOG().filter(s => s.date === d).slice().sort((a, b) => a.debut < b.debut ? -1 : a.debut > b.debut ? 1 : 0);
+function nowHM(){ const d = new Date(); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); }
+const hmToMin = h => { const p = (h || "0:0").split(":"); return (+p[0]) * 60 + (+p[1] || 0); };
+function sessMin(s){
+  let e = s.fin || nowHM();
+  if(!s.fin){ const jf = SETTINGS.jour_fin || "17:51"; if(e > jf) e = jf; }   // chrono oublié : plafonné à la fin de journée
+  let m = hmToMin(e) - hmToMin(s.debut); if(m < 0) m += 1440; return m;       // +1440 : à cheval sur minuit
+}
+function fmtDur(min){ min = Math.round(min); const h = Math.floor(min / 60), m = min % 60; return h ? `${h} h${m ? " " + String(m).padStart(2, "0") : ""}` : `${m} min`; }
+const activeForTache  = tid => { const a = activeSession(); return a && a.tache_id  === tid ? a : null; };
+const activeForRappel = rid => { const a = activeSession(); return a && a.rappel_id === rid ? a : null; };
+const tacheMin = tid => TIMELOG().filter(s => s.tache_id === tid).reduce((a, s) => a + sessMin(s), 0);
+const KIND_ICON = {tache: "🗂", rappel: "🔁", libre: "•"};
+
+async function rappelStop(rid){           // terminer une routine : arrête le chrono + coche le jour
+  await mutate({op: "clock_stop"});
+  const r = (STORE.rappels || []).find(x => x.id === rid);
+  if(r && !rappelFait(r, TODAY)) await mutate({op: "toggle_rappel", id: rid, date: TODAY});
+}
+function addManualSession(){
+  const label = $("tl_label").value.trim();
+  const debut = $("tl_debut").value, fin = $("tl_fin").value;
+  if(!label){ $("tl_label").focus(); return; }
+  if(!debut){ alert("Indique au moins l'heure de début."); return; }
+  mutate({op: "clock_add", label, debut, fin: fin || null, kind: "libre"});
+}
+
+function maJourneeSection(){
+  const sess = sessionsOn(TODAY);
+  const act = activeSession();
+  if(act && act.date !== TODAY && !sess.includes(act)) sess.unshift(act);   // chrono ouvert depuis la veille : reste visible/arrêtable
+  const total = sess.reduce((a, s) => a + sessMin(s), 0);
+  // section repliable : le total + le "en cours" restent lisibles dans l'en-tête même repliée
+  let h = `<details class="day-sect" ${DAY_OPEN ? "open" : ""} ontoggle="DAY_OPEN=this.open">`;
+  h += `<summary class="day-sum">Ma journée — ${fmt(TODAY)} · <b>${fmtDur(total)}</b>${act ? ` · <span class="run">⏱ en cours</span>` : ""}</summary>`;
+  h += `<div class="day-log">`;
+  if(!sess.length){
+    h += `<div class="empty">Aucune plage enregistrée aujourd'hui. Démarre une tâche ou une routine, ou ajoute une plage ci-dessous.</div>`;
+  } else {
+    sess.forEach(s => {
+      const running = !s.fin;
+      h += `<div class="dl-row${running ? " running" : ""}">` +
+        `<span class="dl-ic" title="${s.kind}">${KIND_ICON[s.kind] || "•"}</span>` +
+        `<input type="time" class="dl-t" value="${s.debut}" title="Début" onchange="mutate({op:'clock_edit',id:'${s.id}',debut:this.value})">` +
+        `<span class="dl-sep">→</span>` +
+        (running
+          ? `<button class="dl-stopbtn" title="Arrêter" onclick="mutate({op:'clock_stop',id:'${s.id}'})">⏹ en cours</button>`
+          : `<input type="time" class="dl-t" value="${s.fin}" title="Fin" onchange="mutate({op:'clock_edit',id:'${s.id}',fin:this.value})">`) +
+        `<span class="dl-dur">${fmtDur(sessMin(s))}</span>` +
+        `<input class="dl-lib" value="${esc(s.label)}" onblur="if(this.value.trim()&&this.value!=='${jqs(s.label)}')mutate({op:'clock_edit',id:'${s.id}',label:this.value.trim()})">` +
+        `<span class="del" title="Supprimer cette plage" onclick="if(confirm('Supprimer cette plage ?'))mutate({op:'clock_delete',id:'${s.id}'})">×</span>` +
+        `</div>`;
+    });
+  }
+  // saisie manuelle d'une plage (chose faite hors de l'appli)
+  h += `<div class="dl-add">` +
+    `<input id="tl_label" placeholder="Ajouter une plage (ex. Appel fournisseur)" onkeydown="if(event.key==='Enter')addManualSession()">` +
+    `<input id="tl_debut" type="time" title="Début">` +
+    `<span class="dl-sep">→</span>` +
+    `<input id="tl_fin" type="time" title="Fin (optionnel)">` +
+    `<button class="btn sm primary" onclick="addManualSession()">Ajouter</button>` +
+    `</div>`;
+  h += `</div></details>`;
+  return h;
+}
+
+function routinesSection(){
+  const dus = rappelsDus(TODAY);
+  let h = `<div class="ch-h">Mes routines &amp; rappels — ${fmt(TODAY)}</div>`;
+  if(!dus.length){
+    h += `<div class="ok-note">Aucune routine ni rappel pour aujourd'hui. Ajoute-en une ci-dessous.</div>`;
+  } else {
+    h += `<div class="rt-list">`;
+    dus.forEach(r => {
+      const fait = rappelFait(r, TODAY);
+      const late = r.freq === "ponctuel" && r.date && isLate(r.date) && !fait;
+      const act = activeForRappel(r.id);
+      const mins = sessionsOn(TODAY).filter(s => s.rappel_id === r.id).reduce((a, s) => a + sessMin(s), 0);
+      // contrôle chrono : Démarrer → Terminer ; total du jour affiché si > 0
+      let ctrl;
+      if(act) ctrl = `<button class="tstart stop" title="Terminer (arrête le chrono)" onclick="rappelStop('${r.id}')">⏹ Terminer</button>` +
+                     `<span class="tstate inprog" title="Depuis ${act.debut}">⏱ ${act.debut}</span>`;
+      else if(fait) ctrl = `<button class="tstart" title="Relancer le chrono" onclick="mutate({op:'clock_start',kind:'rappel',rappel_id:'${r.id}'})">▶</button>`;
+      else ctrl = `<button class="tstart" title="Démarrer (lance le chrono)" onclick="mutate({op:'clock_start',kind:'rappel',rappel_id:'${r.id}'})">▶ Démarrer</button>`;
+      const durTxt = mins ? ` <span class="rt-dur">${fmtDur(mins)}</span>` : "";
+      h += `<div class="rt-row${fait ? " done" : ""}">` +
+        `<span class="box ${fait ? "ok" : ""}" title="Marquer fait / non fait (sans chrono)" ` +
+          `onclick="mutate({op:'toggle_rappel',id:'${r.id}',date:'${TODAY}'})"></span>` +
+        `<div class="rt-body"><div class="rt-lib">${esc(r.label)}` +
+          (late ? ` <span class="bdg b-late">⏰ en retard</span>` : ``) + durTxt + `</div>` +
+          `<div class="rt-meta">${esc(rappelMeta(r))}</div>` +
+          (r.note ? `<div class="rt-note">${esc(r.note)}</div>` : ``) + `</div>` +
+        ctrl +
+        `<span class="del" title="Supprimer cette routine" onclick="if(confirm('Supprimer « ${jqs(r.label)} » ?'))mutate({op:'remove_rappel',id:'${r.id}'})">×</span>` +
+        `</div>`;
+    });
+    h += `</div>`;
+  }
+  // formulaire d'ajout (compact, tous les champs visibles ; on lit ceux utiles selon la fréquence)
+  h += `<div class="rt-add">` +
+    `<input id="rp_label" placeholder="Nouvelle routine / rappel (ex. Relever les mails, Bilan hebdo…)" ` +
+      `onkeydown="if(event.key==='Enter')addRappel()">` +
+    `<select id="rp_freq" onchange="rpFreqUI()">` +
+      Object.entries(RFREQ).map(([k, v]) => `<option value="${k}">${v}</option>`).join("") + `</select>` +
+    `<span id="rp_jours" class="rp-days" style="display:none">` +
+      JSEM.map((j, i) => `<label><input type="checkbox" class="rp-day" value="${i}">${j}</label>`).join("") + `</span>` +
+    `<span id="rp_moiswrap" style="display:none">le <input id="rp_jourmois" type="number" min="1" max="28" class="rp-num" placeholder="j"></span>` +
+    `<span id="rp_datewrap" style="display:none"><input id="rp_date" type="date" title="Échéance"></span>` +
+    `<input id="rp_heure" type="time" class="rp-time" title="Heure (optionnel, pour la notif bureau)">` +
+    `<input id="rp_desc" class="rp-desc" placeholder="description (optionnel)" onkeydown="if(event.key==='Enter')addRappel()">` +
+    `<button class="btn sm primary" onclick="addRappel()">Ajouter</button>` +
+    `</div>`;
+  // gestionnaire repliable : TOUTES les routines (même désactivées) — activer/éditer/supprimer
+  const all = RAPPELS();
+  if(all.length){
+    h += `<details class="rt-manage"><summary>Gérer mes routines (${all.length})</summary><div class="rt-mlist">`;
+    all.forEach(r => {
+      h += `<div class="rt-mrow${r.actif ? "" : " off"}">` +
+        `<div class="rt-mhead">` +
+          `<label class="rt-toggle" title="${r.actif ? "Active — décocher pour mettre en pause" : "En pause — cocher pour réactiver"}">` +
+            `<input type="checkbox" ${r.actif ? "checked" : ""} onchange="mutate({op:'update_rappel',id:'${r.id}',actif:this.checked})"></label>` +
+          `<input class="rt-mlib" value="${esc(r.label)}" ` +
+            `onblur="if(this.value.trim()&&this.value!=='${jqs(r.label)}')mutate({op:'update_rappel',id:'${r.id}',label:this.value.trim()})">` +
+          `<select class="rt-mfreq" onchange="mutate({op:'update_rappel',id:'${r.id}',freq:this.value})">` +
+            Object.entries(RFREQ).map(([k, v]) => `<option value="${k}" ${r.freq === k ? "selected" : ""}>${v}</option>`).join("") + `</select>` +
+          `<span class="rt-mmeta">${esc(rappelMeta(r))}</span>` +
+          `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer « ${jqs(r.label)} » ?'))mutate({op:'remove_rappel',id:'${r.id}'})">×</span>` +
+        `</div>` +
+        `<input class="rt-mdesc" value="${esc(r.note || "")}" placeholder="+ description / notes…" ` +
+          `onblur="if(this.value!==this.defaultValue)mutate({op:'update_rappel',id:'${r.id}',note:this.value})">` +
+        `</div>`;
+    });
+    h += `</div></details>`;
+  }
+  return h;
+}
+// affiche/masque les champs selon la fréquence choisie
+function rpFreqUI(){
+  const f = $("rp_freq").value;
+  $("rp_jours").style.display    = f === "semaine"  ? "inline-flex" : "none";
+  $("rp_moiswrap").style.display = f === "mois"     ? "inline" : "none";
+  $("rp_datewrap").style.display = f === "ponctuel" ? "inline" : "none";
+}
+function addRappel(){
+  const label = $("rp_label").value.trim();
+  if(!label){ $("rp_label").focus(); return; }
+  const freq = $("rp_freq").value;
+  const jours = [...document.querySelectorAll("#rp_jours .rp-day:checked")].map(x => Number(x.value));
+  const jm = $("rp_jourmois").value ? Number($("rp_jourmois").value) : null;
+  const date = $("rp_date").value || null;
+  const heure = $("rp_heure").value || null;
+  const note = $("rp_desc").value.trim();
+  if(freq === "ponctuel" && !date){ alert("Un rappel ponctuel nécessite une date d'échéance."); return; }
+  mutate({op: "add_rappel", label, freq, jours, jour_mois: jm, date, heure, note});
 }
 
 // ======================================================================== //
@@ -1615,7 +2463,7 @@ function planningTasks(){
   // prévisionnel a déjà commencé (en cours ou en retard) — pas les jalons ni le futur.
   const items = [];
   STORE.chantiers.forEach(c => {
-    if(colOf(c) === "done") return;
+    if(colOf(c) === "done" || c.hold) return;   // chantier en pause : pas dans "à faire"
     const S = computeSchedule(c);
     c.taches.forEach(t => {
       if(t.done || t.is_milestone) return;
@@ -1695,19 +2543,23 @@ function portfolioGantt(){
 
 function renderPlanning(){
   const items = planningTasks();
-  let h = `<div class="ch-h">À faire aujourd'hui — ${fmt(TODAY)} · ${items.length} tâche(s)</div>`;
+  let h = routinesSection();
+  h += `<div class="ch-h">À faire aujourd'hui — ${fmt(TODAY)} · ${items.length} tâche(s)</div>`;
   if(!items.length){
     h += `<div class="ok-note">Rien d'actif aujourd'hui — aucune tâche en cours ni en retard.</div>`;
   } else {
     h += `<div class="today-list">`;
     items.forEach(it => {
       const c = it.c, t = it.t, tags = [];
+      if(t.start_date) tags.push(`<span class="bdg b-inprog">● en cours</span>`);
       if(it.late) tags.push(`<span class="bdg b-late">⏰ en retard</span>`);
       if(it.gated) tags.push(`<span class="bdg b-wait">⌛ attend un livrable</span>`);
       if(it.critical) tags.push(`<span class="bdg red">critique</span>`);
       else if(it.slack > 0) tags.push(`<span class="muted small">marge ${it.slack} j</span>`);
-      h += `<div class="td-row">` +
-        `<span class="box ${t.done ? "ok" : ""}" title="Marquer fait" onclick="event.stopPropagation();mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})"></span>` +
+      const lead = t.start_date
+        ? `<span class="box ${t.done ? "ok" : ""}" title="Marquer fait" onclick="event.stopPropagation();mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})"></span>`
+        : `<button class="tstart" title="Démarrer cette tâche" onclick="event.stopPropagation();mutate({op:'start_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">▶</button>`;
+      h += `<div class="td-row">` + lead +
         `<div class="td-body" onclick="openChantier('${c.id}')">` +
           `<div class="td-lib">${esc(t.label)}</div>` +
           `<div class="td-meta"><span class="pr-${c.prio}">${PRIO[c.prio]}</span> · <b>${esc(c.titre)}</b> · ` +
@@ -1718,6 +2570,7 @@ function renderPlanning(){
   }
   h += `<div class="ch-h">Planning général — tous les chantiers (triés par échéance)</div>`;
   h += portfolioGantt();
+  h += maJourneeSection();   // récap du temps : tout en bas, repliable
   $("planning").innerHTML = h;
 }
 
@@ -2016,3 +2869,11 @@ function renderCahiers(){
 }
 
 loadStore();
+// re-vérifie périodiquement les rappels (notif bureau tant que l'onglet est ouvert)
+setInterval(checkDesktopNotifs, 60000);
+// rafraîchit l'affichage du chrono en cours (durées, "Ma journée") chaque minute
+setInterval(() => {
+  if(!activeSession()) return;
+  renderAlert();
+  if(VIEW === "planning" && $("planning").style.display !== "none") renderPlanning();
+}, 60000);
