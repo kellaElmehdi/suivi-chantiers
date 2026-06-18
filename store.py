@@ -43,6 +43,125 @@ def _clamp15(v, default=3) -> int:
         return default
 
 
+# --------------------------------------------------------------------------- #
+# Personnes : l'annuaire (store["contacts"]) est l'unique source de verite.
+# Livrables et parties prenantes referencent un contact par `contact_id` ;
+# `personne`/`nom` ne sont qu'un cache synchronise (pour l'export, le Gantt,
+# les relances qui lisent encore la chaine).
+# --------------------------------------------------------------------------- #
+# Alias connus -> (nom canonique, role par defaut, est-ce "moi"). Clefs minuscules.
+_PERSON_ALIASES = {
+    "moi": ("Elmehdi KELLA", "Chef de projet", True),
+    "toi": ("Elmehdi KELLA", "Chef de projet", True),
+    "kella": ("Elmehdi KELLA", "Chef de projet", True),
+    "elmehdi": ("Elmehdi KELLA", "Chef de projet", True),
+    "elmehdi kella": ("Elmehdi KELLA", "Chef de projet", True),
+    "rebuns": ("Rubens", "", False),
+}
+
+
+def _canon_person(nom):
+    """Renvoie (nom_canonique, role_defaut, est_moi, clef). clef = identite normalisee."""
+    base = " ".join((nom or "").strip().split())
+    key = base.lower()
+    if key in _PERSON_ALIASES:
+        n, r, moi = _PERSON_ALIASES[key]
+        return n, r, moi, n.lower()
+    return base, None, False, key
+
+
+def _find_or_create_contact(store, nom, role=""):
+    """Trouve le contact correspondant a `nom` (par identite normalisee) ou le cree."""
+    nom2, role2, moi2, key = _canon_person(nom)
+    if not key:
+        return None
+    for ct in store.setdefault("contacts", []):
+        if _canon_person(ct.get("nom", ""))[3] == key:
+            if moi2 and not ct.get("moi"):
+                ct["moi"] = True
+            if role2:                          # role d'alias connu = fait autorite
+                ct["role"] = role2
+            elif not ct.get("role"):
+                ct["role"] = role or ""
+            return ct
+    ct = {"id": _uid("c_"), "nom": nom2, "role": role2 or role or "", "moi": moi2}
+    store["contacts"].append(ct)
+    return ct
+
+
+def _sync_contact_caches(store, ct):
+    """Repercute l'identite d'un contact sur les caches (personne/nom) qui le referencent."""
+    cid = ct["id"]
+    for c in store.get("chantiers", []):
+        for l in c.get("livrables", []):
+            if l.get("contact_id") == cid:
+                l["personne"] = ct["nom"]
+        for p in c.get("parties", []):
+            if p.get("contact_id") == cid:
+                p["nom"] = ct["nom"]
+
+
+def _migrate_people(store):
+    """Migration idempotente : replie les doublons/alias et relie tout par contact_id."""
+    contacts = store.setdefault("contacts", [])
+    for ct in contacts:
+        ct.setdefault("id", _uid("c_"))
+        ct.setdefault("nom", "")
+        ct.setdefault("role", "")
+        ct.setdefault("moi", False)
+    # 1) fusion des contacts en doublon / alias -> on retient le remappage des ids
+    remap, survivors, seen = {}, [], {}
+    for ct in contacts:
+        nom2, role2, moi2, key = _canon_person(ct["nom"])
+        if not key:                       # contact sans nom : on le garde tel quel
+            survivors.append(ct)
+            continue
+        if key in seen:
+            keep = seen[key]
+            remap[ct["id"]] = keep["id"]
+            if moi2 or ct.get("moi"):
+                keep["moi"] = True
+            if role2:
+                keep["role"] = role2
+            elif not keep.get("role"):
+                keep["role"] = ct.get("role") or ""
+        else:
+            ct["nom"] = nom2
+            if moi2:
+                ct["moi"] = True
+            if role2:
+                ct["role"] = role2
+            seen[key] = ct
+            remap[ct["id"]] = ct["id"]
+            survivors.append(ct)
+    store["contacts"] = survivors
+    by_id = {c["id"]: c for c in survivors}
+    # 2) relier livrables + parties (par id remappe, sinon par nom -> trouve/cree)
+    for c in store.get("chantiers", []):
+        for l in c.get("livrables", []):
+            ct = by_id.get(remap.get(l.get("contact_id"), l.get("contact_id")))
+            if ct is None and (l.get("personne") or "").strip():
+                ct = _find_or_create_contact(store, l["personne"], l.get("role", ""))
+                by_id[ct["id"]] = ct
+            if ct:
+                l["contact_id"] = ct["id"]
+                l["personne"] = ct["nom"]
+                if not (l.get("role") or "").strip():
+                    l["role"] = ct.get("role", "")
+            else:
+                l.setdefault("contact_id", None)
+        for p in c.get("parties", []):
+            ct = by_id.get(remap.get(p.get("contact_id"), p.get("contact_id")))
+            if ct is None and (p.get("nom") or "").strip():
+                ct = _find_or_create_contact(store, p["nom"], "")
+                by_id[ct["id"]] = ct
+            if ct:
+                p["contact_id"] = ct["id"]
+                p["nom"] = ct["nom"]      # le role d'une partie reste contextuel
+            else:
+                p.setdefault("contact_id", None)
+
+
 def today() -> str:
     return date.today().isoformat()
 
@@ -59,10 +178,20 @@ def _clock_active(store: dict) -> list:
     return [s for s in store.get("timelog", []) if s.get("fin") is None]
 
 
+def _day_end(store: dict, date_iso: str) -> str:
+    # fin de journée de travail selon le jour : vendredi (weekday 4) plus court.
+    st = store.get("settings", {})
+    try:
+        wd = date.fromisoformat(date_iso).weekday()
+    except (ValueError, TypeError):
+        wd = -1
+    return st.get("vendredi_fin", "13:30") if wd == 4 else st.get("jour_fin", "17:51")
+
+
 def _close_session(store: dict, s: dict) -> None:
     # ferme la session ; on borne à la fin de journée de travail (chrono oublié) :
     # jour antérieur -> fin de journée ; aujourd'hui -> min(maintenant, fin de journée).
-    jf = store.get("settings", {}).get("jour_fin", "17:51")
+    jf = _day_end(store, s.get("date") or today())
     now = _hm()
     s["fin"] = jf if (s.get("date") != today() or now > jf) else now
 
@@ -376,7 +505,11 @@ def _seed() -> dict:
 # Normalisation (compat ascendante : remplit les champs manquants)
 # --------------------------------------------------------------------------- #
 def _normalize(store: dict) -> dict:
-    store.setdefault("contacts", [])
+    for ct in store.setdefault("contacts", []):
+        ct.setdefault("id", _uid("c_"))
+        ct.setdefault("nom", "")
+        ct.setdefault("role", "")
+        ct.setdefault("moi", False)            # marque l'utilisateur (une seule fiche "moi")
     store.setdefault("journal", [])
     s = store.setdefault("settings", {})
     s.setdefault("capacite_jour", 3)     # max taches actives par jour (global)
@@ -384,8 +517,13 @@ def _normalize(store: dict) -> dict:
     s.setdefault("jours_ouvres", True)   # planning en jours ouvres (exclut samedi/dimanche)
     s.setdefault("relance_jours", 7)     # relance suggeree apres N jours
     s.setdefault("rappel_stale_jours", 3)  # nudge si un chantier "en cours" n'a rien enregistre depuis N jours
+    s.setdefault("taux_jour", 0)         # taux journalier (€/jour) pour le cout reel EVM (0 = non configure)
+    s.setdefault("heures_jour", 7)       # heures facturables/jour : conversion temps chrono -> jours-personnes (AC)
     s.setdefault("jour_debut", "07:00")  # debut de journee de travail (borne le chrono)
     s.setdefault("jour_fin", "17:51")    # fin de journee : une session oubliee est fermee a cette heure
+    s.setdefault("pause_debut", "12:00") # pause dejeuner : exclue du temps compte (le chrono continue)
+    s.setdefault("pause_fin", "13:00")
+    s.setdefault("vendredi_fin", "13:30") # vendredi : journee plus courte, sans pause, pas d'apres-midi
     jd, jf = s["jour_debut"], s["jour_fin"]
     for r in store.setdefault("rappels", []):   # routines/rappels (hors chantier) : checklist recurrente unifiee
         r.setdefault("id", _uid("rp_"))
@@ -408,15 +546,16 @@ def _normalize(store: dict) -> dict:
         s.setdefault("chantier_id", None)
         s.setdefault("tache_id", None)
         s.setdefault("rappel_id", None)
+        de = _day_end(store, s["date"])   # fin de journée selon le jour (vendredi plus court)
         # auto-réparation : un chrono oublié un jour passé est fermé à la fin de journée
         if s["fin"] is None and s["date"] < today():
-            s["fin"] = jf
+            s["fin"] = de
         # borne la plage à la journée de travail (comparaison lexicale d'heures "HH:MM" zéro-paddées)
         if s["debut"] and s["debut"] < jd:
             s["debut"] = jd
         if s["fin"] is not None:
-            if s["fin"] > jf:
-                s["fin"] = jf
+            if s["fin"] > de:
+                s["fin"] = de
             if s["fin"] < s["debut"]:
                 s["fin"] = s["debut"]
     for c in store.get("chantiers", []):
@@ -424,6 +563,7 @@ def _normalize(store: dict) -> dict:
             c["statut"] = "doing"
         c.setdefault("date_debut", None)
         c.setdefault("objectif", "")
+        c.setdefault("budget", None)         # BAC (budget a l'achevement, €) pour l'EVM ; None = non defini
         c.setdefault("blocage", "")
         c.setdefault("tags", [])
         c.setdefault("parties", [])
@@ -487,8 +627,10 @@ def _normalize(store: dict) -> dict:
                 st.setdefault("done_at", None)        # horodatage de complétion (ISO date+heure)
         for l in c["livrables"]:
             l.setdefault("tache_id", None)
+            l.setdefault("contact_id", None)
         for p in c["parties"]:
             p.setdefault("id", _uid("p_"))
+            p.setdefault("contact_id", None)
         for it in c.setdefault("iterations", []):
             it.setdefault("id", _uid("it_"))
             it.setdefault("num", 1)
@@ -503,6 +645,7 @@ def _normalize(store: dict) -> dict:
                 r.setdefault("priorite", "m")
                 r.setdefault("date", None)
                 r.setdefault("echeance", None)
+    _migrate_people(store)     # relie livrables/parties a l'annuaire (idempotent)
     return store
 
 
@@ -570,23 +713,31 @@ def _cdc(store: dict, cid: str):
 # --------------------------------------------------------------------------- #
 # Application d'une operation
 # --------------------------------------------------------------------------- #
+# Une op fait DÉRIVER la référence figée seulement si elle change la STRUCTURE ou les
+# DATES PRÉVUES du planning — PAS si elle enregistre l'exécution (démarrer/terminer une
+# tâche, corriger une date réelle, marquer un livrable reçu...). Sinon le compteur gonfle
+# avec le travail quotidien alors qu'on n'a pas replanifié.
+_REPLAN_OPS = {"add_tache", "remove_tache", "apply_template", "add_livrable", "remove_livrable"}
+
+
+def _is_replanning(name: str, op: dict) -> bool:
+    if name in _REPLAN_OPS:
+        return True
+    if name == "update_tache":   # seules durée, dépendances, début imposé, type jalon = du planning
+        return any(k in op for k in ("duree", "preds", "start_fix", "is_milestone"))
+    if name == "update_livrable":  # seule la date attendue / le rattachement à une tâche pèse sur le planning
+        return ("date" in op) or ("tache_id" in op)
+    if name == "update_chantier":  # seules la date de début ou l'échéance dérivent le planning
+        return ("date_debut" in op) or ("echeance" in op)
+    return False
+
+
 def apply_op(store: dict, op: dict) -> str:
     """Applique l'operation puis incremente le compteur de modifs post-reference
-    si le chantier vise possede une reference figee."""
+    UNIQUEMENT pour une op qui REPLANIFIE un chantier possedant une reference figee."""
     msg = _apply_op(store, op)
     name = op.get("op")
-    NON_EDIT = {"set_baseline", "clear_baseline", "set_settings", "add_contact",
-                "rename_person", "remove_person", "set_person_role", "create_chantier",
-                "apply_template",
-                "delete_chantier", "add_risque", "update_risque", "remove_risque",
-                "cdc_create", "cdc_delete", "cdc_update", "cdc_section_add",
-                "cdc_section_update", "cdc_section_remove", "cdc_section_move",
-                "cdc_partie_add", "cdc_partie_remove", "cdc_revise",
-                "add_rappel", "update_rappel", "toggle_rappel", "remove_rappel",
-                "set_hold",
-                "clock_start", "clock_stop", "clock_edit", "clock_delete", "clock_add",
-                "add_subtask", "toggle_subtask", "update_subtask", "remove_subtask"}
-    if name not in NON_EDIT:
+    if _is_replanning(name, op):
         cid = op.get("chantier_id") or op.get("id")
         if cid:
             ch = next((c for c in store["chantiers"] if c["id"] == cid), None)
@@ -727,6 +878,9 @@ def _apply_op(store: dict, op: dict) -> str:
             ch["echeance"] = op["echeance"] or None; changed.append("echeance")
         if "date_debut" in op:
             ch["date_debut"] = op["date_debut"] or None; changed.append("date_debut")
+        if "budget" in op:
+            b = op["budget"]
+            ch["budget"] = None if b in (None, "") else float(b); changed.append("budget")
         return f"Chantier « {ch['titre']} » mis a jour ({', '.join(changed) or 'aucun champ'})"
 
     if name == "delete_chantier":
@@ -894,8 +1048,8 @@ def _apply_op(store: dict, op: dict) -> str:
         ch = _chantier(store, op["chantier_id"])
         quoi = (op.get("quoi") or "").strip()
         personne = (op.get("personne") or "").strip()
-        if not quoi or not personne:
-            raise ValueError("Livrable : 'personne' et 'quoi' requis.")
+        if not quoi or not (personne or op.get("contact_id")):
+            raise ValueError("Livrable : une personne (annuaire ou nom) et 'quoi' sont requis.")
         statut = op.get("statut") or "attente"
         if statut not in LIV_STATUTS:
             raise ValueError(f"Statut livrable invalide: {statut}")
@@ -903,7 +1057,12 @@ def _apply_op(store: dict, op: dict) -> str:
         cid = op.get("contact_id")
         if cid:
             ct = _sub(store["contacts"], cid, "Contact")
-            personne, role = ct["nom"], ct.get("role", role)
+        else:                                 # nom libre -> on trouve/cree la fiche annuaire
+            ct = _find_or_create_contact(store, personne, role)
+        if ct:
+            cid, personne = ct["id"], ct["nom"]
+            if not role:
+                role = ct.get("role", "")
         ch["livrables"].append({
             "id": _uid("l_"), "contact_id": cid, "personne": personne, "role": role,
             "quoi": quoi, "date": op.get("date") or None, "statut": statut,
@@ -930,9 +1089,15 @@ def _apply_op(store: dict, op: dict) -> str:
             lv["contact_id"] = op["contact_id"] or None
             if lv["contact_id"]:
                 ct = _sub(store["contacts"], lv["contact_id"], "Contact")
-                lv["personne"], lv["role"] = ct["nom"], ct.get("role", "")
-        if "personne" in op and op["personne"] is not None:
-            lv["personne"] = op["personne"]
+                lv["personne"] = ct["nom"]
+                if not (lv.get("role") or "").strip():
+                    lv["role"] = ct.get("role", "")
+        if "personne" in op and op["personne"] is not None:   # nom libre -> trouve/cree la fiche
+            ct = _find_or_create_contact(store, op["personne"], op.get("role") or "")
+            if ct:
+                lv["contact_id"], lv["personne"] = ct["id"], ct["nom"]
+            else:
+                lv["contact_id"], lv["personne"] = None, op["personne"]
         if "role" in op and op["role"] is not None:
             lv["role"] = op["role"]
         if op.get("relance"):
@@ -957,9 +1122,16 @@ def _apply_op(store: dict, op: dict) -> str:
     if name == "add_partie":
         ch = _chantier(store, op["chantier_id"])
         nom = (op.get("nom") or "").strip()
-        if not nom:
-            raise ValueError("Nom de partie prenante requis.")
-        ch["parties"].append({"id": _uid("p_"), "nom": nom, "role": op.get("role") or ""})
+        cid = op.get("contact_id")
+        if cid:
+            ct = _sub(store["contacts"], cid, "Contact")
+        else:
+            if not nom:
+                raise ValueError("Nom de partie prenante requis.")
+            ct = _find_or_create_contact(store, nom, "")
+        if ct:
+            cid, nom = ct["id"], ct["nom"]
+        ch["parties"].append({"id": _uid("p_"), "contact_id": cid, "nom": nom, "role": op.get("role") or ""})
         return f"Partie prenante ajoutee a « {ch['titre']} » : {nom}"
 
     if name == "remove_partie":
@@ -983,8 +1155,71 @@ def _apply_op(store: dict, op: dict) -> str:
         nom = (op.get("nom") or "").strip()
         if not nom:
             raise ValueError("Nom de contact requis.")
-        store["contacts"].append({"id": _uid("c_"), "nom": nom, "role": op.get("role") or ""})
-        return f"Contact ajoute : {nom}"
+        ct = _find_or_create_contact(store, nom, op.get("role") or "")
+        if op.get("role"):
+            ct["role"] = op["role"]
+        if op.get("moi"):
+            for o in store["contacts"]:
+                o["moi"] = (o["id"] == ct["id"])
+        return f"Personne ajoutee : {ct['nom']}"
+
+    if name == "update_contact":       # renomme / change role / marque "moi" — par id
+        ct = _sub(store["contacts"], op["id"], "Contact")
+        if op.get("nom") is not None:
+            nm = op["nom"].strip()
+            if not nm:
+                raise ValueError("Nom requis.")
+            ct["nom"] = nm
+        if op.get("role") is not None:
+            ct["role"] = op["role"]
+        if "moi" in op:
+            if op["moi"]:
+                for o in store["contacts"]:
+                    o["moi"] = (o["id"] == ct["id"])
+            else:
+                ct["moi"] = False
+        _sync_contact_caches(store, ct)
+        return f"Personne mise a jour : {ct['nom']}"
+
+    if name == "merge_contact":        # replie une fiche en doublon dans une autre
+        src = _sub(store["contacts"], op["from_id"], "Contact")
+        dst = _sub(store["contacts"], op["into_id"], "Contact")
+        if src["id"] == dst["id"]:
+            raise ValueError("Fusion impossible : meme personne.")
+        n = 0
+        for c in store["chantiers"]:
+            for l in c["livrables"]:
+                if l.get("contact_id") == src["id"]:
+                    l["contact_id"], l["personne"], n = dst["id"], dst["nom"], n + 1
+            for p in c["parties"]:
+                if p.get("contact_id") == src["id"]:
+                    p["contact_id"], p["nom"] = dst["id"], dst["nom"]
+        if src.get("moi"):
+            dst["moi"] = True
+        if not dst.get("role"):
+            dst["role"] = src.get("role", "")
+        store["contacts"] = [x for x in store["contacts"] if x["id"] != src["id"]]
+        return f"« {src['nom']} » fusionne dans « {dst['nom']} » ({n} livrable(s))"
+
+    if name == "remove_contact":       # supprime une fiche — par id
+        ct = _sub(store["contacts"], op["id"], "Contact")
+        to = op.get("reassign_to")     # id d'une autre fiche, ou None
+        dst = _sub(store["contacts"], to, "Contact") if to else None
+        n = 0
+        for c in store["chantiers"]:
+            for l in c["livrables"]:
+                if l.get("contact_id") == ct["id"]:
+                    l["contact_id"] = dst["id"] if dst else None
+                    l["personne"] = dst["nom"] if dst else ""
+                    n += 1
+            for p in c["parties"]:
+                if p.get("contact_id") == ct["id"]:
+                    p["contact_id"] = dst["id"] if dst else None
+                    if dst:
+                        p["nom"] = dst["nom"]
+        store["contacts"] = [x for x in store["contacts"] if x["id"] != ct["id"]]
+        cible = f"reassigne(s) a {dst['nom']}" if dst else "desormais non assignes"
+        return f"« {ct['nom']} » supprime ({n} livrable(s) {cible})"
 
     if name == "rename_person":   # renomme une personne partout (contacts + livrables)
         old = (op.get("old") or "").strip()
@@ -1291,6 +1526,8 @@ def _apply_op(store: dict, op: dict) -> str:
             r["actif"] = bool(op["actif"])
         if "note" in op and op["note"] is not None:
             r["note"] = str(op["note"]).strip()
+        if r["freq"] == "ponctuel" and not r.get("date"):   # un ponctuel sans date serait "dû" en permanence
+            raise ValueError("Un rappel ponctuel nécessite une date d'échéance.")
         return f"Routine mise à jour : {r['label']}"
 
     if name == "toggle_rappel":
@@ -1354,15 +1591,17 @@ def _apply_op(store: dict, op: dict) -> str:
         store["timelog"] = [x for x in store["timelog"] if x["id"] != op["id"]]
         return "Session supprimée"
 
-    if name == "clock_add":   # saisie manuelle d'une plage (chose faite hors de l'appli)
+    if name == "clock_add":   # saisie manuelle d'une plage TERMINÉE (chose faite hors de l'appli)
         label = (op.get("label") or "").strip()
         if not label:
             raise ValueError("Libellé requis.")
         if not op.get("debut"):
             raise ValueError("Heure de début requise (HH:MM).")
+        if not op.get("fin"):   # une plage manuelle est terminée -> sinon elle créerait un 2e chrono actif
+            raise ValueError("Heure de fin requise pour une plage manuelle.")
         store.setdefault("timelog", []).append({
             "id": _uid("tl_"), "date": op.get("date") or today(),
-            "debut": str(op["debut"]).strip(), "fin": (str(op.get("fin")).strip() or None) if op.get("fin") else None,
+            "debut": str(op["debut"]).strip(), "fin": str(op["fin"]).strip(),
             "kind": op.get("kind") or "libre", "label": label,
             "chantier_id": op.get("chantier_id"), "tache_id": op.get("tache_id"), "rappel_id": op.get("rappel_id"),
         })

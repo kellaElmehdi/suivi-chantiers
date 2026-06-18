@@ -119,6 +119,32 @@ header .sub{font-size:11.5px;color:var(--faint)}
 .wlbl{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;font-family:var(--font-display);letter-spacing:-.02em}
 .kpis6{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;margin-bottom:10px}
 .kpis6 .kpi{cursor:default}
+/* Tableau de bord condensé : libellés légers + bandes KPI compactes + grille de mini-graphes */
+.dlbl{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:14px 0 7px}
+.dlbl:first-child{margin-top:2px}
+.kband{display:grid;grid-template-columns:repeat(auto-fill,minmax(146px,1fr));gap:8px;margin-bottom:6px}
+.kband .kpi{padding:8px 11px;box-shadow:none;cursor:default}
+.kband .kpi[onclick]{cursor:pointer}
+.kband .kpi .lab{font-size:9.5px;text-transform:uppercase;letter-spacing:.3px;color:var(--muted)}
+.kband .kpi .num{font-size:18px;margin-top:1px}
+.kband .kpi .sub{font-size:9px;margin-top:1px}
+.dgrid{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:10px}
+.dgrid .cardx{flex:1 1 280px;min-width:250px}
+/* Légende couleurs + repères d'interprétation */
+.dlegend-bar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:2px 0 12px;font-size:11.5px;color:var(--muted)}
+.leg-chip{display:inline-flex;align-items:center;gap:5px}
+.leg-chip i{width:11px;height:11px;border-radius:3px;display:inline-block;border:1px solid var(--line)}
+.lg-good{background:var(--green);border-color:var(--green)!important}
+.lg-warn{background:var(--amber);border-color:var(--amber)!important}
+.lg-bad{background:var(--red);border-color:var(--red)!important}
+.lg-neut{background:var(--canvas)}
+.leg-toggle{margin-left:auto;cursor:pointer}
+.dref{display:none;flex-basis:100%;background:var(--canvas);border:1px solid var(--line);border-radius:var(--radius);
+  padding:11px 14px;font-size:12px;line-height:1.45;color:var(--ink);box-shadow:var(--shadow)}
+.dref.show{display:block}
+.dref>div{margin:3px 0}
+.dref .g{color:#047857} .dref .w{color:#b45309} .dref .b{color:var(--red)}
+.khint{font-size:9px;color:var(--faint);font-weight:400;cursor:help}
 
 /* ---------------- Vue Personnes (annuaire) ---------------- */
 .contacts{padding:18px 22px}
@@ -130,6 +156,11 @@ header .sub{font-size:11.5px;color:var(--faint)}
 .ptable .pacts{white-space:nowrap;text-align:right}
 .ptable .pacts a{cursor:pointer;text-decoration:underline;margin-left:12px;font-size:12px;color:var(--ink)}
 .ptable .pacts a.danger{color:var(--red)}
+.ptable .pacts .merge-sel{margin-left:12px;font-size:11.5px;padding:3px 6px;vertical-align:middle}
+.moi-badge{display:inline-block;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;
+  background:var(--ink);color:#fff;border-radius:999px;padding:1px 7px;margin-left:6px}
+.setmoi{cursor:pointer;font-size:11px;color:var(--muted);text-decoration:underline;margin-left:8px}
+.setmoi:hover{color:var(--ink)}
 
 /* ---------------- Vue Charge ---------------- */
 .charge{padding:18px 22px}
@@ -259,6 +290,14 @@ header .sub{font-size:11.5px;color:var(--faint)}
 .kpi .sub{font-size:10.5px;color:var(--faint);margin-top:2px}
 .kpi.bad{border-left:3px solid var(--red)} .kpi.bad .num{color:var(--red)}
 .kpi.good .sub{color:var(--ink)}
+.kpi.good{border-left:3px solid var(--green)}
+.kpi.warn{border-left:3px solid var(--amber)} .kpi.warn .num{color:#b45309}
+/* EVM — en-tête + champ budget */
+.evm-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
+  margin:16px 0 8px;font-family:var(--font-display);font-weight:700;font-size:14px;color:var(--ink)}
+.evm-budget{font-family:var(--font);font-weight:500;font-size:12px;color:var(--muted);display:inline-flex;align-items:center;gap:6px}
+.evm-budget input{width:110px;padding:4px 7px;font-size:12.5px;text-align:right;font-variant-numeric:tabular-nums}
+.evm-empty{margin:4px 0 10px;max-width:640px;line-height:1.5}
 
 .pg-grid{display:grid;grid-template-columns:300px 1fr;gap:14px;align-items:start}
 .pg-left,.pg-right{display:flex;flex-direction:column;gap:14px;min-width:0}
@@ -282,7 +321,6 @@ header .sub{font-size:11.5px;color:var(--faint)}
 
 .kv{display:flex;font-size:12.5px;margin:5px 0;align-items:center}
 .kv .k{width:80px;color:var(--muted)} .kv .v{flex:1} .kv .v.late{color:var(--red)}
-.desc{font-size:12.5px;line-height:1.5;color:var(--ink);white-space:pre-wrap}
 
 /* tâches */
 .ttable{display:flex;flex-direction:column}
@@ -351,7 +389,7 @@ header .sub{font-size:11.5px;color:var(--faint)}
 .legend .sq{width:11px;height:11px;border:1px solid var(--line);border-radius:3px}
 .legend .sq.red{background:var(--red);border-color:var(--red)}.legend .sq.blue{background:var(--blue)}
 .legend .sq.green{background:var(--green)}.legend .sq.grayb{background:#d1d5db}.legend .sq.inkb{background:var(--ink)}
-.legend .sq.amberb{background:var(--amber);border-color:var(--amber)}.legend .sq.refb{background:#e5e7eb}
+.legend .sq.refb{background:#e5e7eb}
 .legend .sq.inprogb{background:var(--inprog);border-color:var(--inprog-d)}
 .legend .dia{width:10px;height:10px;background:var(--ink);transform:rotate(45deg)}
 
@@ -505,10 +543,16 @@ textarea{width:100%;resize:vertical;min-height:52px}
   border:1px solid var(--inprog);border-radius:var(--radius-pill);padding:2px 9px;white-space:nowrap}
 .tstart-undo{cursor:pointer;color:var(--muted);font-size:13px;font-weight:700;line-height:1;padding:0 2px}
 .tstart-undo:hover{color:var(--ink)}
-.box.disabled{cursor:not-allowed;border-style:dashed;border-color:var(--surface-strong);background:var(--surface-soft)}
 .tstart-date{font:inherit;font-size:11px;border:1px solid var(--inprog);background:var(--inprog-bg);
   color:var(--inprog-d);border-radius:var(--radius-sm);padding:2px 5px;width:122px}
 .tstate.real{font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+/* avancement : un seul bouton qui avance (vert = terminer / terminé) */
+.tfinish{font:inherit;font-size:11px;font-weight:600;color:#047857;background:#d1fae5;
+  border:1px solid var(--green);border-radius:var(--radius-pill);padding:3px 10px;cursor:pointer;white-space:nowrap}
+.tfinish:hover{background:var(--green);color:#fff}
+.tprog-done{font:inherit;font-size:10.5px;font-weight:700;color:#047857;background:#d1fae5;
+  border:1px solid var(--green);border-radius:var(--radius-pill);padding:2px 9px;cursor:pointer;white-space:nowrap}
+.tprog-done:hover{background:var(--green);color:#fff}
 .bdg.b-inprog{color:var(--inprog-d);background:var(--inprog-bg);border-color:var(--inprog)}
 
 /* ===== En pause (hold) — niveau chantier ============================== */
@@ -755,3 +799,4 @@ textarea{width:100%;resize:vertical;min-height:52px}
 .modal h3{margin:0;font-size:16px}
 .modal-inp{font:inherit;font-size:14px;border:1px solid var(--line);border-radius:var(--radius-sm);padding:9px 11px;background:var(--canvas)}
 .legend .drift-lg{display:inline-block;width:16px;height:3px;border-radius:2px;background:linear-gradient(90deg,rgba(5,150,105,.55),rgba(220,38,38,.55))}
+.dl-pause{font-size:9.5px;font-weight:600;color:var(--amber);background:var(--amber-bg);border-radius:var(--radius-pill);padding:1px 6px;margin-left:2px}

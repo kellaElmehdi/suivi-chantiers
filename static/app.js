@@ -3,7 +3,7 @@
 let STORE = {chantiers: [], contacts: []};
 let TODAY = "2025-01-01";
 let CUR = null;            // id du chantier ouvert en page detaillee (sinon null)
-let SETTINGS = {capacite_jour: 3, wip_max: 3, jours_ouvres: true, relance_jours: 7, jour_debut: "07:00", jour_fin: "17:51"};
+let SETTINGS = {capacite_jour: 3, wip_max: 3, jours_ouvres: true, relance_jours: 7, jour_debut: "07:00", jour_fin: "17:51", pause_debut: "12:00", pause_fin: "13:00", vendredi_fin: "13:30"};
 
 const COLS = [
   {key: "todo",    label: "À faire"},
@@ -234,14 +234,15 @@ const esc = s => (s == null ? "" : String(s)).replace(/[&<>"]/g, c =>
   ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 const jqs = s => esc(s).replace(/'/g, "\\'");   // chaîne sûre pour un attribut onX='...'
 const isLate = d => d && d < TODAY;
+const livPending = x => x.statut === "attente" || x.statut === "partiel";   // livrable encore dû
 const pct = c => c.taches.length ? Math.round(100 * c.taches.filter(t => t.done).length / c.taches.length) : 0;
-const openAtt = c => c.livrables.filter(l => l.statut === "attente" || l.statut === "partiel");
-const lateAtt = c => c.livrables.filter(l => (l.statut === "attente" || l.statut === "partiel") && isLate(l.date));
+const openAtt = c => c.livrables.filter(l => livPending(l));
+const lateAtt = c => c.livrables.filter(l => (livPending(l)) && isLate(l.date));
 const chById = id => STORE.chantiers.find(c => c.id === id);
 // "Bloqué" est calculé : point bloquant rempli, OU une tâche non finie attend un
 // livrable rattaché non reçu, OU un livrable non reçu est EN RETARD.
 const gatedLivrable = c => (c.livrables || []).find(l => l.tache_id
-  && (l.statut === "attente" || l.statut === "partiel")
+  && (livPending(l))
   && (c.taches || []).some(t => t.id === l.tache_id && !t.done));
 function isBlocked(c){
   if(c.statut === "done" || c.hold) return false;   // un chantier en pause n'est pas "bloqué"
@@ -346,10 +347,23 @@ function toggleMenu(e, id){
   if(willOpen) m.classList.add("open");
 }
 document.addEventListener("click", () => document.querySelectorAll(".menu.open").forEach(m => m.classList.remove("open")));
-// fermer tout menu ouvert au scroll (les popups en position:fixed se détacheraient sinon)
-document.addEventListener("scroll", () => {
-  const open = document.querySelector(".menu.open");
-  if(open) open.classList.remove("open");
+// Au scroll : un popup en position:fixed SUIT son ancre (sinon il se détacherait) ; on ne le
+// ferme que si l'ancre quitte l'écran, et jamais si on scrolle DANS la liste. Les menus ancrés
+// (nav du header) se ferment, eux, au scroll comme avant.
+document.addEventListener("scroll", e => {
+  document.querySelectorAll(".menu.open").forEach(wrap => {
+    const list = wrap.querySelector(".menu-list");
+    if(list && list.style.position === "fixed"){
+      if(e.target && e.target.nodeType && list.contains(e.target)) return;   // scroll interne à la liste
+      const btn = wrap.querySelector("button"); if(!btn) return;
+      const r = btn.getBoundingClientRect();
+      if(r.bottom < 8 || r.top > window.innerHeight - 8){ wrap.classList.remove("open"); return; }
+      list.style.top = (r.bottom + 4) + "px";
+      list.style.left = r.left + "px";
+    } else {
+      wrap.classList.remove("open");
+    }
+  });
 }, true);
 // Menu en position:fixed (échappe au overflow:hidden des cartes) — pour le statut de risque
 function fixedMenu(e, id){
@@ -437,7 +451,7 @@ function lateTasks(c){   // tâches/jalons non finis dont la fin PRÉVUE est dé
   return c.taches.filter(t => !t.done && S.sched[t.id] && S.sched[t.id].endDate < TODAY);
 }
 function relancesDues(c){
-  return c.livrables.filter(l => (l.statut === "attente" || l.statut === "partiel")
+  return c.livrables.filter(l => (livPending(l))
     && (!l.derniere || daysBetween(l.derniere, TODAY) >= SETTINGS.relance_jours));
 }
 function retoursLate(c){
@@ -640,6 +654,7 @@ function enableDesktopNotifs(){
   Notification.requestPermission().then(() => { renderNotif(); checkDesktopNotifs(); });
 }
 function checkDesktopNotifs(){
+  if(todayISO() !== TODAY){ loadStore(); return; }   // changement de jour (app laissée ouverte) : resync TODAY/rappels d'abord
   if(!("Notification" in window) || Notification.permission !== "granted") return;
   const items = buildReminders();
   const k = "notif_sent_" + TODAY;
@@ -663,9 +678,9 @@ function checkDesktopNotifs(){
 function saveSetting(k, v){ mutate({op: "set_settings", settings: {[k]: v}}); }
 
 // ---- Tableau de bord -----------------------------------------------------
-function dkpi(label, val, sub, cls, onclick){
-  return `<div class="kpi ${cls || ""}"${onclick ? ` onclick="${onclick}" style="cursor:pointer"` : ""}>` +
-    `<div class="lab">${label}</div><div class="num">${esc(String(val))}</div>` +
+function dkpi(label, val, sub, cls, onclick, help){
+  return `<div class="kpi ${cls || ""}"${help ? ` title="${esc(help)}"` : ""}${onclick ? ` onclick="${onclick}" style="cursor:pointer"` : ""}>` +
+    `<div class="lab">${label}${help ? ` <span class="khint">ⓘ</span>` : ""}</div><div class="num">${esc(String(val))}</div>` +
     (sub ? `<div class="sub">${esc(sub)}</div>` : "") + `</div>`;
 }
 function dsection(t){ return `<div class="ch-h">${t}</div>`; }
@@ -838,7 +853,6 @@ function renderDashboard(){
   // D. Livrables
   let livOpen = 0, livLate = 0, relances = 0; const byPers = {};
   chs.forEach(c => { openAtt(c).forEach(l => { livOpen++; byPers[l.personne] = (byPers[l.personne] || 0) + 1; }); livLate += lateAtt(c).length; relances += relancesDues(c).length; });
-  const topPers = Object.entries(byPers).sort((a, b) => b[1] - a[1]).slice(0, 3);
   // E. Recette
   let retOpen = 0, retLate = 0, iterOpen = 0;
   chs.forEach(c => { retOpen += openRetours(c).length; retLate += retoursLate(c).length; iterOpen += (c.iterations || []).filter(it => it.ouverte).length; });
@@ -855,10 +869,10 @@ function renderDashboard(){
   let enCours = 0, traineuses = 0; const cycles = [];
   chs.forEach(c => c.taches.forEach(t => {
     if(t.start_date && !t.done && !c.hold) enCours++;
-    if(t.done && t.start_date && t.done_date){
-      const cyc = Math.max(0, daysBetween(t.start_date, t.done_date));
+    if(t.done && t.start_date && t.done_date && !t.is_milestone){
+      const cyc = Math.max(1, daysBetween(t.start_date, t.done_date));   // ≥ 1 jour : faite le jour même = 1 jour (un jalon n'a pas de cycle)
       cycles.push(cyc);
-      const planned = t.is_milestone ? 0 : Math.max(1, t.duree || 1);
+      const planned = Math.max(1, t.duree || 1);
       if(cyc > planned * 1.5 && cyc - planned >= 2) traineuses++;   // réel nettement > planifié
     }
   }));
@@ -885,51 +899,88 @@ function renderDashboard(){
   const bubblePts = active.filter(c => c.echeance).map(c => ({label: c.titre, x: daysBetween(TODAY, c.echeance),
     y: pct(c), size: c.taches.length, color: STATUT_COLOR[colOf(c)]}));
 
-  let h = dsection("Portefeuille");
-  h += `<div class="dash-row">` + chartBox("Répartition par statut", donutChart(statutRows)) +
-       chartBox("Avancement par chantier (actifs)", hbar(avancRows, {labelW: 170, barW: 170})) + `</div>`;
+  // EVM — agrégat portefeuille (chantiers budgétés) — calculé en amont pour la bande
+  const evmRows = scheds.map(({c, S}) => evm(c, S)).filter(E => E.BAC != null);
+  let pBAC = 0, pPV = 0, pEV = 0, pAC = 0, acOn = false;
+  evmRows.forEach(E => { pBAC += E.BAC; pPV += E.PV || 0; pEV += E.EV || 0; if(E.AC != null){ pAC += E.AC; acOn = true; } });
+  const pSPI = (evmRows.length && pPV) ? pEV / pPV : null, pCPI = (acOn && pAC > 0) ? pEV / pAC : null;
+  const pSV = pEV - pPV, pCV = acOn ? pEV - pAC : null;
+  const pEAC = pCPI ? pBAC / pCPI : null, pVAC = pEAC != null ? pBAC - pEAC : null;
+
+  // ===== Légende + repères d'interprétation (PMBOK) =====
+  let h = `<div class="dlegend-bar">` +
+    `<span class="leg-chip"><i class="lg-good"></i>bon</span>` +
+    `<span class="leg-chip"><i class="lg-warn"></i>à surveiller</span>` +
+    `<span class="leg-chip"><i class="lg-bad"></i>à risque</span>` +
+    `<span class="leg-chip"><i class="lg-neut"></i>informatif</span>` +
+    `<a class="lnk leg-toggle" onclick="this.parentNode.querySelector('.dref').classList.toggle('show')">Comment lire ces indicateurs ? ▾</a>` +
+    `<div class="dref">` +
+      `<div><b>SPI</b> (délai, EV/PV) &amp; <b>CPI</b> (coût, EV/AC) : <b class="g">≥ 1,0</b> en avance / sous budget · <b class="w">0,90–1,0</b> léger écart · <b class="b">&lt; 0,90</b> à risque.</div>` +
+      `<div><b>SV</b> / <b>CV</b> (en €) : <b class="g">positif</b> = avance / économie ; <b class="b">négatif</b> = retard / dépassement.</div>` +
+      `<div><b>EAC</b> (coût final estimé) : bon s'il reste ≤ budget, c.-à-d. <b>VAC</b> = BAC − EAC <b class="g">≥ 0</b>.</div>` +
+      `<div><b>Retards, tâches/livrables en retard, relances, risques critiques</b> : objectif <b class="g">0</b> ; toute valeur &gt; 0 passe en <b class="b">rouge</b>.</div>` +
+      `<div><b>WIP</b> : chantiers en parallèle — bon <b class="g">≤ ${SETTINGS.wip_max}</b> (au-delà : dispersion).</div>` +
+      `<div class="muted">Survole un indicateur marqué ⓘ pour son interprétation détaillée.</div>` +
+    `</div></div>`;
+
+  // ===== Bande 1 — Performance & délais =====
+  h += `<div class="dlbl">Performance &amp; délais</div><div class="kband">`;
+  h += dkpi("Avancement moyen", avg + " %", active.length + " chantiers actifs", "", "", "Moyenne d'avancement (tâches faites) des chantiers actifs. Indicatif, pas de seuil bon/mauvais.");
+  h += dkpi("WIP — en cours", by.doing + "/" + SETTINGS.wip_max, by.doing > SETTINGS.wip_max ? "limite dépassée" : "dans la limite", by.doing > SETTINGS.wip_max ? "bad" : "good", "", "Chantiers menés en parallèle vs la limite. Bon ≤ " + SETTINGS.wip_max + " ; au-delà = dispersion, tout avance plus lentement.");
+  if(evmRows.length){
+    h += dkpi("SPI — délai", fmtIdx(pSPI), (pSV >= 0 ? "+" : "") + fmtEur(pSV), idxCls(pSPI), "", "Indice de performance délai (EV/PV). ≥1 = à l'heure ou en avance · 0,90–1 = léger retard · <0,90 = en retard. Sous-texte = SV, l'écart en €.");
+    h += dkpi("CPI — coût", fmtIdx(pCPI), pCV != null ? (pCV >= 0 ? "+" : "") + fmtEur(pCV) : "taux ?", idxCls(pCPI), "", "Indice de performance coût (EV/AC). ≥1 = sous budget · 0,90–1 = léger dépassement · <0,90 = dépassement. Requiert un taux journalier (réglages Charge).");
+    h += dkpi("Coût final (EAC)", fmtEur(pEAC), pVAC != null ? "VAC " + (pVAC >= 0 ? "+" : "") + fmtEur(pVAC) : "—", pVAC != null ? (pVAC >= 0 ? "good" : "bad") : "", "", "Coût final estimé du portefeuille (BAC/CPI). Bon s'il reste ≤ budget : VAC ≥ 0 (vert), VAC < 0 = dépassement prévu (rouge).");
+  }
+  h += dkpi("Retard cumulé", retardCumule + " j", "Σ glissements / réf.", retardCumule ? "bad" : "good", "", "Somme des glissements de fin vs référence figée, tous chantiers. Objectif 0 j. Nécessite une référence figée.");
+  h += dkpi("Tâches en retard", lateTtl, "à rattraper", lateTtl ? "bad" : "good", "", "Tâches/jalons non finis dont la fin PRÉVUE est déjà passée. Objectif 0.");
+  h += dkpi("Échéances < 7 j", ech7.length, ech7.slice(0, 2).join(", ") || "rien d'imminent", ech7.length ? "bad" : "", "", "Chantiers dont l'échéance tombe dans les 7 prochains jours — à surveiller de près.");
+  h += dkpi("Prochain jalon", jalon ? fmt(jalon.date) : "—", jalon ? jalon.label.slice(0, 22) : "aucun", "", "", "Prochain jalon non atteint, toutes échéances confondues. Informatif.");
+  h += dkpi("Risques critiques", riskCrit, riskAvere + " avéré(s)", riskCrit ? "bad" : "good", "setView('risques')", "Risques ouverts de criticité ≥ 15 (proba × gravité). Objectif 0. Clic → registre des risques.");
+  h += `</div>`;
+
+  // ===== Bande 2 — Livraison & activité =====
+  h += `<div class="dlbl">Livraison &amp; activité</div><div class="kband">`;
+  h += dkpi("Livrables attendus", livOpen, livLate + " en retard", livLate ? "bad" : "", "setView('people')", "Livrables encore dûs ; le sous-texte compte ceux en retard (échéance passée). Rouge dès qu'un est en retard.");
+  h += dkpi("Relances à faire", relances, "depuis " + SETTINGS.relance_jours + " j+", relances ? "bad" : "good", "setView('people')", "Livrables en attente depuis plus de " + SETTINGS.relance_jours + " jours → à relancer. Objectif 0.");
+  h += dkpi("Retours ouverts", retOpen, retLate + " en retard", retLate ? "bad" : "", "", "Retours de recette non traités ; sous-texte = ceux en retard. Objectif 0.");
+  h += dkpi("En recette", by.recette, iterOpen + " itér. ouverte(s)", "", "", "Chantiers en phase de recette, et nombre d'itérations ouvertes. Informatif.");
+  h += dkpi("Tâches en cours", enCours, "démarrées, non finies", "", "", "Tâches démarrées et pas encore terminées (hors chantiers en pause). Informatif — à recouper avec le WIP.");
+  h += dkpi("Temps de cycle", cycleMoy + " j", cycles.length + " mesurée(s)", "", "", "Durée réelle moyenne d'une tâche (début réel → fin réelle). Plus c'est court, plus le flux est fluide.");
+  h += dkpi("Terminées (7 j)", done7, done30 + " sur 30 j", "good", "", "Débit récent : tâches terminées sur 7 et 30 jours. Plus c'est haut, mieux c'est.");
+  h += dkpi("Ont traîné", traineuses, "cycle ≫ planifié", traineuses ? "bad" : "good", "", "Tâches dont le cycle réel dépasse nettement la durée planifiée (×1,5 et ≥ 2 j). Objectif 0 — pointe les estimations à revoir.");
+  h += dkpi("Sans échéance", sansEch, "chantiers actifs", sansEch ? "bad" : "good", "", "Chantiers actifs sans date d'échéance → impossible de mesurer leur retard. Objectif 0.");
+  h += dkpi("Sans référence", sansRef, "chantiers actifs", sansRef ? "" : "good", "", "Chantiers actifs sans planning de référence figé → pas de mesure de dérive (SV, retard cumulé). À figer.");
+  h += `</div>`;
+
+  // ===== Détail EVM (€) si budgété =====
+  if(evmRows.length){
+    h += `<div class="dlbl">Valeur acquise (EVM) — détail</div><div class="kband">`;
+    h += dkpi("Budget total (BAC)", fmtEur(pBAC), evmRows.length + " budgété(s)", "", "", "Budget à l'achèvement — somme des budgets saisis sur les chantiers.");
+    h += dkpi("Valeur acquise (EV)", fmtEur(pEV), fmtPctw(pBAC ? pEV / pBAC : null) + " du budget", "", "", "Earned Value : budget correspondant au travail RÉELLEMENT fait (fait = 100 %, en cours = 50 %).");
+    h += dkpi("Valeur planifiée (PV)", fmtEur(pPV), fmtPctw(pBAC ? pPV / pBAC : null) + " prévu à date", "", "", "Planned Value : budget qui DEVRAIT être consommé à aujourd'hui selon le planning. EV vs PV → avance / retard.");
+    h += dkpi("Coût réel (AC)", acOn ? fmtEur(pAC) : "—", acOn ? "temps chrono × taux" : "définis un taux/jour", "", "", "Actual Cost : coût réel main-d'œuvre = temps chronométré (jours-personnes) × taux journalier. EV vs AC → sous / sur budget.");
+    h += dkpi("Reste à dépenser (ETC)", (pEAC != null && acOn) ? fmtEur(pEAC - pAC) : "—", "estimé", "", "", "Estimate To Complete : ce qu'il reste à dépenser pour finir, au rythme de coût actuel (EAC − AC).");
+    h += `</div>`;
+  }
+
+  // ===== Visuels — grands graphes souples puis grille dense =====
+  h += `<div class="dlbl">Visuels</div>`;
   h += `<div class="dash-row">` +
-    chartBox("Avancement moyen", `<div class="center">${donut(avg)}<div class="muted small">des ${active.length} chantiers actifs</div></div>`) +
-    chartBox("WIP — chantiers en cours", `<div class="center">${wipDots(by.doing, SETTINGS.wip_max)}` +
-      `<div class="small ${by.doing > SETTINGS.wip_max ? "bad-t" : "muted"}">limite ${SETTINGS.wip_max}${by.doing > SETTINGS.wip_max ? " — dépassée" : ""}</div></div>`) + `</div>`;
-
-  h += dsection("Délais & retards");
-  h += chartBox("Carte des risques — urgence × avancement", bubbleMap(bubblePts));
-  h += chartBox("Marge / retard vs échéance (jours)", divbar(retardRows));
-  h += `<div class="kpis6">` +
-    dkpi("Retard cumulé / réf.", retardCumule + " j", "Σ glissements", retardCumule ? "bad" : "good") +
-    dkpi("Échéances < 7 j", ech7.length, ech7.slice(0, 2).join(", ") || "rien d'imminent", ech7.length ? "bad" : "") +
-    dkpi("Prochain jalon", jalon ? fmt(jalon.date) : "—", jalon ? jalon.label : "aucun") +
-    dkpi("Tâches/jalons en retard", lateTtl, "à rattraper", lateTtl ? "bad" : "good") +
-    dkpi("Risques critiques", riskCrit, riskAvere + " avéré(s)", riskCrit ? "bad" : "good", "setView('risques')") + `</div>`;
-
-  h += dsection("Charge");
-  h += chartBox("Calendrier de charge — tâches actives/jour (limite " + cd.cap + ")", cd.days.length ? heatmapCalendar(cd) : `<div class="empty">—</div>`);
-  h += `<div class="dash-row">` +
-    chartBox("Taux d'occupation", thresholdBar(occ, 100, Math.max(occ, 100), "%")) +
-    chartBox("Pic de charge", thresholdBar(peak, cd.cap, Math.max(peak, cd.cap), " tâ./j")) +
-    chartBox("Jours en surcharge", thresholdBar(cd.overload, 0, Math.max(cd.days.length, 1), " j", cd.overload > 0) +
-      `<div class="muted small">sur ${cd.days.length} jours d'horizon</div>`) + `</div>`;
-
-  h += dsection("Livrables & relances");
-  h += `<div class="dash-row">` + chartBox("Livrables attendus par personne", hbar(persRows, {labelW: 150, barW: 170})) +
-       chartBox("Retours de recette par statut", donutChart(retRows)) + `</div>`;
-  h += `<div class="kpis6">` +
-    dkpi("Livrables attendus", livOpen, livLate + " en retard", livLate ? "bad" : "", "setView('people')") +
-    dkpi("Relances à faire", relances, "depuis " + SETTINGS.relance_jours + " j+", relances ? "bad" : "good", "setView('people')") +
-    dkpi("Retours ouverts", retOpen, retLate + " en retard", retLate ? "bad" : "") +
-    dkpi("Chantiers en recette", by.recette, iterOpen + " itération(s) ouverte(s)") + `</div>`;
-
-  h += dsection("Activité & hygiène");
-  h += `<div class="dash-row">` + chartBox("Tâches terminées par semaine", vbar(weekRows)) +
-       chartBox("% chemin critique", `<div class="center">${donut(critPct)}<div class="muted small">${critN}/${taskN} tâches actives</div></div>`) + `</div>`;
-  h += `<div class="kpis6">` +
-    dkpi("Tâches en cours", enCours, "démarrées, non finies") +
-    dkpi("Temps de cycle moyen", cycleMoy + " j", cycles.length + " tâche(s) mesurée(s)") +
-    dkpi("Ont traîné", traineuses, "cycle réel ≫ durée planifiée", traineuses ? "bad" : "good") +
-    dkpi("Terminées (7 j)", done7, done30 + " sur 30 j", "good") +
-    dkpi("Sans échéance", sansEch, "chantiers actifs", sansEch ? "bad" : "good") +
-    dkpi("Sans référence figée", sansRef, "chantiers actifs") + `</div>`;
+    chartBox("Risques — urgence × avancement", bubbleMap(bubblePts)) +
+    chartBox("Marge / retard vs échéance (j)", divbar(retardRows)) +
+    chartBox("Charge — calendrier (lim. " + cd.cap + ")", cd.days.length ? heatmapCalendar(cd) : `<div class="empty">—</div>`) + `</div>`;
+  h += `<div class="dgrid">`;
+  h += chartBox("Répartition par statut", donutChart(statutRows));
+  h += chartBox("Avancement / chantier", hbar(avancRows, {labelW: 120, barW: 110}));
+  h += chartBox("Livrables / personne", hbar(persRows, {labelW: 120, barW: 110}));
+  h += chartBox("Retours de recette", donutChart(retRows));
+  h += chartBox("Terminées / semaine", vbar(weekRows));
+  h += chartBox("% chemin critique", `<div class="center">${donut(critPct)}<div class="muted small">${critN}/${taskN} tâches</div></div>`);
+  h += chartBox("Taux d'occupation", thresholdBar(occ, 100, Math.max(occ, 100), "%"));
+  h += chartBox("Pic de charge", thresholdBar(peak, cd.cap, Math.max(peak, cd.cap), " tâ./j"));
+  h += chartBox("Jours en surcharge", thresholdBar(cd.overload, 0, Math.max(cd.days.length, 1), " j", cd.overload > 0));
+  h += `</div>`;
 
   $("dash").innerHTML = h;
 }
@@ -940,11 +991,18 @@ function renderCharge(){
     fldNum("Capacité / jour", "capacite_jour", 1) +
     fldNum("Max chantiers en cours", "wip_max", 1) +
     fldNum("Relance après (j)", "relance_jours", 1) +
+    fldNum("Taux journalier (€)", "taux_jour", 0) +
+    fldNum("Heures facturables/j", "heures_jour", 1) +
     `<label class="fld"><input type="checkbox" ${SETTINGS.jours_ouvres ? "checked" : ""} ` +
     `onchange="saveSetting('jours_ouvres',this.checked)"> Jours ouvrés (exclure week-ends)</label>` +
     `<label class="fld"><span class="fl">Journée de travail</span>` +
     `<input type="time" value="${SETTINGS.jour_debut || "07:00"}" title="Début" onchange="saveSetting('jour_debut',this.value)"> → ` +
-    `<input type="time" value="${SETTINGS.jour_fin || "17:51"}" title="Fin (un chrono oublié est fermé à cette heure)" onchange="saveSetting('jour_fin',this.value)"></label></div>`;
+    `<input type="time" value="${SETTINGS.jour_fin || "17:51"}" title="Fin (un chrono oublié est fermé à cette heure)" onchange="saveSetting('jour_fin',this.value)"></label>` +
+    `<label class="fld"><span class="fl">Pause déjeuner (exclue du temps)</span>` +
+    `<input type="time" value="${SETTINGS.pause_debut || "12:00"}" title="Début pause" onchange="saveSetting('pause_debut',this.value)"> → ` +
+    `<input type="time" value="${SETTINGS.pause_fin || "13:00"}" title="Fin pause" onchange="saveSetting('pause_fin',this.value)"></label>` +
+    `<label class="fld"><span class="fl">Vendredi (fin, sans pause)</span>` +
+    `<input type="time" value="${SETTINGS.vendredi_fin || "13:30"}" title="Le vendredi : journée jusqu'à cette heure, sans pause déjeuner" onchange="saveSetting('vendredi_fin',this.value)"></label></div>`;
   h += `<div class="ch-h">Plan de charge — tâches actives par jour · limite <b>${cd.cap}</b> · horizon 120 j</div>`;
   if(!cd.days.length){ $("charge").innerHTML = h + `<div class="empty">Aucune tâche active planifiée.</div>`; return; }
   h += chargeChart(cd);
@@ -1035,7 +1093,7 @@ function renderBoard(){
       card.onclick = () => openChantier(c.id);
       const p = pct(c), lateDue = c.statut !== "done" && isLate(c.echeance);
       const refPin = c.baseline
-        ? ` <span class="c-pin" title="Référence figée${c.baseline_edits ? ` — modifiée ${c.baseline_edits}× depuis le figeage` : ""}">📌</span>`
+        ? ` <span class="c-pin" title="Référence figée${c.baseline_edits ? ` — planning replanifié ${c.baseline_edits}× depuis` : ""}">📌</span>`
         : "";
       let h = `<div class="c-title">${esc(c.titre)}${refPin}</div>`;
       h += `<div class="c-prog"><span class="track"><i style="width:${p}%"></i></span><span class="pc">${p}%</span></div>`;
@@ -1069,21 +1127,21 @@ function renderBoard(){
 function renderPeople(){
   const map = {};
   STORE.chantiers.forEach(c => c.livrables.forEach(l => {
-    const key = (l.personne || "").trim() || "(personne non renseignée)";
-    (map[key] = map[key] || {role: l.role, items: []}).items.push({...l, chantier: c.titre, chantier_id: c.id});
+    const ct = contactById(l.contact_id);
+    const key = ct ? ct.id : "__none__";
+    (map[key] = map[key] || {id: ct ? ct.id : null, nom: ct ? ct.nom : ((l.personne || "").trim() || "(personne non renseignée)"),
+      role: ct ? ct.role : l.role, moi: ct ? ct.moi : false, items: []}).items.push({...l, chantier: c.titre, chantier_id: c.id});
   }));
   const w = $("people"); w.innerHTML = "";
-  const names = Object.keys(map).sort((a, b) => a.localeCompare(b));
-  if(!names.length){ w.innerHTML = `<div class="empty">Aucune attente enregistrée.</div>`; return; }
-  let head = `<div class="people-hint">Astuce : clique un livrable pour ouvrir son chantier et y <b>assigner / renommer</b> la personne.</div>`;
-  names.forEach(nom => {
-    const info = map[nom];
-    const editable = nom !== "(personne non renseignée)";
-    head += `<div class="person"><h3>${esc(nom)}</h3>` +
-      (editable ? `<div class="role"><input class="role-edit" value="${esc(info.role || "")}" placeholder="rôle (éditable)" onchange="setPersonRole('${jqs(nom)}',this.value)"></div>`
-                : `<div class="role">${esc(info.role || "")}</div>`);
+  const groups = Object.values(map).sort((a, b) =>
+    (b.moi ? 1 : 0) - (a.moi ? 1 : 0) || a.nom.localeCompare(b.nom));
+  if(!groups.length){ w.innerHTML = `<div class="empty">Aucune attente enregistrée.</div>`; return; }
+  let head = `<div class="people-hint">Géré depuis l'<a onclick="setView('contacts')">annuaire</a> : une fiche par personne (renommer, rôle, fusionner les doublons).</div>`;
+  groups.forEach(info => {
+    head += `<div class="person"><h3>${info.moi ? "🧍 " : ""}${esc(info.nom)}</h3>` +
+      `<div class="role">${esc(info.role || "")}</div>`;
     info.items.forEach(it => {
-      const late = (it.statut === "attente" || it.statut === "partiel") && isLate(it.date);
+      const late = (livPending(it)) && isLate(it.date);
       const cls = it.statut === "recu" ? "recu" : it.statut === "annule" ? "annule"
                 : it.statut === "partiel" ? "partiel" : (late ? "retard" : "attente");
       head += `<div class="deliv clickable" onclick="openChantier('${it.chantier_id}')" title="Ouvrir le chantier"><span class="stm ${cls}"></span><div><div class="q">${esc(it.quoi)}</div>` +
@@ -1098,25 +1156,31 @@ function renderPeople(){
 // ---- Personnes (gestion) -------------------------------------------------
 function peopleStats(){
   const st = {};
-  const ensure = n => (st[n] = st[n] || {nom: n, role: "", total: 0, open: 0, contact: false});
-  STORE.contacts.forEach(c => { const n = (c.nom || "").trim(); if(n){ const s = ensure(n); s.contact = true; if(!s.role) s.role = c.role || ""; } });
+  STORE.contacts.forEach(c => { st[c.id] = {id: c.id, nom: c.nom, role: c.role || "", moi: !!c.moi, total: 0, open: 0}; });
   STORE.chantiers.forEach(c => c.livrables.forEach(l => {
-    const n = (l.personne || "").trim(); if(!n) return;
-    const s = ensure(n); s.total++; if(l.statut === "attente" || l.statut === "partiel") s.open++; if(!s.role) s.role = l.role || "";
+    const s = st[l.contact_id]; if(!s) return;
+    s.total++; if(livPending(l)) s.open++;
   }));
-  return Object.values(st).sort((a, b) => a.nom.localeCompare(b.nom));
+  return Object.values(st).sort((a, b) => (b.moi ? 1 : 0) - (a.moi ? 1 : 0) || a.nom.localeCompare(b.nom));
 }
 function renderContacts(){
   const rows = peopleStats();
-  let h = `<div class="ch-h">Personnes <button class="btn sm primary" onclick="addPerson()">+ Ajouter une personne</button></div>`;
+  let h = `<div class="ch-h">Annuaire — personnes <button class="btn sm primary" onclick="addPerson()">+ Ajouter</button></div>`;
+  h += `<div class="people-hint">Source de vérité unique. « <b>moi</b> » = toi ; « <b>Fusionner</b> » replie un doublon dans une autre fiche (réattribue ses livrables).</div>`;
   if(!rows.length){ $("contacts").innerHTML = h + `<div class="empty">Aucune personne. Ajoute-en une, ou crée un livrable.</div>`; return; }
+  h += roleDatalist();
   h += `<table class="ptable"><thead><tr><th>Nom</th><th>Rôle</th><th>Livrables</th><th></th></tr></thead><tbody>`;
   rows.forEach(p => {
-    h += `<tr><td><b>${esc(p.nom)}</b></td>` +
-      `<td><input class="role-edit" value="${esc(p.role || "")}" placeholder="rôle" onchange="setPersonRole('${jqs(p.nom)}',this.value)"></td>` +
+    const others = rows.filter(o => o.id !== p.id);
+    const mergeSel = others.length
+      ? `<select class="merge-sel" title="Fusionner dans une autre fiche" onchange="mergePerson('${p.id}',this.value)"><option value="">Fusionner dans…</option>` +
+        others.map(o => `<option value="${o.id}">${esc(o.nom)}</option>`).join("") + `</select>` : "";
+    h += `<tr><td><b>${p.moi ? "🧍 " : ""}${esc(p.nom)}</b>` +
+      (p.moi ? ` <span class="moi-badge">moi</span>` : ` <a class="setmoi" onclick="setMoi('${p.id}')">définir comme moi</a>`) + `</td>` +
+      `<td><input class="role-edit" list="personRoles" value="${esc(p.role || "")}" placeholder="rôle" onchange="setPersonRole('${p.id}',this.value)"></td>` +
       `<td>${p.total}${p.open ? ` <span class="muted">(${p.open} ouvert${p.open > 1 ? "s" : ""})</span>` : ""}</td>` +
-      `<td class="pacts"><a onclick="renamePerson('${jqs(p.nom)}')">Renommer</a>` +
-      `<a class="danger" onclick="removePerson('${jqs(p.nom)}',${p.total})">Supprimer</a></td></tr>`;
+      `<td class="pacts"><a onclick="renamePerson('${p.id}','${jqs(p.nom)}')">Renommer</a>` + mergeSel +
+      `<a class="danger" onclick="removePerson('${p.id}','${jqs(p.nom)}',${p.total})">Supprimer</a></td></tr>`;
   });
   h += `</tbody></table>`;
   $("contacts").innerHTML = h;
@@ -1126,26 +1190,33 @@ function addPerson(){
   const r = (prompt("Rôle (optionnel) :") || "").trim();
   mutate({op: "add_contact", nom: n.trim(), role: r});
 }
-function renamePerson(nom){
+function renamePerson(id, nom){
   const n = prompt("Nouveau nom :", nom);
-  if(n && n.trim() && n.trim() !== nom) mutate({op: "rename_person", old: nom, new: n.trim()});
+  if(n && n.trim() && n.trim() !== nom) mutate({op: "update_contact", id, nom: n.trim()});
 }
-function setPersonRole(nom, role){ mutate({op: "set_person_role", nom, role}); }
-function removePerson(nom, total){
-  if(total > 0){
-    if(!confirm(`« ${nom} » a ${total} livrable(s). Le supprimer ?`)) return;
-    const to = prompt("Réassigner ses livrables à (laisser vide = non assigné) :", "");
-    if(to === null) return;
-    mutate({op: "remove_person", nom, reassign_to: to.trim()});
-  } else {
-    if(confirm(`Supprimer « ${nom} » ?`)) mutate({op: "remove_person", nom});
-  }
+function setPersonRole(id, role){ mutate({op: "update_contact", id, role}); }
+function setMoi(id){ mutate({op: "update_contact", id, moi: true}); }
+function mergePerson(fromId, intoId){
+  if(!intoId){ return; }
+  const a = contactById(fromId), b = contactById(intoId);
+  if(a && b && confirm(`Fusionner « ${a.nom} » dans « ${b.nom} » ?\nTous ses livrables et rôles de partie prenante seront réattribués à « ${b.nom} », et « ${a.nom} » disparaîtra.`))
+    mutate({op: "merge_contact", from_id: fromId, into_id: intoId});
+  else renderContacts();   // annulé → on remet le select sur "Fusionner dans…"
+}
+function removePerson(id, nom, total){
+  const msg = total > 0
+    ? `« ${nom} » a ${total} livrable(s) — ils deviendront « non assignés ». Supprimer ?\n(astuce : « Fusionner » conserve les livrables sur une autre personne.)`
+    : `Supprimer « ${nom} » ?`;
+  if(confirm(msg)) mutate({op: "remove_contact", id});
 }
 
 // ======================================================================== //
 //  CPM — planning calcule (dates, marges, chemin critique)
 // ======================================================================== //
+const _schedCache = new Map();   // mémoïsation : clé = id chantier, validé par identité d'objet (STORE remplacé au mutate → invalidé)
 function computeSchedule(c){
+  const _hit = _schedCache.get(c.id);
+  if(_hit && _hit.c === c) return _hit.S;
   const tasks = c.taches || [];
   const start = c.date_debut || TODAY;
   const ids = new Set(tasks.map(t => t.id));
@@ -1240,10 +1311,12 @@ function computeSchedule(c){
   });
   let fendIdx = 0; order.forEach(id => fendIdx = Math.max(fendIdx, fc[id].ffIdx));
 
-  return {start, projectDays, sched, byId, preds, cycle, order, gateInfo,
-          end: addUnits(start, projectDays),
-          fc, fendIdx, fend: addUnits(start, fendIdx),
-          baseline: c.baseline || null};
+  const S = {start, projectDays, sched, byId, preds, cycle, order, gateInfo, gateF,
+             end: addUnits(start, projectDays),
+             fc, fendIdx, fend: addUnits(start, fendIdx),
+             baseline: c.baseline || null};
+  _schedCache.set(c.id, {c, S});
+  return S;
 }
 
 // ======================================================================== //
@@ -1266,7 +1339,6 @@ function renderPage(){
   const S = computeSchedule(c);
   const p = pct(c);
   const col = COLS.find(k => k.key === c.statut);
-  const jr = c.echeance ? daysBetween(TODAY, c.echeance) : null;
   const bl = S.baseline;
   const blocked = isBlocked(c);
 
@@ -1306,6 +1378,24 @@ function renderPage(){
   h += kpi("Attentes en retard", String(lateAtt(c).length), openAtt(c).length + " ouverte(s)",
            lateAtt(c).length ? "bad" : "");
   h += `</div>`;
+
+  // EVM — valeur acquise
+  const E = evm(c, S);
+  h += `<div class="evm-head"><span>Valeur acquise (EVM)</span>` +
+       `<span class="evm-budget">Budget (BAC) <input type="number" min="0" step="100" value="${c.budget != null ? c.budget : ""}" placeholder="—" ` +
+       `onchange="mutate({op:'update_chantier',id:'${c.id}',budget:this.value})"> €</span></div>`;
+  if(E.BAC != null){
+    h += `<div class="kpis">`;
+    h += kpi("Valeur acquise (EV)", fmtEur(E.EV), fmtPctw(E.evFrac) + " achevé");
+    h += kpi("Valeur planifiée (PV)", fmtEur(E.PV), fmtPctw(E.pvFrac) + " prévu à date");
+    h += kpi("Coût réel (AC)", fmtEur(E.AC), E.AC == null ? "définis un taux/jour (Charge)" : (Math.round(E.pjours * 10) / 10) + " j-pers · ⏱");
+    h += kpi("SPI — délai", fmtIdx(E.SPI), E.SV != null ? (E.SV >= 0 ? "+" : "") + fmtEur(E.SV) + " (SV)" : "—", idxCls(E.SPI));
+    h += kpi("CPI — coût", fmtIdx(E.CPI), E.CV != null ? (E.CV >= 0 ? "+" : "") + fmtEur(E.CV) + " (CV)" : "définis un taux/jour", idxCls(E.CPI));
+    h += kpi("Coût final (EAC)", fmtEur(E.EAC), E.VAC != null ? "écart " + (E.VAC >= 0 ? "+" : "") + fmtEur(E.VAC) + " (VAC)" : "—", E.VAC != null ? (E.VAC >= 0 ? "good" : "bad") : "");
+    h += `</div>`;
+  } else {
+    h += `<div class="muted small evm-empty">Saisis un budget (BAC) pour activer l'analyse de la valeur acquise. Le coût réel (AC) se calcule depuis ton temps chronométré × le taux journalier (réglages dans <a class="lnk" onclick="setView('charge')">Charge</a>).</div>`;
+  }
 
   // Colonnes : gauche (objectif, anneau, échéance, parties, tags, blocage) / droite (visuels)
   h += `<div class="pg-grid"><div class="pg-left">`;
@@ -1424,7 +1514,7 @@ function countdownBlock(c, S){
     const ed = c.baseline_edits || 0;
     h += `<div class="muted small">Référence figée le <b>${fmt(S.baseline.frozen_at)}</b> — fin prévue alors : <b>${fmt(S.baseline.project_end)}</b></div>`;
     h += `<div class="small ${rd > 0 ? "bad-t" : rd < 0 ? "good-t" : ""}">${rd > 0 ? "Glissement de +" + rd + " j" : rd < 0 ? Math.abs(rd) + " j d'avance" : "Conforme à la référence"}</div>`;
-    h += `<div class="small ${ed ? "bad-t" : "muted"}">${ed ? "Modifié " + ed + "× depuis le figeage" : "Aucune modification depuis le figeage"}</div>`;
+    h += `<div class="small ${ed ? "bad-t" : "muted"}" title="Compte les vraies replanifications (ajout/retrait/réordonnancement de tâches, durée, dépendances, début imposé, échéance). Démarrer/terminer une tâche n'est PAS compté.">${ed ? "Planning replanifié " + ed + "× depuis le figeage" : "Planning inchangé depuis le figeage"}</div>`;
     h += `<div class="acts"><a onclick="setBaseline()">Re-figer</a> <a class="danger" onclick="mutate({op:'clear_baseline',chantier_id:'${c.id}'})">Effacer</a></div>`;
   } else {
     h += `<button class="btn sm" onclick="setBaseline()">Figer la référence</button>` +
@@ -1454,38 +1544,38 @@ function taskTable(c, S){
     h += `<div class="trow ${s.critical ? "crit" : ""}">`;
     // ligne 1 : etat + libelle + jalon + suppr
     h += `<div class="trow-main">`;
-    // case Fait : active pour un jalon ou une tâche démarrée/terminée ; sinon désactivée (il faut Démarrer)
-    if(t.is_milestone || t.start_date || t.done){
-      h += `<span class="box ${t.done ? "ok" : ""}" title="Fait / à faire" onclick="mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})"></span>`;
+    // --- avancement : UN SEUL contrôle contextuel (plus de case grisée) ---
+    //  jalon → case (coché directement) ; tâche → bouton qui avance : ▶ Démarrer → ✓ Terminer → ✓ Terminé
+    const tmin = t.is_milestone ? 0 : tacheMin(t.id);
+    const act = (!t.is_milestone && t.start_date && !t.done) ? activeForTache(t.id) : null;
+    if(t.is_milestone){
+      h += `<span class="box ${t.done ? "ok" : ""}" title="Jalon atteint / pas encore" onclick="mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})"></span>`;
+    } else if(t.done){
+      h += `<button class="tprog-done" title="Terminé — cliquer pour rouvrir" onclick="mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">✓ Terminé</button>`;
+    } else if(t.start_date){
+      h += `<span class="tstate inprog${act ? " running" : ""}" title="${act ? "Chrono en cours (depuis " + act.debut + ")" : "Démarrée — chrono en pause"}">${act ? "⏱ en cours" : "● en cours"}</span>`;
     } else {
-      h += `<span class="box disabled" title="Démarre la tâche avant de pouvoir la cocher"></span>`;
+      h += `<button class="tstart" title="Démarrer — lance le chrono et enregistre le début réel" onclick="mutate({op:'start_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">▶ Démarrer</button>`;
     }
     h += `<input class="tlabel ${t.done ? "done" : ""}" value="${esc(t.label)}" ` +
          `onblur="if(this.value.trim()&&this.value!=='${esc(t.label)}')mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',label:this.value.trim()})">`;
     h += `<label class="ms" title="Jalon (durée 0)"><input type="checkbox" ${t.is_milestone ? "checked" : ""} ` +
          `onchange="mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',is_milestone:this.checked})"> jalon</label>`;
-    // etat d'avancement : à faire → Démarrer → en cours (chrono ⏸ Pause / ▶ Reprendre) → Fait
-    if(!t.is_milestone){
-      const tmin = tacheMin(t.id);
-      if(t.done){
-        if(t.start_date)
-          h += `<span class="tstate real" title="Début → fin réels${tmin ? " · temps chrono " + fmtDur(tmin) : ""}">réel ${fmtShort(t.start_date)} → ${fmtShort(t.done_date)}${tmin ? " · ⏱ " + fmtDur(tmin) : ""}</span>`;
-        else if(tmin)
-          h += `<span class="tstate real" title="Temps chronométré">⏱ ${fmtDur(tmin)}</span>`;
-      } else if(t.start_date){
-        const act = activeForTache(t.id);
-        h += `<span class="tstate inprog${act ? " running" : ""}" title="${act ? "Chrono en cours (depuis " + act.debut + ")" : "Démarrée — chrono en pause"}">${act ? "⏱ en cours" : "● en cours"}</span>`;
-        h += `<input type="date" class="tstart-date" value="${t.start_date}" title="Début réel (corrigeable)" ` +
-             `onchange="mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',start_date:this.value||null})">`;
-        h += act
-          ? `<button class="tstart stop" title="Mettre le chrono en pause (démarré à ${act.debut})" onclick="mutate({op:'clock_stop',id:'${act.id}'})">⏸ Pause</button>`
-          : `<button class="chrono" title="Reprendre le chrono sur cette tâche" onclick="mutate({op:'clock_start',kind:'tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">▶ Reprendre${tmin ? " · " + fmtDur(tmin) : ""}</button>`;
-        h += `<span class="tstart-undo" title="Annuler le démarrage (revenir à « à faire »)" ` +
-             `onclick="mutate({op:'start_tache',chantier_id:'${c.id}',tache_id:'${t.id}',date:null})">↺</span>`;
-      } else {
-        h += `<button class="tstart" title="Démarrer — lance le chrono et enregistre le début réel" ` +
-             `onclick="mutate({op:'start_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">▶ Démarrer</button>`;
-      }
+    // actions secondaires — terminée : récap réel ; en cours : ✓ Terminer + chrono + début réel + annuler
+    if(!t.is_milestone && t.done){
+      if(t.start_date)
+        h += `<span class="tstate real" title="Début → fin réels${tmin ? " · temps chrono " + fmtDur(tmin) : ""}">réel ${fmtShort(t.start_date)} → ${fmtShort(t.done_date)}${tmin ? " · ⏱ " + fmtDur(tmin) : ""}</span>`;
+      else if(tmin)
+        h += `<span class="tstate real" title="Temps chronométré">⏱ ${fmtDur(tmin)}</span>`;
+    } else if(!t.is_milestone && t.start_date){
+      h += `<button class="tfinish" title="Terminer la tâche (enregistre la fin réelle)" onclick="mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">✓ Terminer</button>`;
+      h += act
+        ? `<button class="tstart stop" title="Mettre le chrono en pause (démarré à ${act.debut})" onclick="mutate({op:'clock_stop',id:'${act.id}'})">⏸ Pause</button>`
+        : `<button class="chrono" title="Reprendre le chrono sur cette tâche" onclick="mutate({op:'clock_start',kind:'tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">▶ Reprendre${tmin ? " · " + fmtDur(tmin) : ""}</button>`;
+      h += `<input type="date" class="tstart-date" value="${t.start_date}" title="Début réel (corrigeable)" ` +
+           `onchange="mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',start_date:this.value||null})">`;
+      h += `<span class="tstart-undo" title="Annuler le démarrage (revenir à « à faire »)" ` +
+           `onclick="mutate({op:'start_tache',chantier_id:'${c.id}',tache_id:'${t.id}',date:null})">↺</span>`;
     }
     h += `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer cette tâche ?'))mutate({op:'remove_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">×</span>`;
     h += `</div>`;
@@ -1592,11 +1682,14 @@ function ganttSVG(c, S){
     const predEnd = (S.preds[id] || []).reduce((m, p) => actMap[p] ? Math.max(m, actMap[p].e) : m, 0);
     if(t.done && t.done_date){
       const de = off(t.done_date), a = rs != null ? Math.min(rs, de) : Math.max(0, de - dur);
-      actMap[id] = {s: a, e: Math.max(a, de)};
+      const minDur = t.is_milestone ? 0 : 1;   // une tâche faite occupe ≥ 1 jour (le jour où elle a été faite) ; un jalon reste ponctuel
+      actMap[id] = {s: a, e: Math.max(a + minDur, de)};
     } else if(rs != null){
       actMap[id] = {s: rs, e: Math.max(rs + dur, tIdx)};                 // en cours
     } else {
-      const s = Math.max(r.s, predEnd);                                  // pas démarré : décalé par les preds en retard
+      // pas démarré : décalé par les preds en retard ET par un livrable attendu non reçu (gateF, comme fc)
+      const gate = (S.gateF && (id in S.gateF)) ? S.gateF[id] : -1;
+      const s = Math.max(r.s, predEnd, gate);
       actMap[id] = {s, e: s + dur};
     }
   });
@@ -1613,7 +1706,8 @@ function ganttSVG(c, S){
        `<rect width="6" height="6" fill="#fde2cf"/><line x1="0" y1="0" x2="0" y2="6" stroke="#ea580c" stroke-width="3"/></pattern>` +
        `<pattern id="crit" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">` +
        `<rect width="6" height="6" fill="#a7f3d0"/><line x1="0" y1="0" x2="0" y2="6" stroke="#059669" stroke-width="3"/></pattern></defs>`;
-  const step = days > 40 ? 5 : 1;
+  // pas adaptatif : on n'étiquette/quadrille que tous les N jours pour garder ~38px entre dates (lisible)
+  const step = Math.max(1, Math.ceil(38 / dayW));
   for(let d = 0; d <= days; d += step){
     g += `<line x1="${x(d)}" y1="${top}" x2="${x(d)}" y2="${H - 12}" stroke="var(--line-soft)"/>`;
     g += `<text x="${x(d)}" y="${top - 8}" font-size="9" fill="var(--faint)" text-anchor="middle">${fmtShort(addUnits(S.start, d))}</text>`;
@@ -1750,7 +1844,7 @@ function livrablesBlock(c){
         g += `<text x="${labelW - 8}" y="${y + 4}" font-size="10.5" text-anchor="end" fill="var(--ink)">${esc((l.personne || "").slice(0, 18))}</text>`;
         g += `<line x1="${labelW}" y1="${y}" x2="${labelW + 520}" y2="${y}" stroke="var(--line-soft)"/>`;
         if(l.date){
-          const late = (l.statut === "attente" || l.statut === "partiel") && isLate(l.date);
+          const late = (livPending(l)) && isLate(l.date);
           const col = l.statut === "recu" ? "var(--green)" : l.statut === "annule" ? "var(--faint)"
                     : l.statut === "partiel" ? "var(--blue)" : (late ? "var(--red)" : "var(--amber)");
           g += `<circle cx="${x(l.date)}" cy="${y}" r="5" fill="${col}"/>`;
@@ -1763,13 +1857,13 @@ function livrablesBlock(c){
   }
   // liste editable
   c.livrables.forEach(l => {
-    const late = (l.statut === "attente" || l.statut === "partiel") && isLate(l.date);
+    const late = (livPending(l)) && isLate(l.date);
     const cls = l.statut === "recu" ? "recu" : l.statut === "annule" ? "annule"
               : l.statut === "partiel" ? "partiel" : (late ? "retard" : "attente");
-    const pname = (l.personne || "").trim();
+    const cidSel = l.contact_id || "";
     const psel = `<select class="liv-psel" title="Qui doit le livrer" onchange="assignPerson('${c.id}','${l.id}',this)">` +
-      (pname ? "" : `<option value="" selected>— choisir —</option>`) +
-      knownPeople().map(p => `<option value="${esc(p.nom)}" data-role="${esc(p.role)}" ${p.nom === pname ? "selected" : ""}>${esc(p.nom)}</option>`).join("") +
+      (cidSel ? "" : `<option value="" selected>— choisir —</option>`) +
+      knownPeople().map(p => `<option value="${esc(p.id)}" ${p.id === cidSel ? "selected" : ""}>${p.moi ? "🧍 " : ""}${esc(p.nom)}</option>`).join("") +
       `<option value="__new__">+ nouvelle…</option></select>`;
     const u = (extra) => `mutate({op:'update_livrable',chantier_id:'${c.id}',livrable_id:'${l.id}',${extra}})`;
     h += `<div class="d-deliv"><span class="stm ${cls}" style="margin-top:6px"></span><div class="dl-body">` +
@@ -1953,15 +2047,24 @@ function addNote(id){ const v = $("nnt").value.trim(); if(v) mutate({op: "add_no
 function showAddPartie(id){
   const chips = PARTIE_CATALOG.map(p =>
     `<button class="tpl-chip" title="${esc(p.role)}" onclick="partieFill('${jqs(p.nom)}','${jqs(p.role)}')">${esc(p.nom)}</button>`).join("");
+  const people = knownPeople().map(p => `<option value="${esc(p.id)}">${p.moi ? "🧍 " : ""}${esc(p.nom)}${p.role ? " (" + esc(p.role) + ")" : ""}</option>`).join("");
   $("addPartie_" + id).innerHTML =
-    `<div class="miniform"><div class="tpl-h">Rôle standard (clic pour pré-remplir) :</div><div class="tpl-chips">${chips}</div>` +
+    `<div class="miniform"><div class="row"><select id="ppc" onchange="partiePick()"><option value="">— depuis l'annuaire / nouveau —</option>${people}</select></div>` +
+    `<div class="tpl-h">Rôle standard (clic pour pré-remplir) :</div><div class="tpl-chips">${chips}</div>` +
     `<div class="row"><input id="ppn" placeholder="Nom / entité"><input id="ppr" placeholder="Rôle"></div>` +
     `<div class="actions"><button class="btn sm" onclick="hide('addPartie_${id}')">Annuler</button>` +
     `<button class="btn sm primary" onclick="addPartie('${id}')">Ajouter</button></div></div>`;
   $("ppn").focus();
 }
 function partieFill(nom, role){ $("ppn").value = nom; $("ppr").value = role; }
-function addPartie(id){ const v = $("ppn").value.trim(); if(v) mutate({op: "add_partie", chantier_id: id, nom: v, role: $("ppr").value.trim()}); }
+function partiePick(){ const c = contactById($("ppc").value); if(c) $("ppn").value = c.nom; }
+function addPartie(id){
+  const cidp = $("ppc") ? $("ppc").value : "";
+  const v = $("ppn").value.trim();
+  const role = $("ppr").value.trim();
+  if(cidp) mutate({op: "add_partie", chantier_id: id, contact_id: cidp, role});
+  else if(v) mutate({op: "add_partie", chantier_id: id, nom: v, role});
+}
 
 function showAddTag(id){
   $("addTag_" + id).innerHTML =
@@ -1973,15 +2076,24 @@ function showAddTag(id){
 }
 function addTag(id){ const v = $("tgv").value.trim(); if(v) mutate({op: "add_tag", chantier_id: id, tag: v}); }
 
-// Toutes les personnes connues : contacts + noms déjà utilisés sur des livrables.
+// ---- Personnes : l'annuaire (STORE.contacts) est la source de vérité --------
+// Rôles standard suggérés (PMP/PRINCE2) — le champ reste libre (datalist).
+const PERSON_ROLES = ["Chef de projet", "Sponsor / Commanditaire", "MOA / Métier",
+  "MOE / Technique", "Demandeur", "Référent métier", "Référent technique",
+  "Utilisateur final", "DSI / IT", "Achats", "Direction", "Fournisseur / externe",
+  "Contrôle de gestion", "Contributeur"];
+function roleDatalist(){
+  return `<datalist id="personRoles">${PERSON_ROLES.map(r => `<option value="${esc(r)}">`).join("")}</datalist>`;
+}
+function contactById(id){ return id ? STORE.contacts.find(c => c.id === id) || null : null; }
+// Annuaire trié : "moi" en tête, puis alpha.
 function knownPeople(){
-  const map = {};
-  STORE.contacts.forEach(c => { const n = (c.nom || "").trim(); if(n && !(n in map)) map[n] = c.role || ""; });
-  STORE.chantiers.forEach(c => c.livrables.forEach(l => { const n = (l.personne || "").trim(); if(n && !(n in map)) map[n] = l.role || ""; }));
-  return Object.keys(map).sort((a, b) => a.localeCompare(b)).map(n => ({nom: n, role: map[n]}));
+  return STORE.contacts.slice().sort((a, b) =>
+    (b.moi ? 1 : 0) - (a.moi ? 1 : 0) || (a.nom || "").localeCompare(b.nom || ""))
+    .map(c => ({id: c.id, nom: c.nom, role: c.role || "", moi: !!c.moi}));
 }
 function showAddLiv(id){
-  const opts = knownPeople().map(p => `<option value="${esc(p.nom)}" data-role="${esc(p.role)}">${esc(p.nom)}${p.role ? " (" + esc(p.role) + ")" : ""}</option>`).join("");
+  const opts = knownPeople().map(p => `<option value="${esc(p.id)}">${p.moi ? "🧍 " : ""}${esc(p.nom)}${p.role ? " (" + esc(p.role) + ")" : ""}</option>`).join("");
   let cat = `<div class="tpl-h">Livrable type (clic pour pré-remplir) :</div><div class="tpl-chips tpl-chips-sc">`;
   Object.entries(LIVRABLE_CATALOG).forEach(([g, items]) => {
     cat += `<span class="tpl-grp">${esc(g)}</span>`;
@@ -1990,8 +2102,8 @@ function showAddLiv(id){
   cat += `</div>`;
   $("addLiv_" + id).innerHTML =
     `<div class="miniform">` + cat +
-    `<div class="row"><select id="lvperson" onchange="lvPersonChange()"><option value="">— choisir une personne —</option>${opts}<option value="__new__">+ nouvelle personne…</option></select></div>` +
-    `<div class="row" id="lvname" style="display:none"><input id="lvp" placeholder="Nom"><input id="lvr" placeholder="Rôle / service"></div>` +
+    `<div class="row"><select id="lvperson" onchange="lvPersonChange()"><option value="">— choisir dans l'annuaire —</option>${opts}<option value="__new__">+ nouvelle personne…</option></select></div>` +
+    `<div class="row" id="lvname" style="display:none"><input id="lvp" placeholder="Nom"><input id="lvr" placeholder="Rôle / service" list="personRoles"></div>` + roleDatalist() +
     `<input id="lvq" placeholder="Ce que tu attends (le livrable)">` +
     `<div class="row"><input id="lvd" type="date"><select id="lvs">` +
       Object.keys(LIV).map(s => `<option value="${s}">${LIV[s]}</option>`).join("") + `</select></div>` +
@@ -2010,23 +2122,23 @@ function addLiv(id){
   const op = {op: "add_livrable", chantier_id: id, quoi: $("lvq").value.trim(),
               date: $("lvd").value || null, statut: $("lvs").value, impact: $("lvi").value.trim()};
   if(sel === "__new__"){ op.personne = $("lvp").value.trim(); op.role = $("lvr").value.trim(); }
-  else if(sel){ op.personne = sel; const o = $("lvperson").selectedOptions[0]; op.role = o ? o.getAttribute("data-role") || "" : ""; }
+  else if(sel){ op.contact_id = sel; }
   if(!op.quoi){ alert("Indique ce que tu attends."); return; }
-  if(!op.personne){ alert("Choisis une personne (ou « nouvelle personne »)."); return; }
+  if(!op.contact_id && !op.personne){ alert("Choisis une personne (ou « nouvelle personne »)."); return; }
   mutate(op);
 }
-function assignPerson(cid, lid, sel){   // liste déroulante d'un livrable
+function assignPerson(cid, lid, sel){   // liste déroulante d'un livrable (valeur = contact_id)
   const v = sel.value;
   if(v === "__new__"){
-    // CRÉE une personne dans la liste, SANS changer l'affectation du livrable (non destructif)
-    const nom = prompt("Nouvelle personne à créer (n'affecte PAS ce livrable — tu la sélectionneras ensuite) :");
+    // CRÉE une fiche dans l'annuaire ET l'affecte directement à ce livrable
+    const nom = prompt("Nouvelle personne :");
     if(nom && nom.trim()){
       const role = (prompt("Rôle (optionnel) :") || "").trim();
-      mutate({op: "add_contact", nom: nom.trim(), role});
+      mutate({op: "update_livrable", chantier_id: cid, livrable_id: lid, personne: nom.trim(), role});
     } else { renderPage(); }   // annulé → on redessine pour réafficher la personne actuelle
     return;
   }
-  if(v) mutate({op: "update_livrable", chantier_id: cid, livrable_id: lid, personne: v});  // sélection d'une personne existante = affectation voulue
+  if(v) mutate({op: "update_livrable", chantier_id: cid, livrable_id: lid, contact_id: v});  // fiche existante
 }
 function hide(id){ if($(id)) $(id).innerHTML = ""; }
 
@@ -2301,16 +2413,76 @@ const TIMELOG = () => STORE.timelog || [];
 const activeSession = () => TIMELOG().find(s => !s.fin) || null;
 const sessionsOn = d => TIMELOG().filter(s => s.date === d).slice().sort((a, b) => a.debut < b.debut ? -1 : a.debut > b.debut ? 1 : 0);
 function nowHM(){ const d = new Date(); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); }
+function todayISO(){ const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }   // vraie date locale (≠ TODAY en cache)
 const hmToMin = h => { const p = (h || "0:0").split(":"); return (+p[0]) * 60 + (+p[1] || 0); };
+const isFriday = d => !!d && dparse(d).getUTCDay() === 5;
+function dayEnd(d){ return isFriday(d) ? (SETTINGS.vendredi_fin || "13:30") : (SETTINGS.jour_fin || "17:51"); }
+function lunchOverlap(debut, fin, d){   // minutes de pause déjeuner à exclure (aucune le vendredi)
+  if(isFriday(d)) return 0;
+  const pd = SETTINGS.pause_debut, pf = SETTINGS.pause_fin;
+  if(!pd || !pf || pf <= pd) return 0;
+  let s = hmToMin(debut), e = hmToMin(fin); if(e < s) e += 1440;
+  const lo = Math.max(s, hmToMin(pd)), hi = Math.min(e, hmToMin(pf));
+  return Math.max(0, hi - lo);
+}
 function sessMin(s){
   let e = s.fin || nowHM();
-  if(!s.fin){ const jf = SETTINGS.jour_fin || "17:51"; if(e > jf) e = jf; }   // chrono oublié : plafonné à la fin de journée
-  let m = hmToMin(e) - hmToMin(s.debut); if(m < 0) m += 1440; return m;       // +1440 : à cheval sur minuit
+  if(!s.fin){
+    // chrono oublié d'un jour passé : borné à la fin de journée de SA date (pas l'heure d'aujourd'hui)
+    if(s.date && s.date < todayISO()) e = dayEnd(s.date);
+    else { const de = dayEnd(s.date); if(e > de) e = de; }                     // aujourd'hui : plafond fin de journée
+  }
+  let m = hmToMin(e) - hmToMin(s.debut); if(m < 0) m += 1440;                  // +1440 : à cheval sur minuit (sessions terminées)
+  return Math.max(0, m - lunchOverlap(s.debut, e, s.date));                    // déduit la pause déjeuner (pas le vendredi)
 }
 function fmtDur(min){ min = Math.round(min); const h = Math.floor(min / 60), m = min % 60; return h ? `${h} h${m ? " " + String(m).padStart(2, "0") : ""}` : `${m} min`; }
 const activeForTache  = tid => { const a = activeSession(); return a && a.tache_id  === tid ? a : null; };
 const activeForRappel = rid => { const a = activeSession(); return a && a.rappel_id === rid ? a : null; };
 const tacheMin = tid => TIMELOG().filter(s => s.tache_id === tid).reduce((a, s) => a + sessMin(s), 0);
+const chantierMin = cid => TIMELOG().filter(s => s.chantier_id === cid).reduce((a, s) => a + sessMin(s), 0);
+
+// ===== EVM (valeur acquise / Earned Value Management) =====================
+// PV & EV = budget (BAC) pondéré par la durée planifiée des tâches.
+//   PV = part planifiée qui DEVRAIT être faite à aujourd'hui (lissée sur la fenêtre planifiée).
+//   EV = avancement RÉEL valorisé (fait = 100 %, en cours = sous-tâches ou 50 % [règle 50/50]).
+//   AC = coût réel main-d'œuvre = jours-personnes chronométrés × taux journalier.
+function evm(c, S){
+  S = S || computeSchedule(c);
+  const BAC = (c.budget != null && c.budget !== "") ? +c.budget : null;
+  const tasks = c.taches.filter(t => !t.is_milestone);          // un jalon (durée 0) ne porte pas de valeur
+  const Wtot = tasks.reduce((a, t) => a + Math.max(1, t.duree || 1), 0) || 1;
+  let pvFrac = 0, evFrac = 0;
+  tasks.forEach(t => {
+    const w = Math.max(1, t.duree || 1) / Wtot, sc = S.sched[t.id];
+    if(sc){
+      let frac = 0;
+      if(TODAY >= sc.endDate) frac = 1;
+      else if(TODAY > sc.startDate){ const tot = Math.max(1, daysBetween(sc.startDate, sc.endDate)); frac = Math.min(1, daysBetween(sc.startDate, TODAY) / tot); }
+      pvFrac += w * frac;
+    }
+    let prog = 0;
+    if(t.done) prog = 1;
+    else if(t.start_date){ const subs = t.subtasks || []; prog = subs.length ? subs.filter(x => x.done).length / subs.length : 0.5; }
+    evFrac += w * prog;
+  });
+  const PV = BAC != null ? BAC * pvFrac : null;
+  const EV = BAC != null ? BAC * evFrac : null;
+  const hj = +SETTINGS.heures_jour || 7, taux = +SETTINGS.taux_jour || 0;
+  const pjours = chantierMin(c.id) / (hj * 60);                 // jours-personnes chronométrés sur le chantier
+  const AC = taux ? pjours * taux : null;
+  const SPI = (PV && EV != null) ? EV / PV : null;              // indice de performance délai
+  const CPI = (AC && EV != null) ? EV / AC : null;             // indice de performance coût
+  const SV = (PV != null && EV != null) ? EV - PV : null;       // écart délai (€)
+  const CV = (AC != null && EV != null) ? EV - AC : null;       // écart coût (€)
+  const EAC = (BAC != null && CPI) ? BAC / CPI : null;          // coût final estimé
+  const ETC = (EAC != null && AC != null) ? EAC - AC : null;    // reste à dépenser
+  const VAC = (BAC != null && EAC != null) ? BAC - EAC : null;  // écart à l'achèvement
+  return {BAC, PV, EV, AC, SPI, CPI, SV, CV, EAC, ETC, VAC, pvFrac, evFrac, pjours, taux};
+}
+const fmtEur = v => v == null ? "—" : Math.round(v).toLocaleString("fr-FR") + " €";
+const fmtIdx = v => v == null ? "—" : v.toFixed(2);
+const fmtPctw = v => v == null ? "—" : Math.round(v * 100) + " %";
+const idxCls = v => v == null ? "" : v >= 1 ? "good" : v >= 0.9 ? "warn" : "bad";   // ≥1 bon · ≥.9 vigilance · <.9 mauvais
 const KIND_ICON = {tache: "🗂", rappel: "🔁", libre: "•"};
 
 async function rappelStop(rid){           // terminer une routine : arrête le chrono + coche le jour
@@ -2322,8 +2494,8 @@ function addManualSession(){
   const label = $("tl_label").value.trim();
   const debut = $("tl_debut").value, fin = $("tl_fin").value;
   if(!label){ $("tl_label").focus(); return; }
-  if(!debut){ alert("Indique au moins l'heure de début."); return; }
-  mutate({op: "clock_add", label, debut, fin: fin || null, kind: "libre"});
+  if(!debut || !fin){ alert("Indique l'heure de début ET de fin (plage terminée)."); return; }
+  mutate({op: "clock_add", label, debut, fin, kind: "libre"});
 }
 
 function maJourneeSection(){
@@ -2347,7 +2519,7 @@ function maJourneeSection(){
         (running
           ? `<button class="dl-stopbtn" title="Arrêter" onclick="mutate({op:'clock_stop',id:'${s.id}'})">⏹ en cours</button>`
           : `<input type="time" class="dl-t" value="${s.fin}" title="Fin" onchange="mutate({op:'clock_edit',id:'${s.id}',fin:this.value})">`) +
-        `<span class="dl-dur">${fmtDur(sessMin(s))}</span>` +
+        `<span class="dl-dur" title="${lunchOverlap(s.debut, s.fin || nowHM(), s.date) ? "Pause déjeuner déduite (" + fmtDur(lunchOverlap(s.debut, s.fin || nowHM(), s.date)) + ")" : ""}">${fmtDur(sessMin(s))}${lunchOverlap(s.debut, s.fin || nowHM(), s.date) ? ` <span class="dl-pause">⏸ déj.</span>` : ""}</span>` +
         `<input class="dl-lib" value="${esc(s.label)}" onblur="if(this.value.trim()&&this.value!=='${jqs(s.label)}')mutate({op:'clock_edit',id:'${s.id}',label:this.value.trim()})">` +
         `<span class="del" title="Supprimer cette plage" onclick="if(confirm('Supprimer cette plage ?'))mutate({op:'clock_delete',id:'${s.id}'})">×</span>` +
         `</div>`;
@@ -2358,7 +2530,7 @@ function maJourneeSection(){
     `<input id="tl_label" placeholder="Ajouter une plage (ex. Appel fournisseur)" onkeydown="if(event.key==='Enter')addManualSession()">` +
     `<input id="tl_debut" type="time" title="Début">` +
     `<span class="dl-sep">→</span>` +
-    `<input id="tl_fin" type="time" title="Fin (optionnel)">` +
+    `<input id="tl_fin" type="time" title="Fin (requise)">` +
     `<button class="btn sm primary" onclick="addManualSession()">Ajouter</button>` +
     `</div>`;
   h += `</div></details>`;
