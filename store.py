@@ -219,7 +219,7 @@ def _clock_start(store: dict, kind: str, label: str, **refs) -> dict:
     sess = {"id": _uid("tl_"), "date": now.date().isoformat(),
             "debut": now.strftime("%H:%M"), "fin": None, "kind": kind, "label": label,
             "chantier_id": refs.get("chantier_id"), "tache_id": refs.get("tache_id"),
-            "rappel_id": refs.get("rappel_id")}
+            "rappel_id": refs.get("rappel_id"), "iteration_id": refs.get("iteration_id")}
     log = store.setdefault("timelog", [])
     log.append(sess)
     if len(log) > 5000:
@@ -541,10 +541,11 @@ def _normalize(store: dict) -> dict:
         s.setdefault("date", today())
         s.setdefault("debut", "00:00")
         s.setdefault("fin", None)
-        s.setdefault("kind", "libre")           # tache | rappel | libre
+        s.setdefault("kind", "libre")           # tache | rappel | recette | libre
         s.setdefault("label", "")
         s.setdefault("chantier_id", None)
         s.setdefault("tache_id", None)
+        s.setdefault("iteration_id", None)      # recette : itération chronométrée (optionnel)
         s.setdefault("rappel_id", None)
         de = _day_end(store, s["date"])   # fin de journée selon le jour (vendredi plus court)
         # auto-réparation : un chrono oublié un jour passé est fermé à la fin de journée
@@ -1551,12 +1552,15 @@ def _apply_op(store: dict, op: dict) -> str:
     if name == "clock_start":
         kind = op.get("kind") or "libre"
         label = (op.get("label") or "").strip()
-        refs = {k: op.get(k) for k in ("chantier_id", "tache_id", "rappel_id") if op.get(k)}
+        refs = {k: op.get(k) for k in ("chantier_id", "tache_id", "rappel_id", "iteration_id") if op.get(k)}
         if not label and kind == "tache" and refs.get("chantier_id") and refs.get("tache_id"):
             ch = _chantier(store, refs["chantier_id"])
             label = _sub(ch["taches"], refs["tache_id"], "Tache")["label"]
         if not label and kind == "rappel" and refs.get("rappel_id"):
             label = _sub(store.setdefault("rappels", []), refs["rappel_id"], "Rappel")["label"]
+        if not label and kind == "recette" and refs.get("chantier_id"):
+            ch = _chantier(store, refs["chantier_id"])
+            label = f"Recette — {ch['titre']}"
         if not label:
             raise ValueError("Libellé requis pour démarrer le chrono.")
         _clock_start(store, kind, label, **refs)

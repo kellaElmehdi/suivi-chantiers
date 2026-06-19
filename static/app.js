@@ -945,6 +945,8 @@ function renderDashboard(){
   h += dkpi("Relances à faire", relances, "depuis " + SETTINGS.relance_jours + " j+", relances ? "bad" : "good", "setView('people')", "Livrables en attente depuis plus de " + SETTINGS.relance_jours + " jours → à relancer. Objectif 0.");
   h += dkpi("Retours ouverts", retOpen, retLate + " en retard", retLate ? "bad" : "", "", "Retours de recette non traités ; sous-texte = ceux en retard. Objectif 0.");
   h += dkpi("En recette", by.recette, iterOpen + " itér. ouverte(s)", "", "", "Chantiers en phase de recette, et nombre d'itérations ouvertes. Informatif.");
+  const recT = recetteMin(null);
+  h += dkpi("Temps recette", recT ? fmtDur(recT) : "—", "chronométré, tous chantiers", recT ? "" : "", "", "Temps total chronométré sur la recette (bouton « Chronométrer la recette » dans la section Recette d'un chantier). Indicatif.");
   h += dkpi("Tâches en cours", enCours, "démarrées, non finies", "", "", "Tâches démarrées et pas encore terminées (hors chantiers en pause). Informatif — à recouper avec le WIP.");
   h += dkpi("Temps de cycle", cycleMoy + " j", cycles.length + " mesurée(s)", "", "", "Durée réelle moyenne d'une tâche (début réel → fin réelle). Plus c'est court, plus le flux est fluide.");
   h += dkpi("Terminées (7 j)", done7, done30 + " sur 30 j", "good", "", "Débit récent : tâches terminées sur 7 et 30 jours. Plus c'est haut, mieux c'est.");
@@ -1902,6 +1904,16 @@ function recetteCard(c){
   h += `<span class="iter-acts">` +
        (it.ouverte ? `<a onclick="mutate({op:'close_iteration',chantier_id:'${c.id}',iteration_id:'${it.id}'})">Clôturer</a> ` : ``) +
        `<a onclick="mutate({op:'add_iteration',chantier_id:'${c.id}'})">+ nouvelle itération</a></span></div>`;
+  // chrono recette : démarrer/arrêter + temps total passé en recette sur ce chantier
+  const ract = activeSession(), isRec = ract && ract.kind === "recette" && ract.chantier_id === c.id;
+  const rmin = recetteMin(c.id);
+  h += `<div class="rec-chrono">` +
+    (isRec
+      ? `<button class="tstart stop" title="Arrêter le chrono recette (démarré à ${ract.debut})" onclick="mutate({op:'clock_stop',id:'${ract.id}'})">⏹ Arrêter la recette</button>` +
+        `<span class="tstate inprog">⏱ depuis ${ract.debut}</span>`
+      : `<button class="tstart" title="Chronométrer le temps passé en recette" onclick="mutate({op:'clock_start',kind:'recette',chantier_id:'${c.id}',iteration_id:'${it.id}'})">🧪 Chronométrer la recette</button>`) +
+    (rmin ? `<span class="rec-total" title="Temps total passé en recette sur ce chantier">${fmtDur(rmin)} au total</span>` : "") +
+    `</div>`;
   h += `<div id="addRetour_${c.id}"></div>`;
   // retours de l'itération courante (priorité haute d'abord, ouverts d'abord)
   const ord = {a_traiter: 0, en_cours: 1, fait: 2, rejete: 3}, pr = {h: 0, m: 1, b: 2};
@@ -2440,6 +2452,7 @@ const activeForTache  = tid => { const a = activeSession(); return a && a.tache_
 const activeForRappel = rid => { const a = activeSession(); return a && a.rappel_id === rid ? a : null; };
 const tacheMin = tid => TIMELOG().filter(s => s.tache_id === tid).reduce((a, s) => a + sessMin(s), 0);
 const chantierMin = cid => TIMELOG().filter(s => s.chantier_id === cid).reduce((a, s) => a + sessMin(s), 0);
+const recetteMin = cid => TIMELOG().filter(s => s.kind === "recette" && (!cid || s.chantier_id === cid)).reduce((a, s) => a + sessMin(s), 0);
 
 // ===== EVM (valeur acquise / Earned Value Management) =====================
 // PV & EV = budget (BAC) pondéré par la durée planifiée des tâches.
@@ -2483,7 +2496,7 @@ const fmtEur = v => v == null ? "—" : Math.round(v).toLocaleString("fr-FR") + 
 const fmtIdx = v => v == null ? "—" : v.toFixed(2);
 const fmtPctw = v => v == null ? "—" : Math.round(v * 100) + " %";
 const idxCls = v => v == null ? "" : v >= 1 ? "good" : v >= 0.9 ? "warn" : "bad";   // ≥1 bon · ≥.9 vigilance · <.9 mauvais
-const KIND_ICON = {tache: "🗂", rappel: "🔁", libre: "•"};
+const KIND_ICON = {tache: "🗂", rappel: "🔁", recette: "🧪", libre: "•"};
 
 async function rappelStop(rid){           // terminer une routine : arrête le chrono + coche le jour
   await mutate({op: "clock_stop"});
