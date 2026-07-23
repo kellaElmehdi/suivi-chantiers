@@ -902,3 +902,79 @@ textarea{width:100%;resize:vertical;min-height:52px}
 .modal-inp{font:inherit;font-size:14px;border:1px solid var(--line);border-radius:var(--radius-sm);padding:9px 11px;background:var(--canvas)}
 .legend .drift-lg{display:inline-block;width:16px;height:3px;border-radius:2px;background:linear-gradient(90deg,rgba(5,150,105,.55),rgba(220,38,38,.55))}
 .dl-pause{font-size:9.5px;font-weight:600;color:var(--amber);background:var(--amber-bg);border-radius:var(--radius-pill);padding:1px 6px;margin-left:2px}
+
+
+/* --- (12) Barre de filtres/recherche du board + tags cliquables sur les cartes --- */
+.board-filter{flex:0 0 100%;display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:0 0 2px;margin-bottom:-4px}
+.bf-q{font-size:12px;padding:6px 12px;border:1px solid var(--line);border-radius:var(--radius-pill);
+  background:var(--surface-card);color:var(--ink);flex:0 1 240px;min-width:180px}
+.bf-q:focus{outline:none;border-color:var(--blue)}
+.bf-grp{display:inline-flex;flex-wrap:wrap;gap:5px;align-items:center}
+.bf-seg,.bf-tag{font-size:10.5px;font-weight:600;color:var(--muted);background:var(--surface-card);
+  border:1px solid var(--line);border-radius:var(--radius-pill);padding:4px 10px;cursor:pointer}
+.bf-seg:hover,.bf-tag:hover{border-color:var(--gray);color:var(--ink)}
+.bf-seg.on,.bf-tag.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.bf-tag::before{content:"#";opacity:.55}
+.bf-clear{font-size:10.5px;color:var(--muted);background:none;border:0;cursor:pointer;padding:4px 6px}
+.bf-clear:hover{color:var(--red)}
+/* Tags cliquables affichés sur les cartes (filtrent le portefeuille) */
+.c-tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.c-tag{font-size:9.5px;font-weight:600;color:var(--muted);background:var(--canvas);
+  border:1px solid var(--line);border-radius:var(--radius-pill);padding:2px 8px;cursor:pointer}
+.c-tag::before{content:"#";opacity:.5}
+.c-tag:hover{border-color:var(--gray);color:var(--ink)}
+.c-tag.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+/* --- (9) Badges coût & dépassement budget sur les cartes doing/recette --- */
+.bdg.b-cost{color:#475569;background:var(--surface-card);border-color:var(--surface-strong)}
+.bdg.b-over{color:#b91c1c;background:var(--red-bg);border-color:#f6c4c4}
+
+/* Planning « À faire aujourd'hui » — chevron déplie-étapes + badges écart estimation/réel */
+.td-sub-tog{cursor:pointer;color:var(--muted);font-weight:600;white-space:nowrap}
+.td-sub-tog:hover{color:var(--ink)}
+.bdg.ecart-ok{color:#047857;background:#ecfdf5;border-color:#a7f3d0}
+.bdg.ecart-warn{color:#92590a;background:var(--amber-bg);border-color:#f0d79e}
+.bdg.ecart-bad{color:#b91c1c;background:var(--red-bg);border-color:#f6c4c4}
+
+/* Vue « Par personne » actionnable — Impact / relances / statut / relance */
+.deliv .relance{font-size:10.5px;color:var(--faint);margin-top:1px}
+.deliv .acts{margin-top:6px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.deliv .acts select{font-size:11.5px;padding:3px 6px}
+.deliv .acts a{font-size:11px;cursor:pointer;text-decoration:underline;color:var(--ink)}
+
+/* Annuaire enrichi — recherche, tri, puces chantiers */
+.people-tools{display:flex;gap:14px;align-items:center;margin:6px 0 10px;flex-wrap:wrap}
+.people-search{padding:6px 10px;font-size:12.5px;min-width:240px;border:1px solid var(--line);
+  border-radius:var(--radius-sm);background:var(--canvas);color:var(--ink)}
+.people-sort{cursor:pointer;font-size:11.5px;color:var(--muted);text-decoration:underline}
+.people-sort:hover{color:var(--ink)}
+.ptable{max-width:1080px}
+.ptable .chip.clickable{cursor:pointer}
+.ptable .chip.clickable:hover{border-color:var(--ink)}
+
+/* ---------------- Registre des risques : tri de colonnes, filtres, complétude inline ---------------- */
+.rk-th{cursor:pointer;user-select:none;white-space:nowrap}
+.rk-th:hover,.rk-th.on{color:var(--ink)}
+.rk-filters{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:6px 0 10px}
+.rk-fsel{font-size:12px;padding:4px 8px;border:1px solid var(--line);border-radius:var(--radius);background:var(--canvas);color:var(--ink)}
+.rk-fchip{font-size:11.5px;color:var(--muted);background:var(--line-soft);border-radius:var(--radius-pill);padding:2px 9px}
+.rk-fchip a{cursor:pointer;color:var(--red);font-weight:700;margin-left:4px}
+.rk-warn{color:#ea580c;font-weight:700;cursor:help}
+.rk-cell{padding-top:4px;padding-bottom:4px}
+.rk-cell-sel,.rk-cell-d{font-size:12px;padding:3px 6px;border:1px solid var(--line);border-radius:6px;background:var(--canvas);color:var(--ink);max-width:150px}
+.rk-cell-d{width:130px}
+
+/* Cohérence des données — liste d'anomalies cliquables au dashboard (Feature 11) */
+.cohlist{display:flex;flex-direction:column;gap:2px}
+.coh-row{display:flex;gap:10px;align-items:baseline;padding:6px 8px;border-radius:6px;cursor:pointer;border-left:3px solid var(--amber)}
+.coh-row:hover{background:var(--line-soft)}
+.coh-ch{font-weight:600;font-size:12px;color:var(--ink);flex:0 0 30%;min-width:120px}
+.coh-txt{font-size:12px;color:var(--muted)}
+
+
+/* ===== Recherche globale (overlay header — réutilise le patron .menu-list de la cloche) ===== */
+.search-list{min-width:340px;width:min(460px,calc(100vw - 36px));max-height:72vh;overflow:auto;padding:0}
+.search-inp{width:100%;box-sizing:border-box;border:0;border-bottom:1px solid var(--line);
+  padding:12px 14px;font:inherit;font-size:14px;color:var(--ink);background:var(--canvas);
+  position:sticky;top:0;z-index:1;outline:none}
+.search-inp::placeholder{color:var(--muted)}
+

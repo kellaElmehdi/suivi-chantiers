@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta
 STATUT_LBL = {"todo": "A faire", "doing": "En cours", "block": "Bloque", "recette": "Recette", "done": "Termine"}
 PRIO_LBL = {"h": "Haute", "m": "Moyenne", "b": "Basse"}
 LIV_LBL = {"attente": "En attente", "recu": "Recu", "partiel": "Recu partiel", "annule": "Annule"}
+RISQUE_LBL = {"ouvert": "Ouvert", "maitrise": "Maitrise", "avere": "Avere", "clos": "Clos"}
 
 PRIO_IN = {"haute": "h", "moyenne": "m", "basse": "b", "h": "h", "m": "m", "b": "b"}
 STATUT_IN = {"a faire": "todo", "en cours": "doing", "bloque": "block", "termine": "done",
@@ -138,6 +139,112 @@ def _weekly_synthese(store: dict) -> dict:
         if w:
             m[w]["actions"] += 1
     return m
+
+
+# --------------------------------------------------------------------------- #
+# Temps chronometre + EVM cote Python (feuilles Temps / EVM de l'export)
+# --------------------------------------------------------------------------- #
+def _hm2min(h) -> int:   # "HH:MM" -> minutes depuis minuit
+    p = str(h or "0:0").split(":")
+    try:
+        return int(p[0]) * 60 + (int(p[1]) if len(p) > 1 and p[1] != "" else 0)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _lunch(store: dict, debut, fin, ds) -> int:
+    # minutes de pause dejeuner a exclure (aucune le vendredi) : miroir de lunchOverlap() du front
+    try:
+        if date.fromisoformat(str(ds)[:10]).weekday() == 4:
+            return 0
+    except (ValueError, TypeError):
+        pass
+    stg = store.get("settings", {})
+    pd, pf = stg.get("pause_debut"), stg.get("pause_fin")
+    if not pd or not pf or pf <= pd:
+        return 0
+    s, e = _hm2min(debut), _hm2min(fin)
+    if e < s:
+        e += 1440
+    return max(0, min(e, _hm2min(pf)) - max(s, _hm2min(pd)))
+
+
+def _sess_min(store: dict, s: dict) -> int:
+    # duree d'une session chrono en minutes : miroir de sessMin() du front (borne fin de journee,
+    # deduit la pause dejeuner). store.load() a deja ferme les chronos oublies des jours passes.
+    from store import _day_end, _hm
+    today = date.today().isoformat()
+    e = s.get("fin")
+    if not e:   # session encore active : borne a la fin de journee de sa date
+        de = _day_end(store, s.get("date") or today)
+        e = de if (s.get("date") and s["date"] < today) else min(_hm(), de)
+    m = _hm2min(e) - _hm2min(s.get("debut"))
+    if m < 0:
+        m += 1440
+    return max(0, m - _lunch(store, s.get("debut"), e, s.get("date")))
+
+
+def _chantier_min(store: dict, cid: str) -> int:
+    return sum(_sess_min(store, s) for s in store.get("timelog", []) if s.get("chantier_id") == cid)
+
+
+def _taux_heure(store: dict) -> float:   # taux journalier / heures facturables ; 15 EUR/h par defaut (comme le front)
+    stg = store.get("settings", {})
+    t = float(stg.get("taux_jour") or 0)
+    hj = float(stg.get("heures_jour") or 7) or 7
+    return t / hj if t else 15.0
+
+
+def _dbetween(a: str, b: str) -> int:
+    try:
+        return (date.fromisoformat(str(b)[:10]) - date.fromisoformat(str(a)[:10])).days
+    except (ValueError, TypeError):
+        return 0
+
+
+def _evm(store: dict, ch: dict, sched: dict) -> dict:
+    # Port Python de la fonction evm() du front, sur le planning _schedule (calendaire) deja calcule.
+    # PV/EV = BAC pondere par la duree planifiee ; AC = jours-personnes chronometres x taux journalier.
+    bac = ch.get("budget")
+    BAC = float(bac) if bac not in (None, "") else None
+    tasks = [t for t in ch.get("taches", []) if not t.get("is_milestone")]
+    Wtot = sum(max(1, t.get("duree") or 1) for t in tasks) or 1
+    today = date.today().isoformat()
+    pv_frac = ev_frac = 0.0
+    for t in tasks:
+        w = max(1, t.get("duree") or 1) / Wtot
+        sc = sched.get(t["id"])
+        if sc:
+            if today >= sc["end"]:
+                frac = 1.0
+            elif today > sc["start"]:
+                tot = max(1, _dbetween(sc["start"], sc["end"]))
+                frac = min(1.0, _dbetween(sc["start"], today) / tot)
+            else:
+                frac = 0.0
+            pv_frac += w * frac
+        if t.get("done"):
+            prog = 1.0
+        elif t.get("start_date"):
+            subs = t.get("subtasks") or []
+            prog = (sum(1 for x in subs if x.get("done")) / len(subs)) if subs else 0.5
+        else:
+            prog = 0.0
+        ev_frac += w * prog
+    PV = BAC * pv_frac if BAC is not None else None
+    EV = BAC * ev_frac if BAC is not None else None
+    taux = float((store.get("settings") or {}).get("taux_jour") or 0)
+    hj = float((store.get("settings") or {}).get("heures_jour") or 7) or 7
+    pjours = _chantier_min(store, ch["id"]) / (hj * 60)   # jours-personnes chronometres
+    AC = pjours * taux if taux else None
+    SPI = (EV / PV) if (PV and EV is not None) else None
+    CPI = (EV / AC) if (AC and EV is not None) else None
+    SV = (EV - PV) if (PV is not None and EV is not None) else None
+    CV = (EV - AC) if (AC is not None and EV is not None) else None
+    EAC = (BAC / CPI) if (BAC is not None and CPI) else None
+    VAC = (BAC - EAC) if (BAC is not None and EAC is not None) else None
+    return {"BAC": BAC, "PV": PV, "EV": EV, "AC": AC, "SPI": SPI, "CPI": CPI,
+            "SV": SV, "CV": CV, "EAC": EAC, "VAC": VAC, "pjours": pjours}
 
 
 # --------------------------------------------------------------------------- #
@@ -302,6 +409,74 @@ def build() -> bytes:
                 ws7.cell(row=ws7.max_row, column=col).alignment = Align(vertical="top", wrap_text=col == 5)
     _widths(ws7, [24, 7, 12, 16, 60])
     _header(ws7, len(cols7), st)
+
+    # --- Risques (registre proba x gravite 5x5, tous chantiers) ---
+    ws8 = wb.create_sheet("Risques")
+    cols8 = ["Chantier", "Risque", "Categorie", "Probabilite", "Gravite", "Criticite",
+             "Parade", "Responsable", "Revue le", "Statut"]
+    ws8.append(cols8)
+    for ch in store.get("chantiers", []):
+        for rk in ch.get("risques", []):
+            crit = (rk.get("probabilite") or 0) * (rk.get("gravite") or 0)
+            _append(ws8, [ch["titre"], rk.get("libelle", ""), rk.get("categorie", ""),
+                        rk.get("probabilite", ""), rk.get("gravite", ""), crit,
+                        rk.get("parade", ""), rk.get("responsable", ""), rk.get("echeance_revue") or "",
+                        RISQUE_LBL.get(rk.get("statut"), rk.get("statut", ""))])
+            r = ws8.max_row
+            if crit >= 15 and rk.get("statut") != "clos":   # criticite elevee non close : mise en evidence
+                ws8.cell(row=r, column=6).font = st["late_font"]
+            for col in range(1, len(cols8) + 1):
+                ws8.cell(row=r, column=col).border = st["border"]
+                ws8.cell(row=r, column=col).alignment = Align(vertical="top", wrap_text=col in (2, 7))
+    _widths(ws8, [26, 34, 16, 11, 8, 9, 40, 18, 12, 10])
+    _header(ws8, len(cols8), st)
+
+    # --- EVM (valeur acquise, une ligne par chantier budgete) ---
+    ws9 = wb.create_sheet("EVM")
+    cols9 = ["Chantier", "Budget (BAC)", "Valeur planifiee (PV)", "Valeur acquise (EV)",
+             "Cout reel (AC)", "SPI", "CPI", "Ecart delai (SV)", "Ecart cout (CV)",
+             "Cout final (EAC)", "Ecart final (VAC)", "Jours-pers"]
+    ws9.append(cols9)
+    _eur = lambda v: round(v) if v is not None else ""
+    _idx = lambda v: round(v, 2) if v is not None else ""
+    for ch in sorted(store["chantiers"], key=lambda c: c.get("ordre", 0)):
+        E = _evm(store, ch, _schedule(ch))
+        if E["BAC"] is None:   # seuls les chantiers avec un budget defini
+            continue
+        _append(ws9, [ch["titre"], _eur(E["BAC"]), _eur(E["PV"]), _eur(E["EV"]), _eur(E["AC"]),
+                    _idx(E["SPI"]), _idx(E["CPI"]), _eur(E["SV"]), _eur(E["CV"]),
+                    _eur(E["EAC"]), _eur(E["VAC"]), round(E["pjours"], 1)])
+        r = ws9.max_row
+        if E["SV"] is not None and E["SV"] < 0:      # retard planning
+            ws9.cell(row=r, column=8).font = st["late_font"]
+        if E["VAC"] is not None and E["VAC"] < 0:    # depassement de budget prevu
+            ws9.cell(row=r, column=11).font = st["late_font"]
+        for col in range(1, len(cols9) + 1):
+            ws9.cell(row=r, column=col).border = st["border"]
+    _widths(ws9, [28, 13, 16, 15, 13, 7, 7, 13, 13, 14, 14, 10])
+    _header(ws9, len(cols9), st)
+
+    # --- Temps (timelog agrege par chantier et par type, valorise au taux horaire) ---
+    from collections import defaultdict
+    KIND_LBL = {"tache": "Tache", "rappel": "Routine", "recette": "Recette", "libre": "Libre"}
+    ws10 = wb.create_sheet("Temps")
+    cols10 = ["Chantier", "Type", "Sessions", "Temps (h)", "Cout (EUR)"]
+    ws10.append(cols10)
+    ch_titre = {c["id"]: c["titre"] for c in store["chantiers"]}
+    agg = defaultdict(lambda: {"n": 0, "min": 0})
+    for s in store.get("timelog", []):
+        key = (ch_titre.get(s.get("chantier_id"), "(sans chantier)"), s.get("kind") or "libre")
+        agg[key]["n"] += 1
+        agg[key]["min"] += _sess_min(store, s)
+    th = _taux_heure(store)
+    for titre, kind in sorted(agg.keys(), key=lambda k: (k[0].lower(), k[1])):
+        d = agg[(titre, kind)]
+        _append(ws10, [titre, KIND_LBL.get(kind, kind), d["n"],
+                     round(d["min"] / 60, 2), round(d["min"] / 60 * th)])
+        for col in range(1, len(cols10) + 1):
+            ws10.cell(row=ws10.max_row, column=col).border = st["border"]
+    _widths(ws10, [28, 14, 10, 10, 12])
+    _header(ws10, len(cols10), st)
 
     buf = io.BytesIO()
     wb.save(buf)

@@ -748,6 +748,20 @@ function buildReminders(){
       out.push({type: "risque", icon: "⚠️", label: "Revoir le risque : " + r.libelle, sub: r._c.titre,
                 late: true, key: "rk:" + r.id, go: () => setView("risques")});
   });
+  // cahiers des charges en attente de validation (un CdC 0..1 par chantier)
+  LIVE().forEach(c => {
+    const cdc = c.cdc;
+    if(cdc && cdc.statut === "en_validation")
+      out.push({type: "cdc", icon: "📋", label: "CdC à valider : " + (cdc.titre || c.titre),
+                sub: "cahier des charges en validation · " + c.titre, key: "cdc:" + c.id,
+                go: () => openCdc(c.id)});
+  });
+  // risques avérés non clos — traiter en priorité
+  allRisques().forEach(r => {
+    if(r.statut === "avere")
+      out.push({type: "risque", icon: "🔥", label: "Risque avéré : " + r.libelle, sub: r._c.titre,
+                late: true, key: "ra:" + r.id, go: () => setView("risques")});
+  });
   // chantiers "en cours" sans avancement enregistré depuis N jours (action dans l'appli)
   const stale = SETTINGS.rappel_stale_jours || 3;
   STORE.chantiers.forEach(c => {
@@ -789,6 +803,41 @@ function renderNotif(){
   }
   list.innerHTML = h;
 }
+// ---- Recherche globale (overlay header) : filtre EN DIRECT les tableaux STORE chargés.
+function openSearch(e){
+  if(e) e.stopPropagation();
+  const m = $("searchMenu"); if(!m) return;
+  document.querySelectorAll(".menu.open").forEach(x => x.classList.remove("open"));
+  m.classList.add("open");
+  const list = $("searchList");
+  if(list){ const r = m.getBoundingClientRect(); list.style.position = "fixed"; list.style.top = (r.bottom + 6) + "px"; list.style.right = "18px"; list.style.left = "auto"; }
+  const inp = $("searchInput"); if(inp){ inp.value = ""; inp.focus(); }
+  renderSearch();
+}
+function closeSearch(){ const m = $("searchMenu"); if(m) m.classList.remove("open"); }
+function buildSearch(q){
+  const out = [], hit = s => s && String(s).toLowerCase().includes(q);
+  STORE.chantiers.forEach(c => {
+    if(hit(c.titre) || hit(c.objectif) || (c.tags || []).some(hit))
+      out.push({icon: "🗂", label: c.titre, sub: "chantier" + (c.tags && c.tags.length ? " · " + c.tags.join(", ") : ""), go: () => openChantier(c.id)});
+    (c.livrables || []).forEach(l => { if(hit(l.quoi)) out.push({icon: "📦", label: l.quoi, sub: "livrable · " + c.titre, go: () => openChantier(c.id)}); });
+    (c.risques || []).forEach(r => { if(hit(r.libelle)) out.push({icon: "⚠️", label: r.libelle, sub: "risque · " + c.titre, go: () => openChantier(c.id)}); });
+    const cd = c.cdc; if(cd && (hit(cd.reference) || hit(cd.titre))) out.push({icon: "📄", label: cd.titre || cd.reference || "Cahier des charges", sub: "cahier des charges · " + c.titre, go: () => openCdc(c.id)});
+  });
+  (STORE.contacts || []).forEach(ct => { if(hit(ct.nom) || hit(ct.role)) out.push({icon: "👤", label: ct.nom, sub: "personne" + (ct.role ? " · " + ct.role : ""), go: () => setView("contacts")}); });
+  return out;
+}
+function renderSearch(){
+  const box = $("searchResults"); if(!box) return;
+  const q = (($("searchInput") || {}).value || "").trim().toLowerCase();
+  if(!q){ window._search = []; box.innerHTML = `<div class="notif-empty">Tapez pour chercher un chantier, une personne, un livrable, un risque, un cahier des charges…</div>`; return; }
+  const items = buildSearch(q).slice(0, 40); window._search = items;
+  if(!items.length){ box.innerHTML = `<div class="notif-empty">Aucun résultat pour « ${esc(q)} ».</div>`; return; }
+  box.innerHTML = items.map((it, i) => `<div class="notif-item" onclick="searchGo(${i})" title="Ouvrir">` +
+    `<span class="ni-ic">${it.icon}</span><span class="ni-tx">` +
+    `<span class="ni-lib">${esc(it.label)}</span><span class="ni-sub">${esc(it.sub || "")}</span></span></div>`).join("");
+}
+function searchGo(i){ const it = (window._search || [])[i]; if(!it) return; closeSearch(); if(it.go) it.go(); }
 function notifGo(i){
   const it = (window._reminders || [])[i]; if(!it) return;
   $("notifMenu").classList.remove("open");
@@ -861,10 +910,13 @@ function hbar(rows, opts){   // barres horizontales [{label,value,color,disp}]
   rows.forEach((r, i) => {
     const y = padT + i * rowH, w = Math.max(0, Math.round((r.value / max) * barW));
     const disp = r.disp != null ? String(r.disp) : String(r.value);
-    g += `<text x="${labelW - 8}" y="${y + 15}" font-size="11" text-anchor="end" fill="var(--ink)">${esc(String(r.label).slice(0, 24))}</text>`;
+    const clk = r.onclick ? ` onclick="event.stopPropagation();${r.onclick}" style="cursor:pointer"` : "";   // barre cliquable optionnelle (filtre)
+    g += `<g${clk}>`;
+    g += `<text x="${labelW - 8}" y="${y + 15}" font-size="11" text-anchor="end" fill="var(--ink)" font-weight="${r.active ? 700 : 400}">${esc(String(r.label).slice(0, 24))}</text>`;
     g += `<rect x="${labelW}" y="${y + 5}" width="${barW}" height="13" rx="6.5" fill="var(--line-soft)"/>`;   // piste (fond)
-    g += `<rect x="${labelW}" y="${y + 5}" width="${Math.max(4, w)}" height="13" rx="6.5" fill="${r.color || "var(--blue)"}"><title>${esc(String(r.label))} — ${esc(disp)}</title></rect>`;
+    g += `<rect x="${labelW}" y="${y + 5}" width="${Math.max(4, w)}" height="13" rx="6.5" fill="${r.color || "var(--blue)"}" stroke="${r.active ? "var(--ink)" : "none"}" stroke-width="1.5"><title>${esc(String(r.label))} — ${esc(disp)}</title></rect>`;
     g += `<text x="${labelW + w + 7}" y="${y + 15}" font-size="10.5" fill="var(--muted)">${esc(disp)}</text>`;
+    g += `</g>`;
   });
   return `<div class="scrollx">${g}</svg></div>`;
 }
@@ -1145,6 +1197,23 @@ function renderDashboard(){
   b2 += `</div>`;
   h += dband("livr", "Livraison &amp; activité", b2);
 
+  // ===== Bande — Cohérence des données (repliable) =====
+  // Anomalies calculées sur des champs existants ; chaque ligne ouvre le chantier concerné.
+  const cohAnoms = [];
+  const cohYr = +TODAY.slice(0, 4);
+  STORE.chantiers.forEach(c => {
+    const cohPush = txt => cohAnoms.push(`<div class="coh-row" onclick="openChantier('${c.id}')"><span class="coh-ch">${esc(c.titre)}</span><span class="coh-txt">${esc(txt)}</span></div>`);
+    (c.livrables || []).forEach(l => {
+      if(l.date){ const y = +l.date.slice(0, 4); if(y < cohYr - 1 || y > cohYr + 5) cohPush("Livrable « " + (l.quoi || l.personne || "?") + " » — date aberrante (" + fmt(l.date) + ")"); }
+      if(livPending(l) && !l.date) cohPush("Livrable dû sans date — « " + (l.quoi || l.personne || "?") + " »");
+      if(!l.contact_id) cohPush("Livrable sans contact annuaire — « " + (l.quoi || l.personne || "?") + " »");
+    });
+    (c.taches || []).forEach(t => { if(t.done && !t.done_date) cohPush("Tâche faite sans date de réalisation — « " + t.label + " »"); });
+    risquesOf(c).forEach(r => { if(r.statut === "avere") cohPush("Risque avéré non clos — « " + (r.libelle || "?") + " »"); });
+  });
+  const bcoh = cohAnoms.length ? `<div class="cohlist">${cohAnoms.join("")}</div>` : `<div class="empty">Aucune anomalie détectée — données cohérentes.</div>`;
+  h += dband("coherence", "Cohérence des données", bcoh, cohAnoms.length ? cohAnoms.length + " anomalie(s)" : "OK");
+
   // ===== Détail EVM (€) si budgété =====
   if(evmRows.length){
     let be = `<div class="kband">`;
@@ -1182,6 +1251,50 @@ function renderDashboard(){
   $("dash").innerHTML = h;
 }
 
+// Analyse de charge chiffrée en heures (FEATURE 10) : deux volets ajoutés à la
+// vue Charge. Prévisionnel — depuis chargeData() : capacité nette = jours ouvrés
+// restants (cd.days, week-ends/congés déjà exclus par isOffISO) × heures_jour ;
+// demande = Σ durée des tâches non finies (Σ des count par jour) × heures_jour ;
+// occupation % ; date de PREMIÈRE RUPTURE en comparant cumul demande vs cumul
+// capacité jour après jour. Rétrospectif — depuis timeStats().byDay (déjà calculé) :
+// occupation moyenne, pic, et nombre de jours en surcharge (> 100 %).
+function chargeAnalytics(cd){
+  const hj = +SETTINGS.heures_jour || 7;
+  // --- Prévisionnel (jours ouvrés à venir) ---
+  const workDays = cd.days.length;                          // jours ouvrés restants sur l'horizon (week-ends/congés exclus)
+  const capH = Math.round(workDays * hj);                   // capacité nette disponible
+  const taskDays = cd.days.reduce((a, x) => a + x.count, 0);// Σ durée (jours) des tâches non finies
+  const demH = Math.round(taskDays * hj);                   // demande = charge restant à produire
+  const occ = capH > 0 ? Math.round(demH / capH * 100) : 0;
+  // Première rupture : 1er jour où le cumul de la demande dépasse le cumul de la capacité.
+  let cum = 0, rupt = null;
+  for(let i = 0; i < cd.days.length; i++){
+    cum += cd.days[i].count;
+    if(cum > i + 1){ rupt = cd.days[i].date; break; }
+  }
+  let fut = `<div class="ch-h">Charge à venir — capacité vs demande (${workDays} j ouvrés · ${hj} h/j)</div>`;
+  fut += `<div class="kband">`;
+  fut += dkpi("Capacité nette", capH + " h", workDays + " j ouvrés restants", "", "", "Jours ouvrés restants sur l'horizon (week-ends et congés exclus) × heures facturables/jour. Ce que tu peux réellement produire d'ici la fin des tâches planifiées.");
+  fut += dkpi("Charge à faire", demH + " h", taskDays + " tâche-jours", "", "", "Somme des durées des tâches non finies × heures facturables/jour. Le travail restant à produire.");
+  fut += dkpi("Occupation prévue", occ + " %", occ > 100 ? "au-dessus de la capacité" : "dans la capacité", occ > 100 ? "bad" : "good", "", "Charge à faire ÷ capacité nette. Au-delà de 100 % = plus de travail planifié que d'heures disponibles.");
+  fut += dkpi("1re rupture", rupt ? fmt(rupt) : "aucune", rupt ? "cumul demande > capacité" : "capacité tenue", rupt ? "bad" : "good", "", "Premier jour où le cumul de la demande dépasse le cumul de la capacité disponible depuis aujourd'hui : la date à partir de laquelle tu prends du retard si rien ne bouge.");
+  fut += `</div>`;
+  fut += chartBox("Occupation prévue", thresholdBar(occ, 100, Math.max(occ, 100), "%"));
+  // --- Rétrospectif (occupation réelle chronométrée) ---
+  const st = timeStats(), cap = hj * 60;
+  const occDays = Object.values(st.byDay).filter(v => v > 0).map(v => v / cap * 100);
+  const avgOcc = occDays.length ? Math.round(occDays.reduce((a, b) => a + b, 0) / occDays.length) : 0;
+  const peakOcc = occDays.length ? Math.round(Math.max(...occDays)) : 0;
+  const overN = occDays.filter(o => o > 100).length;
+  let pas = `<div class="ch-h">Charge passée — occupation réelle chronométrée (${occDays.length} j travaillés)</div>`;
+  pas += `<div class="kband">`;
+  pas += dkpi("Occupation moyenne", avgOcc + " %", occDays.length + " j travaillés", avgOcc > 100 ? "bad" : "", "", "Temps chronométré moyen par jour travaillé ÷ heures facturables/jour. Reflète ta charge réelle passée.");
+  pas += dkpi("Pic d'occupation", peakOcc + " %", "journée la plus chargée", peakOcc > 100 ? "bad" : "", "", "Journée la plus chargée en temps chronométré, rapportée aux heures facturables/jour.");
+  pas += dkpi("Jours en surcharge", overN + " j", "> 100 % de la journée", overN ? "bad" : "good", "", "Nombre de jours travaillés où le temps chronométré a dépassé les heures facturables/jour.");
+  pas += `</div>`;
+  pas += chartBox("Occupation moyenne réelle", thresholdBar(avgOcc, 100, Math.max(avgOcc, 100), "%"));
+  return fut + pas;
+}
 function renderCharge(){
   const cd = chargeData();
   let h = `<div class="settings">` +
@@ -1200,6 +1313,7 @@ function renderCharge(){
     `<input type="time" value="${SETTINGS.pause_fin || "13:00"}" title="Fin pause" onchange="saveSetting('pause_fin',this.value)"></label>` +
     `<label class="fld"><span class="fl">Vendredi (fin, sans pause)</span>` +
     `<input type="time" value="${SETTINGS.vendredi_fin || "13:30"}" title="Le vendredi : journée jusqu'à cette heure, sans pause déjeuner" onchange="saveSetting('vendredi_fin',this.value)"></label></div>`;
+  h += chargeAnalytics(cd);
   h += `<div class="ch-h">Plan de charge — tâches actives par jour · limite <b>${cd.cap}</b> · horizon 120 j</div>`;
   if(!cd.days.length){ $("charge").innerHTML = h + `<div class="empty">Aucune tâche active planifiée.</div>`; return; }
   h += chargeChart(cd);
@@ -1260,8 +1374,42 @@ function chargeChart(cd){
   return g;
 }
 
+// (12) Filtres & recherche du portefeuille — état module, sans appel serveur.
+const BOARD_F = {q: "", prio: null, tags: new Set(), etats: new Set(), _focus: false};
+function matchFilter(c){
+  const F = BOARD_F;
+  if(F.q && !(c.titre || "").toLowerCase().includes(F.q.toLowerCase())) return false;
+  if(F.prio && c.prio !== F.prio) return false;
+  if(F.tags.size && !(c.tags || []).some(t => F.tags.has(t))) return false;
+  for(const e of F.etats){
+    if(e === "late" && !lateTasks(c).length) return false;
+    if(e === "att"  && !openAtt(c).length)   return false;
+    if(e === "risk" && !(topCrit(c) >= 10))  return false;
+    if(e === "hold" && !c.hold)              return false;
+  }
+  return true;
+}
+function boardSearch(v){ BOARD_F.q = v; BOARD_F._focus = true; renderBoard(); }
+function boardTogglePrio(p){ BOARD_F.prio = BOARD_F.prio === p ? null : p; renderBoard(); }
+function boardToggleTag(t){ BOARD_F.tags.has(t) ? BOARD_F.tags.delete(t) : BOARD_F.tags.add(t); renderBoard(); }
+function boardToggleEtat(e){ BOARD_F.etats.has(e) ? BOARD_F.etats.delete(e) : BOARD_F.etats.add(e); renderBoard(); }
+function boardClearF(){ BOARD_F.q = ""; BOARD_F.prio = null; BOARD_F.tags.clear(); BOARD_F.etats.clear(); renderBoard(); }
 function renderBoard(){
   const b = $("board"); b.innerHTML = "";
+  { // (12) barre légère de filtres/recherche, en tête du board
+    const F = BOARD_F, bar = document.createElement("div"); bar.className = "board-filter";
+    const allTags = [...new Set(LIVE().flatMap(c => c.tags || []))].sort((a, x) => a.localeCompare(x));
+    const active = F.q || F.prio || F.tags.size || F.etats.size;
+    let bh = `<input id="boardQ" class="bf-q" type="text" placeholder="Rechercher un chantier…" value="${esc(F.q)}" oninput="boardSearch(this.value)">`;
+    bh += `<span class="bf-grp">` + Object.keys(PRIO).map(p =>
+      `<button class="bf-seg ${F.prio === p ? "on" : ""}" onclick="boardTogglePrio('${p}')">${PRIO[p]}</button>`).join("") + `</span>`;
+    bh += `<span class="bf-grp">` + [["late", "⏰ retard"], ["att", "⌛ attente"], ["risk", "⚠ risque"], ["hold", "⏸ pause"]].map(([k, l]) =>
+      `<button class="bf-seg ${F.etats.has(k) ? "on" : ""}" onclick="boardToggleEtat('${k}')">${l}</button>`).join("") + `</span>`;
+    if(allTags.length) bh += `<span class="bf-grp">` + allTags.map(t =>
+      `<button class="bf-tag ${F.tags.has(t) ? "on" : ""}" onclick="boardToggleTag('${jqs(t)}')">${esc(t)}</button>`).join("") + `</span>`;
+    if(active) bh += `<button class="bf-clear" onclick="boardClearF()">✕ effacer</button>`;
+    bar.innerHTML = bh; b.appendChild(bar);
+  }
   COLS.forEach(col => {
     const isDone = col.key === "done";
     const isTodo = col.key === "todo";
@@ -1274,6 +1422,7 @@ function renderBoard(){
     } else {           // autres colonnes : ordre manuel du board
       cards = LIVE().filter(c => colOf(c) === col.key).sort((a, c) => (a.ordre || 0) - (c.ordre || 0));
     }
+    cards = cards.filter(matchFilter);   // (12) filtres du portefeuille appliqués AVANT comptage/rendu
     const total = cards.length;
     // À faire / Terminé repliés : on ne montre que les N premiers ; un bouton déplie le reste.
     const preview = isDone ? DONE_PREVIEW : TODO_PREVIEW;
@@ -1335,7 +1484,14 @@ function renderBoard(){
         bdg.push(`<span class="bdg b-rec">↻ Recette · it.${it ? it.num : 1}${or ? ` · ${or} retour${or > 1 ? "s" : ""}` : ""}</span>`); }
       if(c.cdc){ const sc = CDC_ST[c.cdc.statut] || CDC_ST.brouillon;
         bdg.push(`<span class="bdg b-cdc ${sc.cls}">📄 CdC ${sc.lbl}</span>`); }
+      if(col.key === "doing" || col.key === "recette"){   // (9) coût chronométré + alerte dépassement budget
+        const cmin = chantierMin(c.id);
+        if(cmin > 0) bdg.push(`<span class="bdg b-cost">💶 ${fmtEur(eurMin(cmin))}</span>`);
+        const E = evm(c);
+        if(E.CPI != null && E.CPI < 0.9) bdg.push(`<span class="bdg b-over">Budget dépassé · CPI ${fmtIdx(E.CPI)}</span>`);
+      }
       if(bdg.length) h += `<div class="c-badges">${bdg.join("")}</div>`;
+      if(c.tags && c.tags.length) h += `<div class="c-tags">` + c.tags.map(t => `<span class="c-tag${BOARD_F.tags.has(t) ? " on" : ""}" onclick="event.stopPropagation();boardToggleTag('${jqs(t)}')">${esc(t)}</span>`).join("") + `</div>`;
       if(c.hold) h += `<div class="c-actions"><button class="btn sm" title="Reprendre ce chantier (le remet dans la charge)" onclick="event.stopPropagation();mutate({op:'set_hold',chantier_id:'${c.id}',hold:false})">▶ Reprendre</button></div>`;
       card.innerHTML = h; body.appendChild(card);
     });
@@ -1349,10 +1505,13 @@ function renderBoard(){
     }
     el.appendChild(body); b.appendChild(el);
   });
+  if(BOARD_F._focus){ BOARD_F._focus = false; const q = $("boardQ"); if(q){ q.focus(); const n = q.value.length; q.setSelectionRange(n, n); } }
 }
 
 function renderPeople(){
   const map = {};
+  const relSet = new Set();
+  LIVE().forEach(c => relancesDues(c).forEach(l => relSet.add(l.id)));
   LIVE().forEach(c => c.livrables.forEach(l => {
     const ct = contactById(l.contact_id);
     const key = ct ? ct.id : "__none__";
@@ -1367,13 +1526,27 @@ function renderPeople(){
   groups.forEach(info => {
     head += `<div class="person"><h3>${info.moi ? "🧍 " : ""}${esc(info.nom)}</h3>` +
       `<div class="role">${esc(info.role || "")}</div>`;
+    info.items.sort((a, b) => {
+      const ua = ((livPending(a) && isLate(a.date)) || relSet.has(a.id)) ? 1 : 0;
+      const ub = ((livPending(b) && isLate(b.date)) || relSet.has(b.id)) ? 1 : 0;
+      return ub - ua;
+    });
     info.items.forEach(it => {
       const late = (livPending(it)) && isLate(it.date);
+      const relDue = relSet.has(it.id);
       const cls = it.statut === "recu" ? "recu" : it.statut === "annule" ? "annule"
                 : it.statut === "partiel" ? "partiel" : (late ? "retard" : "attente");
-      head += `<div class="deliv clickable" onclick="openChantier('${it.chantier_id}')" title="Ouvrir le chantier"><span class="stm ${cls}"></span><div><div class="q">${esc(it.quoi)}</div>` +
+      const u = (extra) => `mutate({op:'update_livrable',chantier_id:'${it.chantier_id}',livrable_id:'${it.id}',${extra}})`;
+      head += `<div class="deliv clickable" onclick="openChantier('${it.chantier_id}')" title="Ouvrir le chantier"><span class="stm ${cls}"></span><div><div class="q">${esc(it.quoi)}${relDue ? ` <span class="lt-badge">À relancer</span>` : ""}</div>` +
            `<div class="meta ${late ? "late" : ""}"><b>${esc(it.chantier)}</b> · attendu le ${fmt(it.date)} · ` +
-           `${late ? "EN RETARD" : LIV[it.statut]}</div></div></div>`;
+           `${late ? "EN RETARD" : LIV[it.statut]}</div>` +
+           (it.impact ? `<div class="relance">Impact : ${esc(it.impact)}</div>` : "") +
+           (it.relances ? `<div class="relance">relancé ${it.relances}× · dernière le ${fmt(it.derniere)}</div>` : "") +
+           `<div class="acts" onclick="event.stopPropagation()">` +
+             `<select title="Changer le statut" onchange="${u("statut:this.value")}">` +
+               Object.keys(LIV).map(s => `<option value="${s}" ${it.statut === s ? "selected" : ""}>${LIV[s]}</option>`).join("") + `</select>` +
+             `<a onclick="${u("relance:true")}">Relancé aujourd'hui</a>` +
+           `</div></div></div>`;
     });
     head += `</div>`;
   });
@@ -1383,29 +1556,52 @@ function renderPeople(){
 // ---- Personnes (gestion) -------------------------------------------------
 function peopleStats(){
   const st = {};
-  STORE.contacts.forEach(c => { st[c.id] = {id: c.id, nom: c.nom, role: c.role || "", moi: !!c.moi, total: 0, open: 0}; });
-  LIVE().forEach(c => c.livrables.forEach(l => {
-    const s = st[l.contact_id]; if(!s) return;
-    s.total++; if(livPending(l)) s.open++;
-  }));
-  return Object.values(st).sort((a, b) => (b.moi ? 1 : 0) - (a.moi ? 1 : 0) || a.nom.localeCompare(b.nom));
+  STORE.contacts.forEach(c => { st[c.id] = {id: c.id, nom: c.nom, role: c.role || "", moi: !!c.moi, total: 0, open: 0, chs: {}}; });
+  LIVE().forEach(c => {
+    c.livrables.forEach(l => {
+      const s = st[l.contact_id]; if(!s) return;
+      s.total++; if(livPending(l)) s.open++;
+      if(!s.chs[c.id]) s.chs[c.id] = {id: c.id, titre: c.titre, role: l.role || ""};
+    });
+    (c.parties || []).forEach(p => {
+      const s = st[p.contact_id]; if(!s) return;
+      if(!s.chs[c.id]) s.chs[c.id] = {id: c.id, titre: c.titre, role: p.role || ""};
+    });
+  });
+  return Object.values(st).map(s => ({...s, chantiers: Object.values(s.chs)}))
+    .sort((a, b) => (b.moi ? 1 : 0) - (a.moi ? 1 : 0) || a.nom.localeCompare(b.nom));
+}
+let PEOPLE_SORT = "nom";
+function togglePeopleSort(){ PEOPLE_SORT = (PEOPLE_SORT === "open") ? "nom" : "open"; renderContacts(); }
+function filterContacts(q){
+  q = (q || "").trim().toLowerCase();
+  document.querySelectorAll("#contacts tr[data-search]").forEach(tr => {
+    tr.style.display = (!q || tr.getAttribute("data-search").includes(q)) ? "" : "none";
+  });
 }
 function renderContacts(){
-  const rows = peopleStats();
+  let rows = peopleStats();
+  if(PEOPLE_SORT === "open") rows = rows.slice().sort((a, b) => (b.open - a.open) || a.nom.localeCompare(b.nom));
   let h = `<div class="ch-h">Annuaire — personnes <button class="btn sm primary" onclick="addPerson()">+ Ajouter</button></div>`;
   h += `<div class="people-hint">Source de vérité unique. « <b>moi</b> » = toi ; « <b>Fusionner</b> » replie un doublon dans une autre fiche (réattribue ses livrables).</div>`;
   if(!rows.length){ $("contacts").innerHTML = h + `<div class="empty">Aucune personne. Ajoute-en une, ou crée un livrable.</div>`; return; }
   h += roleDatalist();
-  h += `<table class="ptable"><thead><tr><th>Nom</th><th>Rôle</th><th>Livrables</th><th></th></tr></thead><tbody>`;
+  h += `<div class="people-tools"><input class="people-search" placeholder="Rechercher un nom, un rôle…" oninput="filterContacts(this.value)">` +
+    `<a class="people-sort" onclick="togglePeopleSort()">Trier : ${PEOPLE_SORT === "open" ? "livrables ouverts" : "nom"}</a></div>`;
+  h += `<table class="ptable"><thead><tr><th>Nom</th><th>Rôle</th><th>Livrables</th><th>Chantiers</th><th></th></tr></thead><tbody>`;
   rows.forEach(p => {
     const others = rows.filter(o => o.id !== p.id);
     const mergeSel = others.length
       ? `<select class="merge-sel" title="Fusionner dans une autre fiche" onchange="mergePerson('${p.id}',this.value)"><option value="">Fusionner dans…</option>` +
         others.map(o => `<option value="${o.id}">${esc(o.nom)}</option>`).join("") + `</select>` : "";
-    h += `<tr><td><b>${p.moi ? "🧍 " : ""}${esc(p.nom)}</b>` +
+    const chips = p.chantiers.length
+      ? `<div class="chips">` + p.chantiers.map(x => `<span class="chip clickable" title="${esc(x.role || "")}" onclick="openChantier('${x.id}')">${esc(x.titre)}${x.role ? ` · ${esc(x.role)}` : ""}</span>`).join("") + `</div>`
+      : `<span class="muted">—</span>`;
+    h += `<tr data-search="${esc((p.nom + " " + (p.role || "")).toLowerCase())}"><td><b>${p.moi ? "🧍 " : ""}${esc(p.nom)}</b>` +
       (p.moi ? ` <span class="moi-badge">moi</span>` : ` <a class="setmoi" onclick="setMoi('${p.id}')">définir comme moi</a>`) + `</td>` +
       `<td><input class="role-edit" list="personRoles" value="${esc(p.role || "")}" placeholder="rôle" onchange="setPersonRole('${p.id}',this.value)"></td>` +
       `<td>${p.total}${p.open ? ` <span class="muted">(${p.open} ouvert${p.open > 1 ? "s" : ""})</span>` : ""}</td>` +
+      `<td>${chips}</td>` +
       `<td class="pacts"><a onclick="renamePerson('${p.id}','${jqs(p.nom)}')">Renommer</a>` + mergeSel +
       `<a class="danger" onclick="removePerson('${p.id}','${jqs(p.nom)}',${p.total})">Supprimer</a></td></tr>`;
   });
@@ -1666,7 +1862,31 @@ function replanToday(id){
   if(!confirm(`Replanifier « ${c.titre} » ?\n\nLe travail restant glisse de ${days} jour(s) pour repartir d'aujourd'hui.\nLes tâches déjà faites ne bougent pas ; plus aucun retard artificiel ne sera affiché.`)) return;
   mutate({op: "replan_now", chantier_id: id, days});
 }
-document.addEventListener("keydown", e => { if(e.key === "Escape" && CUR) backToBoard(); });
+// Garde-fou : pas de raccourci lettre quand le focus est dans un champ de saisie.
+function inField(el){ const t = el || document.activeElement; if(!t) return false;
+  const tag = t.tagName; return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable; }
+document.addEventListener("keydown", e => {
+  // Échap : ferme d'abord la recherche, puis tout menu ouvert, sinon revient au tableau.
+  if(e.key === "Escape"){
+    const sm = $("searchMenu");
+    if(sm && sm.classList.contains("open")){ closeSearch(); return; }
+    if(document.querySelector(".menu.open")){ document.querySelectorAll(".menu.open").forEach(m => m.classList.remove("open")); return; }
+    if(CUR) backToBoard();
+    return;
+  }
+  // Recherche globale : '/' (hors saisie) ou Ctrl/Cmd+K.
+  if((e.key === "/" && !inField(e.target)) || ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K"))){
+    e.preventDefault(); openSearch(); return;
+  }
+  // Raccourcis lettre — inactifs pendant une saisie ou avec un modificateur.
+  if(inField(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if(k === "s"){ if(activeSession()) mutate({op: "clock_stop"}); }
+  else if(k === "t"){ setView("board"); }
+  else if(k === "p"){ setView("planning"); }
+  else if(k === "d"){ setView("dash"); }
+  else if(k === "n"){ e.preventDefault(); newChantier(); }
+});
 
 function renderPage(){
   const c = chById(CUR); if(!c){ backToBoard(); return; }
@@ -2589,6 +2809,41 @@ let RK_EDIT = new Set();   // ids de risques en mode édition (sinon lecture seu
 function rkEdit(id){ RK_EDIT.add(id); renderPage(); }
 function rkDone(id){ RK_EDIT.delete(id); renderPage(); }
 
+// --- Registre global : tri de colonnes + filtres (aucune donnée nouvelle, agit sur allRisques()) ---
+let RK_SORT = {key: "crit", dir: -1};                                                 // colonne de tri + sens
+let RK_FILT = {statut: "", categorie: "", chantier: "", responsable: "", cell: ""};    // filtres actifs
+const rkCanon = s => (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();   // clé catégorie repliée (accents/casse)
+const RK_CATS_CANON = RISK_CATS.map(rkCanon);
+const rkInCatalog = s => RK_CATS_CANON.includes(rkCanon(s));                            // catégorie connue du catalogue ?
+const rkAnyFilt = () => RK_FILT.statut || RK_FILT.categorie || RK_FILT.chantier || RK_FILT.responsable || RK_FILT.cell;
+function rkPass(r){   // le risque passe-t-il les filtres courants ?
+  const f = RK_FILT;
+  if(f.statut && r.statut !== f.statut) return false;
+  if(f.categorie && rkCanon(r.categorie) !== f.categorie) return false;
+  if(f.chantier && r._c.id !== f.chantier) return false;
+  if(f.responsable && (r.responsable || "") !== f.responsable) return false;
+  if(f.cell && (r.probabilite + "_" + r.gravite) !== f.cell) return false;
+  return true;
+}
+function rkSortBy(key){ if(RK_SORT.key === key) RK_SORT.dir *= -1; else RK_SORT = {key, dir: key === "crit" ? -1 : 1}; renderRisques(); }
+function rkFilt(k, v){ RK_FILT[k] = (RK_FILT[k] === v ? "" : v); renderRisques(); }   // toggle (matrice / barres / chip)
+function rkSetFilt(k, v){ RK_FILT[k] = v; renderRisques(); }                          // valeur directe (selects)
+function rkClearFilt(){ RK_FILT = {statut: "", categorie: "", chantier: "", responsable: "", cell: ""}; renderRisques(); }
+function rkSortVal(r, key){
+  switch(key){
+    case "chantier": return (r._c.titre || "").toLowerCase();
+    case "categorie": return rkCanon(r.categorie);
+    case "responsable": return (r.responsable || "").toLowerCase();
+    case "revue": return r.echeance_revue || "9999-99-99";
+    case "statut": return Object.keys(RISK).indexOf(r.statut);
+    default: return crit(r);
+  }
+}
+function rkTh(key, label){   // en-tête de colonne cliquable (tri)
+  const on = RK_SORT.key === key, ar = on ? (RK_SORT.dir > 0 ? " ▲" : " ▼") : "";
+  return `<th class="rk-th${on ? " on" : ""}" onclick="rkSortBy('${key}')">${label}${ar}</th>`;
+}
+
 function risquesBlock(c){
   const rs = risquesOf(c).slice().sort((a, b) => (riskActive(b) - riskActive(a)) || (crit(b) - crit(a)));
   let h = "";
@@ -2655,8 +2910,10 @@ function riskMatrix(risks){
       const x = padL + (p - 1) * cell, y = padT + (5 - gr) * cell;
       const tip = `${items.length} risque(s) — proba ${p} × gravité ${gr} = ${n} (${lv.lbl})` +
         (items.length ? "\n• " + items.map(r => r.libelle).join("\n• ") : "");
-      g += `<rect x="${x}" y="${y}" width="${cell - 3}" height="${cell - 3}" rx="3" fill="${lv.bg}" ` +
-        `stroke="${items.length ? lv.col : "var(--line)"}" stroke-width="${items.length ? 2 : 1}"><title>${esc(tip)}</title></rect>`;
+      const rksel = RK_FILT.cell === (p + "_" + gr);
+      const cclk = items.length ? ` onclick="event.stopPropagation();rkFilt('cell','${p}_${gr}')" style="cursor:pointer"` : "";   // cellule cliquable → filtre proba×gravité
+      g += `<rect x="${x}" y="${y}" width="${cell - 3}" height="${cell - 3}" rx="3" fill="${lv.bg}"${cclk} ` +
+        `stroke="${rksel ? "var(--ink)" : items.length ? lv.col : "var(--line)"}" stroke-width="${rksel ? 3 : items.length ? 2 : 1}"><title>${esc(tip)}</title></rect>`;
       g += items.length
         ? `<text x="${x + (cell - 3) / 2}" y="${y + (cell - 3) / 2 + 6}" text-anchor="middle" font-size="17" font-weight="700" fill="${lv.col}">${items.length}</text>`
         : `<text x="${x + (cell - 3) / 2}" y="${y + (cell - 3) / 2 + 4}" text-anchor="middle" font-size="9" fill="var(--faint)">${n}</text>`;
@@ -2676,8 +2933,17 @@ function riskMatrix(risks){
 }
 
 function catRows(risks){
-  const m = {}; risks.forEach(r => m[r.categorie] = (m[r.categorie] || 0) + 1);
-  return Object.entries(m).sort((a, b) => b[1] - a[1]).map(([k, v]) => ({label: k, value: v, color: "var(--blue)"}));
+  // agrège par clé canonique (accents/casse repliés) et marque « hors catalogue » (⚠) si absente de RISK_CATS
+  const m = {};
+  risks.forEach(r => {
+    const k = rkCanon(r.categorie) || "(sans)";
+    if(!m[k]) m[k] = {canon: k, label: r.categorie || "—", value: 0, off: !rkInCatalog(r.categorie)};
+    m[k].value++;
+  });
+  return Object.values(m).sort((a, b) => b.value - a.value).map(o => ({
+    label: (o.off ? "⚠ " : "") + o.label, value: o.value,
+    color: o.off ? "#ea580c" : "var(--blue)",
+    onclick: `rkFilt('categorie','${jqs(o.canon)}')`, active: RK_FILT.categorie === o.canon}));
 }
 
 function renderRisques(){
@@ -2685,26 +2951,57 @@ function renderRisques(){
   const active = all.filter(riskActive);
   const critN = active.filter(r => crit(r) >= 15).length;
   const avere = active.filter(r => r.statut === "avere").length;
+  const noResp = active.filter(r => !r.responsable).length;
+  const noRev = active.filter(r => !r.echeance_revue).length;
   let h = `<div class="ch-h">Cartographie des risques — ${active.length} actif(s) sur ${all.length}</div>`;
   h += `<div class="kpis">` +
     kpi("Risques actifs", String(active.length), "ouverts + avérés") +
     kpi("Critiques", String(critN), "criticité ≥ 15", critN ? "bad" : "good") +
     kpi("Avérés", String(avere), "déjà survenus", avere ? "bad" : "") +
+    kpi("Sans pilote", String(noResp), "responsable manquant", noResp ? "bad" : "good") +
+    kpi("Sans date de revue", String(noRev), "revue non planifiée", noRev ? "bad" : "good") +
     kpi("Neutralisés", String(all.length - active.length), "maîtrisés / clos") + `</div>`;
   h += `<div class="dash-row">` +
     chartBox("Matrice de criticité (proba × gravité) — risques actifs", active.length ? riskMatrix(active) : `<div class="empty">Aucun risque actif.</div>`) +
     chartBox("Risques actifs par catégorie", active.length ? hbar(catRows(active), {labelW: 150, barW: 170}) : `<div class="empty">—</div>`) + `</div>`;
-  h += `<div class="ch-h">Registre — trié par criticité</div>`;
   if(!all.length){ $("risques").innerHTML = h + `<div class="empty">Aucun risque. Ouvre un chantier et utilise « + risque » pour en ajouter.</div>`; return; }
-  const sorted = all.slice().sort((a, b) => (riskActive(b) - riskActive(a)) || (crit(b) - crit(a)));
-  h += `<table class="ptable rk-table"><thead><tr><th>Criticité</th><th>Risque</th><th>Chantier</th><th>Catégorie</th><th>Responsable</th><th>Revue</th><th>Statut</th></tr></thead><tbody>`;
-  sorted.forEach(r => {
+  // barre de filtres (statut / catégorie / chantier / responsable) sur allRisques()
+  const cats = {}; all.forEach(r => { const k = rkCanon(r.categorie); if(k && !cats[k]) cats[k] = r.categorie; });
+  const chs = {}; all.forEach(r => chs[r._c.id] = r._c.titre);
+  const resp = [...new Set(all.map(r => r.responsable).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const fsel = (k, cur, opts) => `<select class="rk-fsel" onchange="rkSetFilt('${k}',this.value)">${opts.map(([v, l]) => `<option value="${esc(v)}" ${cur === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+  h += `<div class="rk-filters">` +
+    fsel("statut", RK_FILT.statut, [["", "Tous statuts"], ...Object.entries(RISK)]) +
+    fsel("categorie", RK_FILT.categorie, [["", "Toutes catégories"], ...Object.entries(cats)]) +
+    fsel("chantier", RK_FILT.chantier, [["", "Tous chantiers"], ...Object.entries(chs)]) +
+    fsel("responsable", RK_FILT.responsable, [["", "Tous responsables"], ...resp.map(x => [x, x])]) +
+    (RK_FILT.cell ? `<span class="rk-fchip">proba×gravité ${RK_FILT.cell.replace("_", "×")} <a onclick="rkFilt('cell','${RK_FILT.cell}')">×</a></span>` : "") +
+    (rkAnyFilt() ? `<a class="lnk" onclick="rkClearFilt()">Réinitialiser</a>` : "") + `</div>`;
+  const rows = all.filter(rkPass).sort((a, b) => {
+    const va = rkSortVal(a, RK_SORT.key), vb = rkSortVal(b, RK_SORT.key);
+    return (va < vb ? -1 : va > vb ? 1 : 0) * RK_SORT.dir;
+  });
+  h += `<div class="ch-h">Registre — ${rows.length} risque(s)${rkAnyFilt() ? " (filtré)" : ""}</div>`;
+  h += `<table class="ptable rk-table"><thead><tr>` +
+    rkTh("crit", "Criticité") + `<th>Risque</th>` + rkTh("chantier", "Chantier") + rkTh("categorie", "Catégorie") +
+    rkTh("responsable", "Responsable") + rkTh("revue", "Revue") + rkTh("statut", "Statut") + `</tr></thead><tbody>`;
+  if(!rows.length) h += `<tr><td colspan="7" class="empty">Aucun risque ne correspond aux filtres.</td></tr>`;
+  const people = knownPeople();
+  rows.forEach(r => {
     const n = crit(r), lv = critLevel(n), late = riskActive(r) && isLate(r.echeance_revue);
+    const incomplet = riskActive(r) && (!r.responsable || !r.echeance_revue);
+    const off = !rkInCatalog(r.categorie);
+    const u = extra => `mutate({op:'update_risque',chantier_id:'${r._c.id}',risque_id:'${r.id}',${extra}})`;
+    const psel = `<select class="rk-cell-sel" onclick="event.stopPropagation()" onchange="event.stopPropagation();${u("responsable:this.value")}"><option value="">— pilote —</option>` +
+      people.map(p => `<option value="${esc(p.nom)}" ${p.nom === (r.responsable || "") ? "selected" : ""}>${esc(p.nom)}</option>`).join("") + `</select>`;
+    const dinp = `<input type="date" class="rk-cell-d" value="${r.echeance_revue || ""}" onclick="event.stopPropagation()" onchange="event.stopPropagation();${u("echeance_revue:this.value")}">`;
     h += `<tr class="${riskActive(r) ? "" : "rk-off"}" onclick="openChantier('${r._c.id}')">` +
       `<td><span class="rk-crit" style="color:${lv.col};background:${lv.bg}">${n} · ${lv.lbl}</span></td>` +
-      `<td><b>${esc(r.libelle)}</b>${r.parade ? `<div class="muted small">parade : ${esc(r.parade)}</div>` : ""}</td>` +
-      `<td>${esc(r._c.titre)}</td><td>${esc(r.categorie)}</td><td>${esc(r.responsable || "—")}</td>` +
-      `<td class="${late ? "bad-t" : ""}">${r.echeance_revue ? fmt(r.echeance_revue) : "—"}</td>` +
+      `<td>${incomplet ? `<span class="rk-warn" title="Responsable ou date de revue manquant">⚠</span> ` : ""}<b>${esc(r.libelle)}</b>${r.parade ? `<div class="muted small">parade : ${esc(r.parade)}</div>` : ""}</td>` +
+      `<td>${esc(r._c.titre)}</td>` +
+      `<td>${esc(r.categorie || "—")}${off ? ` <span class="rk-warn" title="Hors catalogue">⚠</span>` : ""}</td>` +
+      `<td class="rk-cell">${psel}</td>` +
+      `<td class="rk-cell ${late ? "bad-t" : ""}">${dinp}</td>` +
       `<td>${RISK[r.statut]}</td></tr>`;
   });
   h += `</tbody></table>`;
@@ -3110,6 +3407,11 @@ function addRappel(){
 // ======================================================================== //
 //  Planning : tâches du jour (ordonnées) + Gantt portefeuille (tous chantiers)
 // ======================================================================== //
+let PLAN_OPEN = new Set();   // ids des tâches du planning dont la checklist d'étapes est dépliée (mémorisé entre rendus)
+function planToggleSub(id){
+  if(PLAN_OPEN.has(id)) PLAN_OPEN.delete(id); else PLAN_OPEN.add(id);
+  renderPlanning();
+}
 function planningTasks(){
   // Tâches sur lesquelles travailler aujourd'hui : non finies, dont le créneau
   // prévisionnel a déjà commencé (en cours ou en retard) — pas les jalons ni le futur.
@@ -3218,11 +3520,26 @@ function renderPlanning(){
         : startBlocked(c)
         ? `<button class="tstart blocked" title="Limite de ${SETTINGS.wip_max || 3} chantiers « En cours » atteinte" onclick="event.stopPropagation();alert('${wipFullMsg()}')">▶</button>`
         : `<button class="tstart" title="Démarrer cette tâche" onclick="event.stopPropagation();mutate({op:'start_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">▶</button>`;
+      // (7) Écart estimation ↔ réel — uniquement pour une tâche démarrée (non démarrée / jalon ignorés).
+      if(t.start_date && !t.is_milestone && t.duree > 0){
+        const hj = +SETTINGS.heures_jour || 7, prev = t.duree * hj * 60, tmin = tacheMin(t.id), r = prev ? tmin / prev : 0;
+        const ecl = r <= 1 ? "ecart-ok" : r <= 1.5 ? "ecart-warn" : "ecart-bad";   // logique INVERSE d'idxCls : plus le ratio est haut, pire c'est
+        tags.push(`<span class="bdg ${ecl}" title="Temps réel vs estimé (${t.duree} j × ${hj} h/j)">⏱ ${fmtDur(tmin)} / ${fmtDur(prev)} prévu</span>`);
+      }
+      // (3) Étapes cochables : compteur + chevron qui déplie la checklist (état dans PLAN_OPEN).
+      const subs = t.subtasks || [], sdone = subs.filter(x => x.done).length, subOpen = PLAN_OPEN.has(t.id);
+      const subTog = subs.length
+        ? ` · <span class="td-sub-tog" title="Afficher / masquer les étapes" onclick="event.stopPropagation();planToggleSub('${t.id}')">${subOpen ? "▾" : "▸"} ${sdone}/${subs.length} étapes</span>`
+        : "";
       h += `<div class="td-row">` + lead +
         `<div class="td-body" onclick="openChantier('${c.id}')">` +
           `<div class="td-lib">${esc(t.label)}</div>` +
           `<div class="td-meta"><span class="pr-${c.prio}">${PRIO[c.prio]}</span> · <b>${esc(c.titre)}</b> · ` +
-          `<span class="${it.late ? "bad-t" : ""}">fin prévue ${fmt(it.planEnd)}</span> ${tags.join(" ")}</div>` +
+          `<span class="${it.late ? "bad-t" : ""}">fin prévue ${fmt(it.planEnd)}</span> ${tags.join(" ")}${subTog}</div>` +
+          (subOpen && subs.length ? `<div class="subtasks" onclick="event.stopPropagation()">` + subs.map(st =>
+            `<div class="strow${st.done ? " done" : ""}">` +
+            `<span class="sbox ${st.done ? "ok" : ""}" title="Fait / à faire" onclick="event.stopPropagation();mutate({op:'toggle_subtask',chantier_id:'${c.id}',tache_id:'${t.id}',subtask_id:'${st.id}'})"></span>` +
+            `<span class="slabel${st.done ? " done" : ""}">${esc(st.label)}</span></div>`).join("") + `</div>` : "") +
         `</div></div>`;
     });
     h += `</div>`;
