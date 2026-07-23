@@ -924,9 +924,6 @@ textarea{width:100%;resize:vertical;min-height:52px}
 .c-tag::before{content:"#";opacity:.5}
 .c-tag:hover{border-color:var(--gray);color:var(--ink)}
 .c-tag.on{background:var(--ink);color:#fff;border-color:var(--ink)}
-/* --- (9) Badges coût & dépassement budget sur les cartes doing/recette --- */
-.bdg.b-cost{color:#475569;background:var(--surface-card);border-color:var(--surface-strong)}
-.bdg.b-over{color:#b91c1c;background:var(--red-bg);border-color:#f6c4c4}
 
 /* Planning « À faire aujourd'hui » — chevron déplie-étapes + badges écart estimation/réel */
 .td-sub-tog{cursor:pointer;color:var(--muted);font-weight:600;white-space:nowrap}

@@ -1484,12 +1484,6 @@ function renderBoard(){
         bdg.push(`<span class="bdg b-rec">↻ Recette · it.${it ? it.num : 1}${or ? ` · ${or} retour${or > 1 ? "s" : ""}` : ""}</span>`); }
       if(c.cdc){ const sc = CDC_ST[c.cdc.statut] || CDC_ST.brouillon;
         bdg.push(`<span class="bdg b-cdc ${sc.cls}">📄 CdC ${sc.lbl}</span>`); }
-      if(col.key === "doing" || col.key === "recette"){   // (9) coût chronométré + alerte dépassement budget
-        const cmin = chantierMin(c.id);
-        if(cmin > 0) bdg.push(`<span class="bdg b-cost">💶 ${fmtEur(eurMin(cmin))}</span>`);
-        const E = evm(c);
-        if(E.CPI != null && E.CPI < 0.9) bdg.push(`<span class="bdg b-over">Budget dépassé · CPI ${fmtIdx(E.CPI)}</span>`);
-      }
       if(bdg.length) h += `<div class="c-badges">${bdg.join("")}</div>`;
       if(c.tags && c.tags.length) h += `<div class="c-tags">` + c.tags.map(t => `<span class="c-tag${BOARD_F.tags.has(t) ? " on" : ""}" onclick="event.stopPropagation();boardToggleTag('${jqs(t)}')">${esc(t)}</span>`).join("") + `</div>`;
       if(c.hold) h += `<div class="c-actions"><button class="btn sm" title="Reprendre ce chantier (le remet dans la charge)" onclick="event.stopPropagation();mutate({op:'set_hold',chantier_id:'${c.id}',hold:false})">▶ Reprendre</button></div>`;
