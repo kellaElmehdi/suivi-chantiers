@@ -12,7 +12,7 @@ import io
 import unicodedata
 from datetime import date, datetime, timedelta
 
-STATUT_LBL = {"todo": "A faire", "doing": "En cours", "block": "Bloque", "done": "Termine"}
+STATUT_LBL = {"todo": "A faire", "doing": "En cours", "block": "Bloque", "recette": "Recette", "done": "Termine"}
 PRIO_LBL = {"h": "Haute", "m": "Moyenne", "b": "Basse"}
 LIV_LBL = {"attente": "En attente", "recu": "Recu", "partiel": "Recu partiel", "annule": "Annule"}
 
@@ -40,18 +40,26 @@ def _is_late(d) -> bool:
 
 
 def _blocked(ch: dict) -> bool:
+    # miroir du frontend isBlocked : bloque uniquement si un livrable non reçu a son échéance
+    # dépassée — un livrable rattaché à une tâche ne bloque plus tant que la date n'est pas passée.
     if ch.get("statut") == "done":
         return False
     if (ch.get("blocage") or "").strip():
         return True
-    done = {t["id"]: t["done"] for t in ch.get("taches", [])}
-    livr = ch.get("livrables", [])
-    if any(l.get("tache_id") and l.get("statut") in ("attente", "partiel")
-           and done.get(l["tache_id"]) is False for l in livr):
-        return True
     today = date.today().isoformat()
     return any(l.get("statut") in ("attente", "partiel") and l.get("date") and l["date"] < today
-               for l in livr)   # livrable non reçu et en retard
+               for l in ch.get("livrables", []))   # livrable non reçu et en retard
+
+
+def _safe(v):
+    # anti-injection de formule Excel : un texte commençant par = + - @ (ou tab/CR) devient inerte
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + v
+    return v
+
+
+def _append(ws, row):   # append d'une ligne de données en neutralisant chaque cellule texte
+    ws.append([_safe(x) for x in row])
 
 
 # --------------------------------------------------------------------------- #
@@ -175,7 +183,7 @@ def build() -> bytes:
             "Avancement %", "Point bloquant"]
     ws.append(cols)
     for ch in sorted(store["chantiers"], key=lambda c: c.get("ordre", 0)):
-        ws.append([ch["titre"], ch.get("objectif") or "", ch.get("date_debut") or "",
+        _append(ws, [ch["titre"], ch.get("objectif") or "", ch.get("date_debut") or "",
                    ch.get("echeance") or "", PRIO_LBL.get(ch["prio"], ch["prio"]),
                    "Bloque" if _blocked(ch) else STATUT_LBL.get(ch["statut"], ch["statut"]),
                    "; ".join(ch.get("tags", [])), _pct(ch), ch.get("blocage") or ""])
@@ -198,7 +206,7 @@ def build() -> bytes:
         lbl = {t["id"]: t["label"] for t in ch["taches"]}
         for t in ch["taches"]:
             preds = "; ".join(lbl.get(p, "") for p in t.get("preds", []) if p in lbl)
-            ws2.append([ch["titre"], t["label"], "O" if t.get("is_milestone") else "",
+            _append(ws2, [ch["titre"], t["label"], "O" if t.get("is_milestone") else "",
                         0 if t.get("is_milestone") else t.get("duree", 1), preds,
                         "O" if t["done"] else "", sched[t["id"]]["start"], sched[t["id"]]["end"]])
             for col in range(1, len(cols2) + 1):
@@ -219,7 +227,7 @@ def build() -> bytes:
                          l.get("relances", 0), l.get("impact") or "", late))
     rows.sort(key=lambda r: (r[0].lower(), r[4] or "9999"))
     for r in rows:
-        ws3.append(list(r[:8]))
+        _append(ws3, list(r[:8]))
         if r[8]:
             ws3.cell(row=ws3.max_row, column=6).font = st["late_font"]
         for col in range(1, len(cols3) + 1):
@@ -248,7 +256,7 @@ def build() -> bytes:
     cols5 = ["Date", "Semaine", "Chantier", "Action"]
     ws5.append(cols5)
     for j in sorted(store.get("journal", []), key=lambda x: x.get("ts", ""), reverse=True):
-        ws5.append([j.get("date", ""), j.get("week", ""), j.get("chantier", ""), j.get("msg", "")])
+        _append(ws5, [j.get("date", ""), j.get("week", ""), j.get("chantier", ""), j.get("msg", "")])
         for col in range(1, len(cols5) + 1):
             ws5.cell(row=ws5.max_row, column=col).border = st["border"]
             ws5.cell(row=ws5.max_row, column=col).alignment = Align(vertical="top", wrap_text=col == 4)
@@ -268,7 +276,7 @@ def build() -> bytes:
             continue
         pp = " ; ".join(f"{p.get('nom', '')}{(' (' + p['role'] + ')') if p.get('role') else ''}"
                         for p in cdc.get("parties_prenantes", []))
-        ws6.append([ch.get("titre", ""), cdc.get("reference", ""), cdc.get("titre", ""),
+        _append(ws6, [ch.get("titre", ""), cdc.get("reference", ""), cdc.get("titre", ""),
                     cdc.get("indice", ""), CDC_LBL.get(cdc.get("statut"), cdc.get("statut", "")),
                     cdc.get("redacteur", ""), cdc.get("date_maj", ""), cdc.get("valide_par", ""),
                     cdc.get("date_validation", "") or "", pp, cdc.get("lien", "")])

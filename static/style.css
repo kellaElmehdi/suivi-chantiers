@@ -46,6 +46,15 @@ body{font-family:var(--font-sans);background:var(--canvas);color:var(--ink);
 b{font-weight:600}
 h1,h2,h3{font-family:var(--font-display);letter-spacing:-.02em}
 
+/* a11y : focus clavier visible (pas de cadre au clic souris, seulement au clavier) */
+:focus-visible{outline:2px solid var(--ink);outline-offset:2px;border-radius:3px}
+
+/* bandeau d'erreur si le serveur ne répond plus (api injoignable) */
+.conn-err{position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:9999;
+  background:var(--red-bg);border:1px solid #f0b4b4;color:#b91c1c;font-size:13px;font-weight:600;
+  padding:10px 16px;border-radius:var(--radius);box-shadow:var(--shadow-h)}
+.conn-err a{color:inherit;text-decoration:underline;cursor:pointer}
+
 /* ---------------- En-tête (top-nav Cal.com) ---------------- */
 header{display:flex;align-items:center;gap:14px;padding:0 20px;height:60px;
   border-bottom:1px solid var(--line);background:var(--canvas);flex-shrink:0}
@@ -86,10 +95,19 @@ header .sub{font-size:11.5px;color:var(--faint)}
   cursor:pointer;border-radius:var(--radius-sm);white-space:nowrap}
 .menu-list a:hover{background:var(--surface-soft)}
 
-.bar-alert{padding:8px 20px;border-bottom:1px solid var(--line);
-  background:var(--surface-soft);font-size:12.5px;color:var(--muted);flex-shrink:0}
-.bar-alert b{color:var(--ink)} .bar-alert .lt{color:var(--red);font-weight:600}
-.bar-alert a.seg{cursor:pointer;text-decoration:underline}
+.bar-alert{padding:8px 20px;border-bottom:1px solid var(--line);background:var(--surface-soft);
+  font-size:12px;color:var(--muted);flex-shrink:0;display:flex;flex-wrap:wrap;align-items:center;gap:7px}
+.bar-alert .seg{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;text-decoration:none;
+  padding:2px 9px;border-radius:var(--radius-pill);border:1px solid var(--line);background:var(--canvas);color:var(--muted);font-weight:500}
+.bar-alert .seg b{color:var(--ink);font-weight:700}
+.bar-alert .seg-i{font-style:normal;font-size:11px;line-height:1}
+.bar-alert .seg.bad{border-color:#f0b4b4;background:var(--red-bg);color:var(--red);font-weight:600}
+.bar-alert .seg.bad b{color:var(--red)}
+.bar-alert .seg.soft{color:var(--faint)}
+.bar-alert .seg.ok{border-color:#a7f3d0;background:#ecfdf5;color:#059669;font-weight:600}
+.bar-alert .seg[onclick]{cursor:pointer}
+.bar-alert .seg[onclick]:hover{border-color:var(--ink)}
+.bar-alert .seg.bad[onclick]:hover{border-color:var(--red)}
 
 /* pied de page sombre (signature Cal.com — referme la page) */
 .app-footer{flex-shrink:0;background:var(--surface-dark);color:var(--on-dark-soft);
@@ -122,6 +140,17 @@ header .sub{font-size:11.5px;color:var(--faint)}
 /* Tableau de bord condensé : libellés légers + bandes KPI compactes + grille de mini-graphes */
 .dlbl{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:14px 0 7px}
 .dlbl:first-child{margin-top:2px}
+/* Bandes repliables (details/summary) : l'en-tête reprend le style .dlbl + un chevron */
+.dband{margin:6px 0 10px}
+.dband>summary.dband-sum{display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none;user-select:none;
+  padding:6px 2px;border-bottom:1px solid var(--line-soft)}
+.dband>summary.dband-sum::-webkit-details-marker{display:none}
+.dband>summary.dband-sum::before{content:"▸";color:var(--faint);font-size:11px;transition:transform .15s;flex-shrink:0}
+.dband[open]>summary.dband-sum::before{transform:rotate(90deg)}
+.dband .dband-t{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+.dband>summary.dband-sum:hover .dband-t{color:var(--ink)}
+.dband .dband-x{font-size:11px;color:var(--faint);font-weight:600}
+.dband .dband-b{padding-top:10px}
 .kband{display:grid;grid-template-columns:repeat(auto-fill,minmax(146px,1fr));gap:8px;margin-bottom:6px}
 .kband .kpi{padding:8px 11px;box-shadow:none;cursor:default}
 .kband .kpi[onclick]{cursor:pointer}
@@ -162,6 +191,26 @@ header .sub{font-size:11.5px;color:var(--faint)}
 .setmoi{cursor:pointer;font-size:11px;color:var(--muted);text-decoration:underline;margin-left:8px}
 .setmoi:hover{color:var(--ink)}
 
+/* ---------------- Vue Congés & absences ---------------- */
+.absences{padding:18px 22px}
+.abs-kpis{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}
+.abs-kpi{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface-card);
+  padding:10px 14px;min-width:150px}
+.abs-kpi b{display:block;font-family:var(--font-display);font-size:22px;letter-spacing:-.02em;line-height:1.1}
+.abs-kpi span{font-size:11px;color:var(--muted)}
+.abs-form{display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;padding:14px 16px;margin-bottom:16px;
+  border:1px solid var(--line);border-radius:var(--radius);background:var(--surface-card)}
+.abs-form label{display:flex;flex-direction:column;gap:5px;font-size:11px;color:var(--muted)}
+.abs-form input,.abs-form select{padding:5px 8px;font-size:12.5px}
+.abs-table{max-width:1040px}
+.abs-table tr.abs-past td{color:var(--faint)}
+.abs-tag{display:inline-block;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;
+  border-radius:999px;padding:2px 8px;border:1px solid var(--line);color:var(--muted);background:var(--canvas)}
+.abs-tag.t-conge{border-color:var(--blue);color:var(--blue)}
+.abs-tag.t-ferie{border-color:var(--green);color:var(--green)}
+.abs-tag.t-maladie{border-color:var(--red);color:var(--red)}
+.abs-hit{color:var(--amber);font-weight:600;cursor:help}
+
 /* ---------------- Vue Charge ---------------- */
 .charge{padding:18px 22px}
 .settings{display:flex;flex-wrap:wrap;gap:18px;align-items:center;padding:14px 16px;
@@ -188,7 +237,17 @@ header .sub{font-size:11.5px;color:var(--faint)}
 .muted{color:var(--muted)} .small{font-size:11px}
 
 /* ---------------- Kanban ---------------- */
-.board{display:flex;gap:14px;padding:18px 20px;align-items:flex-start;min-height:100%}
+.board{display:flex;flex-wrap:wrap;gap:14px;padding:18px 20px;align-items:flex-start;min-height:100%}
+/* Zone "En pause" : pleine largeur sous les colonnes, repliable */
+/* Colonne « À faire » : barre de tri (Échéance / Avancement) */
+.todo-tools{display:flex;align-items:center;gap:5px;margin-bottom:2px}
+.todo-tools .tt-lbl{font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:var(--faint);margin-right:2px}
+.tt-seg{font:inherit;font-size:10.5px;font-weight:600;color:var(--muted);background:var(--surface-soft);
+  border:1px solid var(--line);border-radius:var(--radius-pill);padding:3px 9px;cursor:pointer}
+.tt-seg:hover{border-color:var(--gray);color:var(--ink)}
+.tt-seg.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.c-actions{margin-top:9px}
+.c-actions .btn{white-space:nowrap}
 .col{flex:1;min-width:226px;background:var(--surface-card);border:1px solid var(--line);
   border-radius:var(--radius);display:flex;flex-direction:column}
 .col.over{background:#eef4ff;outline:2px dashed var(--blue);outline-offset:-2px}
@@ -207,6 +266,10 @@ header .sub{font-size:11.5px;color:var(--faint)}
   border:1px solid var(--line);border-radius:var(--radius-pill);min-width:22px;text-align:center;padding:1px 8px}
 .col-body{padding:10px;display:flex;flex-direction:column;gap:10px;min-height:30px}
 .col-body .empty{padding:2px;color:var(--faint);font-size:11px}
+.done-toggle{margin-top:2px;padding:7px 10px;font-size:11px;font-weight:600;color:var(--muted);
+  background:var(--surface-soft);border:1px dashed var(--line);border-radius:8px;cursor:pointer;
+  text-align:center;transition:background .12s,color .12s,border-color .12s}
+.done-toggle:hover{background:#eef1f4;color:var(--ink);border-color:var(--gray)}
 
 .card{background:var(--canvas);border:1px solid var(--line);border-left:3px solid var(--gray);
   border-radius:var(--radius);padding:12px 14px;cursor:pointer;box-shadow:var(--shadow);
@@ -276,7 +339,8 @@ header .sub{font-size:11.5px;color:var(--faint)}
 
 /* ---------------- Page chantier ---------------- */
 .page{padding:18px 22px 44px}
-.pg-top{display:flex;align-items:center;gap:10px;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.pg-top{display:flex;align-items:center;gap:10px;margin-bottom:16px;padding:10px 0 12px;border-bottom:1px solid var(--line);
+  position:sticky;top:0;z-index:20;background:var(--canvas);box-shadow:0 6px 10px -8px rgba(0,0,0,.25)}
 .pg-title{margin:0;font-size:24px;font-weight:700;font-family:var(--font-display);letter-spacing:-.03em;outline:none}
 .pg-title:focus{background:var(--surface-soft);border-radius:var(--radius-sm)}
 .d-status{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--muted)}
@@ -288,6 +352,16 @@ header .sub{font-size:11.5px;color:var(--faint)}
 .kpi .lab{font-weight:600;text-transform:none;color:var(--muted)}
 .kpi .num{font-size:26px;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums;font-family:var(--font-display);letter-spacing:-.03em}
 .kpi .sub{font-size:10.5px;color:var(--faint);margin-top:2px}
+
+/* En-tête de section avec l'interrupteur d'affichage à droite */
+.act-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+/* Interrupteur segmenté Temps / Argent — bouton actif en encre pleine */
+.disptog{display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:2px;background:var(--surface-card);gap:2px}
+.disptog button{font-size:11px;font-weight:600;font-family:var(--font-sans);letter-spacing:0;
+  border:0;background:none;color:var(--muted);padding:3px 12px;border-radius:999px;cursor:pointer;white-space:nowrap;line-height:1.4}
+.disptog button:hover{color:var(--ink)}
+.disptog button.on{background:var(--ink);color:var(--on-dark)}
+.disptog button.on:hover{color:var(--on-dark)}
 .kpi.bad{border-left:3px solid var(--red)} .kpi.bad .num{color:var(--red)}
 .kpi.good .sub{color:var(--ink)}
 .kpi.good{border-left:3px solid var(--green)}
@@ -308,6 +382,13 @@ header .sub{font-size:11.5px;color:var(--faint)}
 .cardx-h .add{margin-left:auto;cursor:pointer;color:var(--ink);text-decoration:underline;font-size:11.5px;font-weight:600;text-transform:none;letter-spacing:0}
 .cardx-b{padding:13px 14px}
 .cardx-b > textarea{width:100%}
+/* sections réductibles : chevron ▸ (replié) qui pivote vers le bas une fois déplié */
+.cardx.collapsible > .cardx-h{cursor:pointer}
+.cardx-fold{flex:none;margin-right:7px;font-size:10px;line-height:1;color:var(--faint);transition:transform .15s ease}
+.cardx.collapsible:not(.collapsed) > .cardx-h > .cardx-fold{transform:rotate(90deg)}
+.cardx.collapsible > .cardx-h:hover > .cardx-fold{color:var(--ink)}
+.cardx.collapsed > .cardx-h{border-bottom:none}
+.cardx.collapsed > .cardx-b{display:none}
 
 .ring-wrap{display:flex;align-items:center;gap:16px}
 .ring-meta div{font-size:12.5px;margin:1px 0}
@@ -539,6 +620,9 @@ textarea{width:100%;resize:vertical;min-height:52px}
 .tstart{font:inherit;font-size:11px;font-weight:600;color:var(--inprog-d);background:var(--inprog-bg);
   border:1px solid var(--inprog);border-radius:var(--radius-pill);padding:3px 10px;cursor:pointer;white-space:nowrap}
 .tstart:hover{background:var(--inprog);color:#fff}
+.tstart.blocked{color:var(--faint);background:var(--surface-soft);border-color:var(--line);
+  border-style:dashed;cursor:not-allowed}
+.tstart.blocked:hover{background:var(--surface-soft);color:var(--faint)}
 .tstate.inprog{font-size:10.5px;font-weight:700;color:var(--inprog-d);background:var(--inprog-bg);
   border:1px solid var(--inprog);border-radius:var(--radius-pill);padding:2px 9px;white-space:nowrap}
 .tstart-undo{cursor:pointer;color:var(--muted);font-size:13px;font-weight:700;line-height:1;padding:0 2px}
@@ -585,6 +669,11 @@ textarea{width:100%;resize:vertical;min-height:52px}
 .ni-tx{display:flex;flex-direction:column;min-width:0}
 .ni-lib{font-size:12.5px;font-weight:600;line-height:1.3}
 .ni-sub{font-size:11px;color:var(--muted);margin-top:1px}
+/* Bouton « traiter en 1 clic » à droite du rappel — n'ouvre pas l'élément (stopPropagation) */
+.ni-act{margin-left:auto;flex-shrink:0;align-self:center;white-space:nowrap;font-size:11px;font-weight:600;
+  font-family:var(--font-sans);border:1px solid var(--line);background:var(--surface-card);color:var(--ink);
+  border-radius:999px;padding:3px 10px;cursor:pointer;line-height:1.3}
+.ni-act:hover{border-color:var(--ink);background:var(--ink);color:var(--on-dark)}
 
 /* ===== Routines / rappels (vue Planning) ============================== */
 .rt-list{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:var(--radius);
@@ -610,8 +699,10 @@ textarea{width:100%;resize:vertical;min-height:52px}
 .rp-days label{display:inline-flex;align-items:center;gap:3px;font-size:11.5px;color:var(--muted)}
 
 /* ===== Suivi du temps (chrono + Ma journée) =========================== */
-.bar-alert .seg.run{color:var(--inprog-d);font-weight:700;text-decoration:none;
-  background:var(--inprog-bg);border:1px solid var(--inprog);border-radius:var(--radius-pill);padding:2px 10px}
+.bar-alert .seg.run{color:var(--inprog-d);font-weight:700;background:var(--inprog-bg);border-color:var(--inprog);padding:2px 11px}
+.bar-alert .seg.run:hover{border-color:var(--inprog-d)}
+.bar-alert .seg.resume{cursor:pointer;color:var(--inprog-d);border-color:var(--inprog);font-weight:600}
+.bar-alert .seg.resume:hover{background:var(--inprog-bg);border-color:var(--inprog-d)}
 .ch-h .run{color:var(--inprog-d)}
 .tstart.stop{color:#b91c1c;background:var(--red-bg);border-color:#f0b4b4}
 .tstart.stop:hover{background:var(--red);color:#fff;border-color:var(--red)}
@@ -636,10 +727,16 @@ textarea{width:100%;resize:vertical;min-height:52px}
   border:1px solid #f0b4b4;border-radius:var(--radius-sm);padding:3px 8px;cursor:pointer}
 .dl-stopbtn:hover{background:var(--red);color:#fff}
 .dl-row .del{cursor:pointer;color:var(--red);font-weight:700}
-.dl-add{display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--surface-card);border-top:1px solid var(--line)}
+/* Reprendre une plage terminée (relance le chrono sur la même activité) */
+.dl-resume{font-size:11px;font-weight:700;color:var(--inprog-d);background:var(--inprog-bg);border:1px solid var(--inprog);
+  border-radius:var(--radius-sm);padding:2px 7px;cursor:pointer;line-height:1.3;flex-shrink:0}
+.dl-resume:hover{background:var(--inprog);color:#fff}
+.dl-add{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 12px;background:var(--surface-card);border-top:1px solid var(--line)}
 .dl-add input[type=text],.dl-add #tl_label{flex:1;min-width:180px;font:inherit;font-size:13px;
   border:1px solid var(--line);border-radius:var(--radius-sm);padding:7px 9px;background:var(--canvas)}
 .dl-add input[type=time]{font:inherit;font-size:12.5px;border:1px solid var(--line);border-radius:var(--radius-sm);padding:6px 8px;background:var(--canvas)}
+.dl-add select{font:inherit;font-size:12.5px;border:1px solid var(--line);border-radius:var(--radius-sm);padding:6px 8px;background:var(--canvas);max-width:200px}
+.dl-asg{font-size:11px;color:var(--muted);white-space:nowrap;max-width:170px;overflow:hidden;text-overflow:ellipsis;flex-shrink:0}
 
 /* ===== Gestionnaire de routines (repliable) =========================== */
 .rt-manage{margin:-6px 0 18px;font-size:12.5px}
@@ -647,13 +744,15 @@ textarea{width:100%;resize:vertical;min-height:52px}
 .rt-manage summary:hover{color:var(--ink)}
 .rt-mlist{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--canvas);margin-top:6px}
 .rt-mrow{display:flex;flex-direction:column;gap:4px;padding:7px 12px;border-top:1px solid var(--line-soft)}
-.rt-mhead{display:flex;align-items:center;gap:9px}
+.rt-mhead{display:flex;flex-wrap:wrap;align-items:center;gap:9px}
 .rt-mrow:first-child{border-top:0}
 .rt-mrow.off{opacity:.5}
 .rt-toggle{display:inline-flex;flex-shrink:0}
 .rt-mlib{flex:1;min-width:120px;font:inherit;font-size:12.5px;border:1px solid transparent;border-radius:var(--radius-sm);background:transparent;padding:4px 6px}
 .rt-mlib:hover{border-color:var(--line)} .rt-mlib:focus{border-color:var(--ink);background:var(--canvas)}
 .rt-mfreq{font:inherit;font-size:11.5px;border:1px solid var(--line);border-radius:var(--radius-sm);padding:4px 6px;background:var(--canvas)}
+.rt-mch,.rt-mta{font:inherit;font-size:11.5px;border:1px solid var(--line);border-radius:var(--radius-sm);padding:4px 6px;background:var(--canvas);max-width:170px}
+.rt-add #rp_chantier{max-width:200px}
 .rt-mmeta{font-size:10.5px;color:var(--faint);min-width:90px}
 .rt-mhead .del{cursor:pointer;color:var(--red);font-weight:700}
 .rt-mdesc{margin-left:26px;font:inherit;font-size:11.5px;color:var(--muted);border:1px solid transparent;

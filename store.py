@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 STORE_PATH = os.path.join(DATA_DIR, "store.json")
@@ -51,11 +51,11 @@ def _clamp15(v, default=3) -> int:
 # --------------------------------------------------------------------------- #
 # Alias connus -> (nom canonique, role par defaut, est-ce "moi"). Clefs minuscules.
 _PERSON_ALIASES = {
-    "moi": ("Elmehdi KELLA", "Chef de projet", True),
-    "toi": ("Elmehdi KELLA", "Chef de projet", True),
-    "kella": ("Elmehdi KELLA", "Chef de projet", True),
-    "elmehdi": ("Elmehdi KELLA", "Chef de projet", True),
-    "elmehdi kella": ("Elmehdi KELLA", "Chef de projet", True),
+    "moi": ("Elmehdi KELLA", "Chef de projet SI / IT", True),
+    "toi": ("Elmehdi KELLA", "Chef de projet SI / IT", True),
+    "kella": ("Elmehdi KELLA", "Chef de projet SI / IT", True),
+    "elmehdi": ("Elmehdi KELLA", "Chef de projet SI / IT", True),
+    "elmehdi kella": ("Elmehdi KELLA", "Chef de projet SI / IT", True),
     "rebuns": ("Rubens", "", False),
 }
 
@@ -166,6 +166,50 @@ def today() -> str:
     return date.today().isoformat()
 
 
+def _shift_iso(iso: str | None, days: int) -> str | None:
+    """Decale une date ISO de `days` jours calendaires (None reste None)."""
+    if not iso or not days:
+        return iso
+    try:
+        return (date.fromisoformat(iso) + timedelta(days=days)).isoformat()
+    except ValueError:
+        return iso
+
+
+def _replan_unfinished(ch: dict, days: int) -> None:
+    """Décale de `days` jours le planning prévisionnel RESTANT d'un chantier.
+
+    Utilisé à la reprise d'une pause (le gel fige le plan, la reprise le fait
+    glisser) et par la replanification manuelle. On ne touche QU'aux cibles
+    des travaux non finis :
+      - échéance du chantier, débuts imposés des tâches non finies,
+        dates attendues des livrables non reçus,
+      - référence figée (baseline) des SEULES tâches non terminées.
+    On NE bouge PAS `date_debut` (sinon les tâches déjà faites, ancrées sur
+    leurs dates réelles passées, se replieraient sur le nouveau début), ni
+    aucune date d'exécution réelle (start_date / done_date / réception) : ce
+    sont des faits acquis qui restent à leur place dans l'historique.
+    """
+    if days <= 0:
+        return
+    done_ids = {t["id"] for t in ch.get("taches", []) if t.get("done")}
+    ch["echeance"] = _shift_iso(ch.get("echeance"), days)
+    for t in ch.get("taches", []):
+        if not t.get("done"):
+            t["start_fix"] = _shift_iso(t.get("start_fix"), days)
+    for l in ch.get("livrables", []):
+        if l.get("statut") != "recu":                 # livrable encore attendu : sa date attendue glisse
+            l["date"] = _shift_iso(l.get("date"), days)
+    bl = ch.get("baseline")
+    if bl:
+        bl["project_end"] = _shift_iso(bl.get("project_end"), days)
+        bl["echeance"] = _shift_iso(bl.get("echeance"), days)
+        for bt in bl.get("tasks", []):
+            if bt.get("id") not in done_ids:          # la réf des tâches finies reste un fait historique
+                bt["start"] = _shift_iso(bt.get("start"), days)
+                bt["end"] = _shift_iso(bt.get("end"), days)
+
+
 def _hm(dt: datetime | None = None) -> str:
     return (dt or datetime.now()).strftime("%H:%M")
 
@@ -266,6 +310,92 @@ def _new_cdc(ch: dict) -> dict:
         "revisions": [{"id": _uid("rev_"), "indice": "A", "date": today(),
                        "auteur": "", "objet": "Création du document", "snapshot": None}],
     }
+
+
+# --------------------------------------------------------------------------- #
+# Absences — jours non travaillés (congés, RTT, jours fériés).
+#
+# Une absence est une PÉRIODE [debut, fin] inclusive. Le planning (CPM, plan de
+# charge, Gantt) est calculé cote interface : store.py ne porte que la donnée,
+# app.js en derive l'ensemble des dates a exclure (voir `offDays()` / `isOff()`).
+#
+# Une absence PÈSE sur le planning si elle me concerne (contact_id vide = moi)
+# ou si c'est un jour férié (qui vaut pour tout le monde). Une absence rattachée
+# à un autre contact est purement informative : sans affectation des taches aux
+# personnes, on ne saurait pas quelles dates décaler.
+# --------------------------------------------------------------------------- #
+ABSENCE_TYPES = {"conge", "rtt", "ferie", "recup", "formation", "maladie", "autre"}
+ABSENCE_LABELS = {"conge": "Congés", "rtt": "RTT", "ferie": "Férié", "recup": "Récupération",
+                  "formation": "Formation", "maladie": "Arrêt maladie", "autre": "Absence"}
+
+
+def _easter(year: int) -> date:
+    """Dimanche de Pâques (algorithme grégorien anonyme)."""
+    a, b, c = year % 19, year // 100, year % 100
+    d, e = b // 4, b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    mois = (h + l - 7 * m + 114) // 31
+    jour = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, mois, jour)
+
+
+def feries_fr(year: int) -> list[tuple[str, str]]:
+    """Les 11 jours fériés français (métropole) d'une année : [(date ISO, nom)]."""
+    p = _easter(year)
+    jours = [
+        (date(year, 1, 1), "Jour de l'An"),
+        (p + timedelta(days=1), "Lundi de Pâques"),
+        (date(year, 5, 1), "Fête du Travail"),
+        (date(year, 5, 8), "Victoire 1945"),
+        (p + timedelta(days=39), "Ascension"),
+        (p + timedelta(days=50), "Lundi de Pentecôte"),
+        (date(year, 7, 14), "Fête nationale"),
+        (date(year, 8, 15), "Assomption"),
+        (date(year, 11, 1), "Toussaint"),
+        (date(year, 11, 11), "Armistice 1918"),
+        (date(year, 12, 25), "Noël"),
+    ]
+    return [(d.isoformat(), nom) for d, nom in sorted(jours)]
+
+
+def _absence_jours(a: dict) -> int:
+    """Nombre de jours OUVRÉS (hors week-end) couverts par une absence."""
+    try:
+        d, f = date.fromisoformat(a["debut"]), date.fromisoformat(a["fin"])
+    except (ValueError, TypeError, KeyError):
+        return 0
+    n = 0
+    while d <= f:
+        if d.weekday() < 5:
+            n += 1
+        d += timedelta(days=1)
+    return n
+
+
+def _absence_overlap(store: dict, debut: str, fin: str, typ: str, contact_id,
+                     skip_id: str | None = None) -> dict | None:
+    """Première absence existante qui fait DOUBLON avec la période.
+
+    Deux absences ne se chevauchent que si elles décrivent la même chose :
+    - même personne (deux personnes peuvent évidemment être absentes en même temps) ;
+    - même couche : les jours fériés forment un calendrier à part, des congés
+      posés autour du 14 juillet ne sont pas un doublon du férié qu'ils englobent.
+    """
+    for a in store.get("absences", []):
+        if a.get("id") == skip_id:
+            continue
+        if (a.get("type") == "ferie") != (typ == "ferie"):
+            continue
+        if (a.get("contact_id") or None) != (contact_id or None):
+            continue
+        if a.get("debut", "") <= fin and debut <= a.get("fin", ""):
+            return a
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -513,7 +643,7 @@ def _normalize(store: dict) -> dict:
     store.setdefault("journal", [])
     s = store.setdefault("settings", {})
     s.setdefault("capacite_jour", 3)     # max taches actives par jour (global)
-    s.setdefault("wip_max", 3)           # max chantiers "En cours" simultanes
+    s.setdefault("wip_max", 5)           # max chantiers "En cours" simultanes
     s.setdefault("jours_ouvres", True)   # planning en jours ouvres (exclut samedi/dimanche)
     s.setdefault("relance_jours", 7)     # relance suggeree apres N jours
     s.setdefault("rappel_stale_jours", 3)  # nudge si un chantier "en cours" n'a rien enregistre depuis N jours
@@ -536,6 +666,8 @@ def _normalize(store: dict) -> dict:
         r.setdefault("actif", True)
         r.setdefault("ticks", [])           # dates cochees (recurrent) ; ponctuel : non-vide => fait
         r.setdefault("note", "")
+        r.setdefault("chantier_id", None)   # rattachement optionnel : le temps chrono du rappel est compte sur ce chantier
+        r.setdefault("tache_id", None)      # tache precise du chantier (optionnel)
     for s in store.setdefault("timelog", []):   # sessions de suivi du temps (chrono)
         s.setdefault("id", _uid("tl_"))
         s.setdefault("date", today())
@@ -559,9 +691,25 @@ def _normalize(store: dict) -> dict:
                 s["fin"] = de
             if s["fin"] < s["debut"]:
                 s["fin"] = s["debut"]
+    for a in store.setdefault("absences", []):  # jours non travailles : conges, RTT, feries
+        a.setdefault("id", _uid("ab_"))
+        a.setdefault("debut", today())
+        a.setdefault("fin", a["debut"])         # absence d'un seul jour : fin = debut
+        a.setdefault("type", "conge")           # conge | rtt | ferie | recup | formation | maladie | autre
+        a.setdefault("label", ABSENCE_LABELS.get(a["type"], "Absence"))
+        a.setdefault("contact_id", None)        # None = moi (seul cas qui pese sur MON planning)
+        a.setdefault("note", "")
+        if a["fin"] < a["debut"]:               # robustesse : periode inversee saisie a la main
+            a["debut"], a["fin"] = a["fin"], a["debut"]
+    store["absences"].sort(key=lambda a: a.get("debut", ""))
     for c in store.get("chantiers", []):
         if c.get("statut") == "block":   # "Bloqué" est desormais calcule, plus un statut manuel
             c["statut"] = "doing"
+        c.setdefault("id", _uid("ch_"))      # robustesse : un store partiel / edite a la main ne doit pas planter
+        c.setdefault("titre", "")
+        c.setdefault("statut", "todo")
+        c.setdefault("prio", "m")
+        c.setdefault("echeance", None)
         c.setdefault("date_debut", None)
         c.setdefault("objectif", "")
         c.setdefault("budget", None)         # BAC (budget a l'achevement, €) pour l'EVM ; None = non defini
@@ -574,6 +722,9 @@ def _normalize(store: dict) -> dict:
         c.setdefault("baseline_edits", 0)
         c.setdefault("hold", False)          # mise en pause volontaire (sort des compteurs)
         c.setdefault("hold_until", None)     # date de reprise prévue (optionnelle, déclenche un rappel)
+        c.setdefault("hold_started", None)   # date de mise en pause : sert à décaler le planning à la reprise
+        if c.get("hold") and not c.get("hold_started"):   # pause héritée (avant ce suivi) : on cale le repère à aujourd'hui
+            c["hold_started"] = today()
         for rk in c.setdefault("risques", []):       # registre de risques (proba x gravite 5x5)
             rk.setdefault("id", _uid("rk_"))
             rk.setdefault("libelle", "")
@@ -627,6 +778,15 @@ def _normalize(store: dict) -> dict:
                 st.setdefault("done", False)
                 st.setdefault("done_at", None)        # horodatage de complétion (ISO date+heure)
         for l in c["livrables"]:
+            l.setdefault("id", _uid("liv_"))     # robustesse : champs lus en acces direct (export, UI)
+            l.setdefault("quoi", "")
+            l.setdefault("personne", "")
+            l.setdefault("role", "")
+            l.setdefault("statut", "attente")
+            l.setdefault("date", None)
+            l.setdefault("relances", 0)
+            l.setdefault("derniere", None)
+            l.setdefault("impact", "")
             l.setdefault("tache_id", None)
             l.setdefault("contact_id", None)
         for p in c["parties"]:
@@ -894,20 +1054,58 @@ def _apply_op(store: dict, op: dict) -> str:
         ch = _chantier(store, op["id"])
         if op["statut"] not in STATUTS:
             raise ValueError(f"Statut invalide: {op['statut']}")
+        prev = ch["statut"]
+        if op["statut"] == "doing" and prev != "doing" and not ch.get("hold"):   # plafond WIP « En cours »
+            wip_max = int(store.get("settings", {}).get("wip_max", 3))
+            actifs = [c for c in store["chantiers"] if c.get("statut") == "doing" and not c.get("hold")]
+            if wip_max and len(actifs) >= wip_max:   # wip_max = 0 -> aucune limite « En cours »
+                raise ValueError(
+                    f"Limite de {wip_max} chantiers « En cours » atteinte "
+                    f"({', '.join('« ' + c['titre'] + ' »' for c in actifs)}).\n"
+                    f"Terminez ou mettez en pause un chantier avant d'en passer un autre En cours.")
         ch["statut"] = op["statut"]
         if op["statut"] == "recette" and not ch["iterations"]:   # demarre l'iteration 1
             ch["iterations"].append({"id": _uid("it_"), "num": 1, "ouverte": True,
                                      "date": today(), "note": "", "retours": []})
+        elif prev == "recette" and op["statut"] != "recette":     # on quitte la recette : solde un chrono recette ouvert
+            for s in _clock_active(store):
+                if s.get("chantier_id") == ch["id"] and s.get("kind") == "recette":
+                    _close_session(store, s)
         return f"« {ch['titre']} » deplace vers {op['statut']}"
 
     if name == "set_hold":   # met en pause / reprend un chantier entier
         ch = _chantier(store, op["chantier_id"])
+        was_hold = bool(ch.get("hold"))
         ch["hold"] = bool(op.get("hold"))
         ch["hold_until"] = (op.get("until") or None) if ch["hold"] else None
         if ch["hold"]:
+            ch.setdefault("hold_started", None)
+            if not was_hold:                          # on mémorise le jour de mise en pause
+                ch["hold_started"] = today()
             _clock_close_chantier(store, ch["id"])   # parquer le chantier arrête son chrono
             return f"« {ch['titre']} » mis en pause" + (f" jusqu'au {ch['hold_until']}" if ch["hold_until"] else "")
+        # ---- REPRISE : le planning était figé pendant la pause -> on le décale en bloc
+        # du nombre de jours passés en pause, pour ne subir AUCUN retard artificiel.
+        days = 0
+        started = ch.get("hold_started")
+        if was_hold and started:
+            try:
+                days = (date.fromisoformat(today()) - date.fromisoformat(started)).days
+            except ValueError:
+                days = 0
+        ch["hold_started"] = None
+        if days > 0:
+            _replan_unfinished(ch, days)
+            return f"« {ch['titre']} » repris — planning décalé de {days} j (aucun retard imputé)"
         return f"« {ch['titre']} » repris"
+
+    if name == "replan_now":   # replanifie le travail RESTANT pour repartir d'aujourd'hui
+        ch = _chantier(store, op["chantier_id"])
+        days = int(op.get("days") or 0)
+        if days <= 0:
+            return f"« {ch['titre']} » déjà à jour — aucune replanification"
+        _replan_unfinished(ch, days)
+        return f"« {ch['titre']} » replanifié — travail restant décalé de {days} j (aucun retard imputé)"
 
     if name == "add_tache":
         ch = _chantier(store, op["chantier_id"])
@@ -954,9 +1152,22 @@ def _apply_op(store: dict, op: dict) -> str:
             t["start_date"] = None
             _clock_close_tache(store, t["id"])
             return f"Tache « {t['label']} » remise a faire"
+        # Démarrer une tâche fait passer le chantier « En cours » — sous plafond de WIP.
+        promu = False
+        if ch.get("statut") == "todo":
+            wip_max = int(store.get("settings", {}).get("wip_max", 3))
+            actifs = [c for c in store["chantiers"] if c.get("statut") == "doing" and not c.get("hold")]
+            if wip_max and len(actifs) >= wip_max:   # wip_max = 0 -> aucune limite « En cours »
+                raise ValueError(
+                    f"Limite de {wip_max} chantiers « En cours » atteinte "
+                    f"({', '.join('« ' + c['titre'] + ' »' for c in actifs)}).\n"
+                    f"Terminez ou mettez en pause un chantier avant de démarrer une tâche ici.")
+            ch["statut"] = "doing"
+            promu = True
         t["start_date"] = op.get("date") or today()
         _clock_start(store, "tache", t["label"], chantier_id=ch["id"], tache_id=t["id"])   # ouvre le chrono
-        return f"Tache « {t['label']} » demarree le {t['start_date']}"
+        msg = f"Tache « {t['label']} » demarree le {t['start_date']}"
+        return msg + (f" — « {ch['titre']} » passe En cours" if promu else "")
 
     if name == "update_tache":
         ch = _chantier(store, op["chantier_id"])
@@ -978,6 +1189,8 @@ def _apply_op(store: dict, op: dict) -> str:
             t["start_fix"] = op["start_fix"] or None
         if "start_date" in op:                 # correction du debut REEL
             t["start_date"] = op["start_date"] or None
+        if "done_date" in op and t.get("done"):  # correction de la fin REELLE d'une tache deja terminee
+            t["done_date"] = op["done_date"] or None
         if "preds" in op:
             t["preds"] = _clean_preds(ch, op["preds"], t["id"])
         if "done" in op:
@@ -1503,6 +1716,7 @@ def _apply_op(store: dict, op: dict) -> str:
             "jour_mois": (min(28, max(1, int(jm))) if jm else None),
             "date": op.get("date") or None, "heure": op.get("heure") or None,
             "actif": True, "ticks": [], "note": (op.get("note") or "").strip(),
+            "chantier_id": op.get("chantier_id") or None, "tache_id": op.get("tache_id") or None,
         })
         return f"Routine ajoutée : {label}"
 
@@ -1527,6 +1741,12 @@ def _apply_op(store: dict, op: dict) -> str:
             r["actif"] = bool(op["actif"])
         if "note" in op and op["note"] is not None:
             r["note"] = str(op["note"]).strip()
+        if "chantier_id" in op:
+            r["chantier_id"] = op["chantier_id"] or None
+            if not r["chantier_id"]:
+                r["tache_id"] = None            # sans chantier rattaché, pas de tâche
+        if "tache_id" in op:
+            r["tache_id"] = op["tache_id"] or None
         if r["freq"] == "ponctuel" and not r.get("date"):   # un ponctuel sans date serait "dû" en permanence
             raise ValueError("Un rappel ponctuel nécessite une date d'échéance.")
         return f"Routine mise à jour : {r['label']}"
@@ -1548,6 +1768,84 @@ def _apply_op(store: dict, op: dict) -> str:
         store["rappels"] = [x for x in store["rappels"] if x["id"] != op["id"]]
         return f"Routine supprimée : {r['label']}"
 
+    # ---- Absences (congés, RTT, fériés) ---------------------------------- #
+    if name == "add_absence":
+        debut = (op.get("debut") or "").strip()
+        if not debut:
+            raise ValueError("Date de début requise.")
+        fin = (op.get("fin") or "").strip() or debut
+        if fin < debut:
+            debut, fin = fin, debut
+        typ = op.get("type") or "conge"
+        if typ not in ABSENCE_TYPES:
+            raise ValueError(f"Type d'absence invalide: {typ}")
+        dup = _absence_overlap(store, debut, fin, typ, op.get("contact_id"))
+        if dup:
+            raise ValueError(f"Chevauche une absence existante : « {dup['label']} » "
+                             f"du {dup['debut']} au {dup['fin']}.")
+        a = {"id": _uid("ab_"), "debut": debut, "fin": fin, "type": typ,
+             "label": (op.get("label") or "").strip() or ABSENCE_LABELS[typ],
+             "contact_id": op.get("contact_id") or None, "note": (op.get("note") or "").strip()}
+        store.setdefault("absences", []).append(a)
+        store["absences"].sort(key=lambda x: x["debut"])
+        n = _absence_jours(a)
+        return f"Absence posée : {a['label']} du {debut} au {fin} ({n} j ouvré{'s' if n > 1 else ''})"
+
+    if name == "update_absence":
+        a = _sub(store.setdefault("absences", []), op["id"], "Absence")
+        debut, fin = a["debut"], a["fin"]
+        if op.get("debut"):
+            debut = op["debut"].strip()
+        if op.get("fin"):
+            fin = op["fin"].strip()
+        if fin < debut:
+            debut, fin = fin, debut
+        typ = op.get("type") or a["type"]
+        cid = op["contact_id"] if "contact_id" in op else a.get("contact_id")
+        dup = _absence_overlap(store, debut, fin, typ, cid, skip_id=a["id"])
+        if dup:
+            raise ValueError(f"Chevauche une absence existante : « {dup['label']} » "
+                             f"du {dup['debut']} au {dup['fin']}.")
+        a["debut"], a["fin"] = debut, fin
+        if op.get("type"):
+            if op["type"] not in ABSENCE_TYPES:
+                raise ValueError(f"Type d'absence invalide: {op['type']}")
+            a["type"] = op["type"]
+        if "label" in op and op["label"] is not None:
+            a["label"] = str(op["label"]).strip() or ABSENCE_LABELS.get(a["type"], "Absence")
+        if "contact_id" in op:
+            a["contact_id"] = op["contact_id"] or None
+        if "note" in op and op["note"] is not None:
+            a["note"] = str(op["note"]).strip()
+        store["absences"].sort(key=lambda x: x["debut"])
+        return f"Absence mise à jour : {a['label']} du {a['debut']} au {a['fin']}"
+
+    if name == "remove_absence":
+        a = _sub(store.setdefault("absences", []), op["id"], "Absence")
+        store["absences"] = [x for x in store["absences"] if x["id"] != op["id"]]
+        return f"Absence supprimée : {a['label']} du {a['debut']} au {a['fin']}"
+
+    if name == "import_feries":
+        try:
+            year = int(op.get("annee") or date.today().year)
+        except (TypeError, ValueError):
+            raise ValueError("Année invalide.")
+        if not 1970 <= year <= 2100:
+            raise ValueError("Année hors plage (1970-2100).")
+        abs_list = store.setdefault("absences", [])
+        connus = {x["debut"] for x in abs_list if x.get("type") == "ferie"}
+        ajout = 0
+        for iso, nom in feries_fr(year):
+            if iso in connus or date.fromisoformat(iso).weekday() >= 5:
+                continue        # deja importe, ou tombe un week-end (deja non travaille)
+            abs_list.append({"id": _uid("ab_"), "debut": iso, "fin": iso, "type": "ferie",
+                             "label": nom, "contact_id": None, "note": ""})
+            ajout += 1
+        abs_list.sort(key=lambda x: x["debut"])
+        if not ajout:
+            return f"Jours fériés {year} : déjà à jour"
+        return f"Jours fériés {year} importés : {ajout} jour{'s' if ajout > 1 else ''}"
+
     # ---- Suivi du temps (chrono) ----------------------------------------- #
     if name == "clock_start":
         kind = op.get("kind") or "libre"
@@ -1556,8 +1854,13 @@ def _apply_op(store: dict, op: dict) -> str:
         if not label and kind == "tache" and refs.get("chantier_id") and refs.get("tache_id"):
             ch = _chantier(store, refs["chantier_id"])
             label = _sub(ch["taches"], refs["tache_id"], "Tache")["label"]
-        if not label and kind == "rappel" and refs.get("rappel_id"):
-            label = _sub(store.setdefault("rappels", []), refs["rappel_id"], "Rappel")["label"]
+        if kind == "rappel" and refs.get("rappel_id"):
+            rp = _sub(store.setdefault("rappels", []), refs["rappel_id"], "Rappel")
+            if not label:
+                label = rp["label"]
+            for k in ("chantier_id", "tache_id"):   # rappel rattaché : son temps est compté sur le chantier / la tâche
+                if rp.get(k) and not refs.get(k):
+                    refs[k] = rp[k]
         if not label and kind == "recette" and refs.get("chantier_id"):
             ch = _chantier(store, refs["chantier_id"])
             label = f"Recette — {ch['titre']}"

@@ -30,10 +30,11 @@
       </div>
     </div>
     <div class="menu" id="navPeople">
-      <button data-group="people,contacts" onclick="toggleMenu(event,'navPeople')">Personnes ▾</button>
+      <button data-group="people,contacts,absences" onclick="toggleMenu(event,'navPeople')">Personnes ▾</button>
       <div class="menu-list">
         <a onclick="setView('people')">Par personne</a>
         <a onclick="setView('contacts')">Annuaire</a>
+        <a onclick="setView('absences')">Congés &amp; absences</a>
       </div>
     </div>
   </div>
@@ -65,6 +66,7 @@
     <div class="risques" id="risques" style="display:none"></div>
     <div class="people" id="people" style="display:none"></div>
     <div class="contacts" id="contacts" style="display:none"></div>
+    <div class="absences" id="absences" style="display:none"></div>
     <div class="cahiers" id="cahiers" style="display:none"></div>
     <div class="cdc" id="cdc" style="display:none"></div>
     <div class="page" id="page" style="display:none"></div>

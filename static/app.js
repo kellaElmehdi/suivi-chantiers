@@ -226,7 +226,7 @@ function critLevel(n){   // 5×5 → 4 niveaux + couleur
 const risquesOf = c => c.risques || [];
 const openRisques = c => risquesOf(c).filter(riskActive);
 const topCrit = c => openRisques(c).reduce((m, r) => Math.max(m, crit(r)), 0);
-const allRisques = () => STORE.chantiers.flatMap(c => risquesOf(c).map(r => ({...r, _c: c})));
+const allRisques = () => LIVE().flatMap(c => risquesOf(c).map(r => ({...r, _c: c})));
 
 // ---- utils ---------------------------------------------------------------
 const $ = id => document.getElementById(id);
@@ -239,16 +239,20 @@ const pct = c => c.taches.length ? Math.round(100 * c.taches.filter(t => t.done)
 const openAtt = c => c.livrables.filter(l => livPending(l));
 const lateAtt = c => c.livrables.filter(l => (livPending(l)) && isLate(l.date));
 const chById = id => STORE.chantiers.find(c => c.id === id);
-// "Bloqué" est calculé : point bloquant rempli, OU une tâche non finie attend un
-// livrable rattaché non reçu, OU un livrable non reçu est EN RETARD.
+// Chantiers "vivants" (hors pause) — un chantier en pause disparaît de TOUTES les vues
+// (board, planning, tableau de bord, charge, personnes, risques, activité, cahiers).
+const LIVE = () => STORE.chantiers.filter(c => !c.hold);
+// "Bloqué" est calculé : point bloquant rempli, OU un livrable non reçu dont
+// l'ÉCHÉANCE EST DÉPASSÉE. Tant que la date attendue n'est pas passée, un livrable
+// ne bloque pas — même rattaché à une tâche : on laisse le délai courir.
 const gatedLivrable = c => (c.livrables || []).find(l => l.tache_id
   && (livPending(l))
+  && isLate(l.date)
   && (c.taches || []).some(t => t.id === l.tache_id && !t.done));
 function isBlocked(c){
   if(c.statut === "done" || c.hold) return false;   // un chantier en pause n'est pas "bloqué"
   if(c.blocage && c.blocage.trim()) return true;
-  if(gatedLivrable(c)) return true;
-  return lateAtt(c).length > 0;   // livrable non reçu et en retard
+  return lateAtt(c).length > 0;   // livrable non reçu et en retard (échéance dépassée)
 }
 const colOf = c => (c.statut !== "done" && isBlocked(c)) ? "block" : c.statut;
 const blockReason = c => {
@@ -267,39 +271,83 @@ function fmt(d){ if(!d) return "—"; const p = d.split("-"); return `${p[2]}/${
 function fmtShort(d){ if(!d) return "—"; const p = d.split("-"); return `${p[2]}/${p[1]}`; }
 function fmtDT(iso){ if(!iso) return ""; const [d, tm] = iso.split("T"); return fmtShort(d) + (tm ? " à " + tm.slice(0, 5) : ""); }   // "15/06 à 14:30"
 const isWeekend = dt => { const d = dt.getUTCDay(); return d === 0 || d === 6; };
+
+// ---- Jours non travaillés (congés / RTT / fériés) -------------------------
+// OFF = toutes les dates couvertes par une absence qui pèse sur MON planning :
+// une absence sans contact (= moi) ou un jour férié (vaut pour tout le monde).
+// Une absence rattachée à un autre contact reste informative : sans affectation
+// des tâches aux personnes, on ne saurait pas quelles dates décaler.
+let OFF = new Set();
+function absBlocksPlan(a, moi){ return a.type === "ferie" || !a.contact_id || a.contact_id === moi; }
+function rebuildOff(){
+  OFF = new Set();
+  const moi = (STORE.contacts || []).find(c => c.moi)?.id || null;
+  (STORE.absences || []).forEach(a => {
+    if(!a.debut || !a.fin || !absBlocksPlan(a, moi)) return;
+    let d = a.debut, guard = 0;
+    while(d <= a.fin && guard++ < 400){ OFF.add(d); d = addDays(d, 1); }
+  });
+}
+// Jour non travaillé : week-end (si planning en jours ouvrés) ou absence posée (toujours).
+const isOff = dt => (SETTINGS.jours_ouvres && isWeekend(dt)) || OFF.has(dstr(dt));
+const isOffISO = d => (SETTINGS.jours_ouvres && isWeekend(dparse(d))) || OFF.has(d);
+
 // Unités de planning : jours ouvrés (si réglé) ou calendaires. Les échéances/compteurs réels restent en daysBetween.
 function addUnits(s, n){
-  if(!SETTINGS.jours_ouvres) return addDays(s, n);
+  if(!SETTINGS.jours_ouvres && !OFF.size) return addDays(s, n);
   const dt = dparse(s), step = n >= 0 ? 1 : -1; let rem = Math.abs(Math.round(n));
-  while(rem > 0){ dt.setUTCDate(dt.getUTCDate() + step); if(!isWeekend(dt)) rem--; }
+  let guard = 0;                                  // garde-fou : une année entière posée en congés bouclerait
+  while(rem > 0 && guard++ < 4000){ dt.setUTCDate(dt.getUTCDate() + step); if(!isOff(dt)) rem--; }
   return dstr(dt);
 }
 function workOffset(start, date){
-  if(!SETTINGS.jours_ouvres) return daysBetween(start, date);
+  if(!SETTINGS.jours_ouvres && !OFF.size) return daysBetween(start, date);
   const dt = dparse(start), tgt = dparse(date); let k = 0;
-  if(tgt >= dt){ while(dt < tgt){ dt.setUTCDate(dt.getUTCDate() + 1); if(!isWeekend(dt)) k++; } }
-  else { while(dt > tgt){ dt.setUTCDate(dt.getUTCDate() - 1); if(!isWeekend(dt)) k--; } }
+  if(tgt >= dt){ while(dt < tgt){ dt.setUTCDate(dt.getUTCDate() + 1); if(!isOff(dt)) k++; } }
+  else { while(dt > tgt){ dt.setUTCDate(dt.getUTCDate() - 1); if(!isOff(dt)) k--; } }
   return k;
 }
 
 // ---- API -----------------------------------------------------------------
+function connError(show){   // bandeau si le serveur ne répond plus (relancé / fermé)
+  let el = document.getElementById("connerr");
+  if(show){
+    if(!el){
+      el = document.createElement("div"); el.id = "connerr"; el.className = "conn-err";
+      el.innerHTML = `⚠ Connexion au serveur perdue — relance le serveur (Suivi.bat), puis <a onclick="location.reload()">recharge la page</a>.`;
+      document.body.appendChild(el);
+    }
+    el.style.display = "block";
+  } else if(el){ el.remove(); }
+}
 async function api(method, path, body){
-  const r = await fetch(path, {method, headers: {"Content-Type": "application/json"},
-                              body: body ? JSON.stringify(body) : undefined});
+  let r;
+  try{
+    r = await fetch(path, {method, headers: {"Content-Type": "application/json"},
+                           body: body ? JSON.stringify(body) : undefined});
+  }catch(e){ connError(true); throw e; }                 // serveur injoignable
+  if(!r.ok){ connError(true); throw new Error("HTTP " + r.status); }
+  connError(false);
   return r.json();
 }
 async function loadStore(){
-  const d = await api("GET", "/api/store");
+  let d;
+  try{ d = await api("GET", "/api/store"); }
+  catch(e){ return; }                                    // bandeau déjà affiché ; on garde l'écran courant
   STORE = d.store; TODAY = d.today;
   if(STORE.settings) SETTINGS = {...SETTINGS, ...STORE.settings};
+  rebuildOff();                                          // après SETTINGS : isOff dépend de jours_ouvres
   if(CUR && chById(CUR)) renderPage(); else { CUR = null; showView("board"); }
   renderNotif(); checkDesktopNotifs();
 }
 async function mutate(op){
-  const d = await api("POST", "/api/mutate", op);
+  let d;
+  try{ d = await api("POST", "/api/mutate", op); }
+  catch(e){ return; }                                    // échec réseau : bandeau affiché, on n'altère rien
   if(d.error){ alert(d.error); return; }
   STORE = d.store; TODAY = d.today;
   if(STORE.settings) SETTINGS = {...SETTINGS, ...STORE.settings};
+  rebuildOff();                                          // après SETTINGS : isOff dépend de jours_ouvres
   if($("cdc").style.display !== "none" && CUR_CDC && chById(CUR_CDC)) renderCdc();
   else if(CUR && chById(CUR)) renderPage();
   else { CUR = null; showView(VIEW); }
@@ -308,8 +356,37 @@ async function mutate(op){
 
 // ---- vues ----------------------------------------------------------------
 let VIEW = "board";
+let SHOW_ALL_DONE = false;   // colonne « Terminé » : repliée (3 derniers) ou dépliée (tout)
+const DONE_PREVIEW = 3;      // nb de chantiers terminés montrés quand la colonne est repliée
+// Récence d'un chantier terminé : dernière date de complétion d'une de ses tâches ("" si aucune).
+function lastDoneDate(c){
+  let d = "";
+  (c.taches || []).forEach(t => { if(t.done && t.done_date && t.done_date > d) d = t.done_date; });
+  return d;
+}
+// Plafond WIP (même règle que le serveur) : nb de chantiers « En cours » (statut doing, hors pause).
+function doingCount(){ return STORE.chantiers.filter(c => c.statut === "doing" && !c.hold).length; }
+// Limite WIP : nb max de chantiers « En cours ». 0 (ou absent) => aucune limite, on ne bloque jamais.
+function wipLimit(){ return +SETTINGS.wip_max || 0; }
+// Démarrer une tâche d'un chantier « à faire » est bloqué si la limite est déjà atteinte.
+function startBlocked(c){ const lim = wipLimit(); return lim > 0 && c.statut === "todo" && !c.hold && doingCount() >= lim; }
+function wipFullMsg(){ return `Limite de ${wipLimit()} chantiers « En cours » atteinte.\\nTerminez ou mettez en pause un chantier avant de démarrer un nouveau.`; }
+// Colonne « À faire » : inclut les chantiers en pause, rangés par échéance ou avancement,
+// repliée aux TODO_PREVIEW premiers.
+let TODO_SORT = "echeance";   // "echeance" | "avancement"
+let TODO_COLLAPSED = true;
+const TODO_PREVIEW = 5;
+function sortTodo(list){
+  return list.slice().sort((a, c) => {
+    const ha = a.hold ? 1 : 0, hc = c.hold ? 1 : 0;
+    if(ha !== hc) return ha - hc;                                                     // actifs toujours avant les pausés
+    if(TODO_SORT === "avancement"){ const d = pct(c) - pct(a); if(d) return d; }   // plus avancé d'abord
+    const ea = a.echeance || "9999-99-99", eb = c.echeance || "9999-99-99";          // sans échéance en dernier
+    return ea < eb ? -1 : ea > eb ? 1 : 0;
+  });
+}
 function showView(v){
-  if(["board", "charge", "people", "dash", "contacts", "risques", "planning", "activite", "cahiers"].includes(v)) VIEW = v;
+  if(["board", "charge", "people", "dash", "contacts", "absences", "risques", "planning", "activite", "cahiers"].includes(v)) VIEW = v;
   $("board").style.display = v === "board" ? "flex" : "none";
   $("planning").style.display = v === "planning" ? "block" : "none";
   $("dash").style.display = v === "dash" ? "block" : "none";
@@ -318,6 +395,7 @@ function showView(v){
   $("risques").style.display = v === "risques" ? "block" : "none";
   $("people").style.display = v === "people" ? "grid" : "none";
   $("contacts").style.display = v === "contacts" ? "block" : "none";
+  $("absences").style.display = v === "absences" ? "block" : "none";
   $("cahiers").style.display = v === "cahiers" ? "block" : "none";
   $("cdc").style.display = v === "cdc" ? "block" : "none";
   $("page").style.display = v === "page" ? "block" : "none";
@@ -334,6 +412,7 @@ function showView(v){
   if(v === "risques") renderRisques();
   if(v === "people") renderPeople();
   if(v === "contacts") renderContacts();
+  if(v === "absences") renderAbsences();
   if(v === "cahiers") renderCahiers();
   if(v === "cdc") renderCdc();
 }
@@ -445,13 +524,43 @@ new MutationObserver(() => {
 
 // ---- bandeau + board + personnes ----------------------------------------
 // ---- règles globales -----------------------------------------------------
-function lateTasks(c){   // tâches/jalons non finis dont la fin PRÉVUE est déjà passée
-  if(c.hold) return [];   // chantier en pause : aucune tâche n'est "en retard"
+// Une tâche est "en retard" si sa PRÉVISION de fin dépasse une cible RÉELLE :
+//  - référence figée présente → la fin de référence de cette tâche ;
+//  - sinon → l'échéance du chantier ;
+//  - sans référence ni échéance → jamais en retard (on n'a rien sur quoi se baser).
+// On ne compare PAS au plan auto ancré sur la date de début (sinon un chantier démarré
+// dans le passé paraît tout en retard alors que rien n'est figé).
+function taskLate(c, S, id){
+  const t = S.byId ? S.byId[id] : null;
+  if(!t || t.done || c.hold) return false;
+  const f = S.fc[id]; if(!f) return false;
+  if(S.baseline){
+    const b = (S.baseline.tasks || []).find(x => x.id === id);
+    return b ? f.ffDate > b.end : false;
+  }
+  return c.echeance ? f.ffDate > c.echeance : false;
+}
+function lateTasks(c){   // tâches/jalons non finis en retard (prévision vs référence/échéance)
+  if(c.hold) return [];
   const S = computeSchedule(c);
-  return c.taches.filter(t => !t.done && S.sched[t.id] && S.sched[t.id].endDate < TODAY);
+  return c.taches.filter(t => taskLate(c, S, t.id));
+}
+// Tâches en retard réellement ACTIONNABLES : celles dont TOUS les prédécesseurs sont
+// terminés. Une tâche en retard dont un prédécesseur n'est pas fini est bloquée par lui
+// (on ne peut pas la démarrer de toute façon) : inutile de la répéter dans les rappels,
+// seul le prédécesseur — la vraie racine du retard — est signalé. Ce filtre écrase donc
+// toute chaîne de dépendance sur sa seule tâche de tête, mais laisse s'afficher plusieurs
+// tâches en retard sans lien entre elles (elles peuvent avancer en parallèle).
+function actionableLateTasks(c){
+  if(c.hold) return [];
+  const S = computeSchedule(c);
+  const done = id => { const t = S.byId[id]; return !t || t.done; };   // pred inconnu = ignoré
+  return c.taches.filter(t => taskLate(c, S, t.id) && (S.preds[t.id] || []).every(done));
 }
 function relancesDues(c){
-  return c.livrables.filter(l => (livPending(l))
+  // Pas de relance tant que l'échéance est respectée : on n'alerte qu'une fois la
+  // date attendue passée, puis on re-suggère tous les SETTINGS.relance_jours jours.
+  return c.livrables.filter(l => (livPending(l)) && isLate(l.date)
     && (!l.derniere || daysBetween(l.derniere, TODAY) >= SETTINGS.relance_jours));
 }
 function retoursLate(c){
@@ -475,7 +584,7 @@ function chargeData(){
   const horizon = addDays(TODAY, 120); if(mx > horizon) mx = horizon;
   const days = []; let d = TODAY, guard = 0;
   while(d < mx && guard++ < 400){
-    if(!(SETTINGS.jours_ouvres && isWeekend(dparse(d)))){
+    if(!isOffISO(d)){                            // congés/fériés : hors plan de charge, comme le week-end
       const active = items.filter(i => i.start <= d && d < i.end);
       days.push({date: d, count: active.length, tasks: active});
     }
@@ -507,8 +616,8 @@ function levelingSuggestions(){
       return b.slack - a.slack;
     });
     for(const it of cand){
-      let ns = addDays(day.date, 1);
-      while(SETTINGS.jours_ouvres && isWeekend(dparse(ns))) ns = addDays(ns, 1);
+      let ns = addDays(day.date, 1), g = 0;
+      while(isOffISO(ns) && g++ < 400) ns = addDays(ns, 1);   // ne jamais reporter sur un jour non travaillé
       const shift = workOffset(it.start, ns);
       if(shift > 0 && shift <= it.slack){
         sugg.push({...it, newStart: ns, shift, day: day.date});
@@ -545,20 +654,37 @@ function renderAlert(){
   const wip = STORE.chantiers.filter(c => colOf(c) === "doing" && !c.hold).length;
   const onhold = STORE.chantiers.filter(c => c.hold && c.statut !== "done").length;
   const over = chargeData().overload;
-  $("subtitle").textContent = `${STORE.chantiers.length} chantiers`;
-  const seg = [];
-  seg.push(`<b>${openL}</b> livraison(s) attendue(s)` + (lateL ? ` (<span class="lt">${lateL} en retard</span>)` : ""));
-  if(lateT) seg.push(`<span class="lt">${lateT} tâche(s) en retard</span>`);
-  if(relances) seg.push(`<a class="seg" onclick="setView('people')">${relances} relance(s) à faire</a>`);
-  if(retL) seg.push(`<span class="lt">${retL} retour(s) en retard</span>`);
-  seg.push(`WIP <b class="${wip > SETTINGS.wip_max ? "lt" : ""}">${wip}</b>/${SETTINGS.wip_max} en cours`);
-  if(onhold) seg.push(`<span class="muted">${onhold} en pause</span>`);
-  if(over) seg.push(`<a class="seg lt" onclick="setView('charge')">${over} jour(s) en surcharge</a>`);
-  const critRisk = STORE.chantiers.reduce((a, c) => a + openRisques(c).filter(r => crit(r) >= 15).length, 0);
-  if(critRisk) seg.push(`<a class="seg lt" onclick="setView('risques')">${critRisk} risque(s) critique(s)</a>`);
+  const critRisk = LIVE().reduce((a, c) => a + openRisques(c).filter(r => crit(r) >= 15).length, 0);
+  $("subtitle").textContent = `${LIVE().length} chantiers` + (onhold ? ` · ${onhold} en pause` : "");
+  // chips lisibles : couleur = sévérité (rouge = à traiter, neutre = contexte), icône pour le scan
+  const chip = (txt, o = {}) =>
+    `<span class="seg ${o.cls || ""}"${o.view ? ` onclick="setView('${o.view}')"` : ""}${o.title ? ` title="${esc(o.title)}"` : ""}>` +
+      (o.icon ? `<i class="seg-i">${o.icon}</i>` : "") + txt + `</span>`;
+  // 1) alertes (rouge), regroupées en tête → on voit d'un coup ce qui ne va pas
+  const alerts = [];
+  if(lateL) alerts.push(chip(`<b>${lateL}</b> livraison(s) en retard`, {icon: "✉", cls: "bad", view: "people"}));
+  if(lateT) alerts.push(chip(`<b>${lateT}</b> tâche(s) en retard`, {icon: "⏰", cls: "bad"}));
+  if(relances) alerts.push(chip(`<b>${relances}</b> relance(s) à faire`, {icon: "📞", cls: "bad", view: "people"}));
+  if(retL) alerts.push(chip(`<b>${retL}</b> retour(s) en retard`, {icon: "↩", cls: "bad"}));
+  if(over) alerts.push(chip(`<b>${over}</b> jour(s) en surcharge`, {icon: "⚡", cls: "bad", view: "charge"}));
+  if(critRisk) alerts.push(chip(`<b>${critRisk}</b> risque(s) critique(s)`, {icon: "⚠", cls: "bad", view: "risques"}));
+  if(wipLimit() && wip > wipLimit()) alerts.push(chip(`WIP <b>${wip}</b>/${wipLimit()}`, {cls: "bad", title: "Plus de chantiers en cours que la limite WIP"}));
+  // 2) contexte (neutre)
+  const status = [];
+  if(openL) status.push(chip(`<b>${openL}</b> livraison(s) attendue(s)`, {icon: "⌛", view: "people"}));
+  if(!wipLimit()) status.push(chip(`<b>${wip}</b> en cours`));
+  else if(wip <= wipLimit()) status.push(chip(`WIP <b>${wip}</b>/${wipLimit()} en cours`));
+  if(onhold) status.push(chip(`<b>${onhold}</b> en pause`, {icon: "⏸", cls: "soft"}));
+  // 3) chrono actif (action, distinct) en tête, puis alertes, puis contexte
+  let html = "";
   const act = activeSession();
-  if(act) seg.unshift(`<a class="seg run" onclick="mutate({op:'clock_stop'})" title="Chrono en cours — cliquer pour arrêter">⏱ ${esc(act.label)} (depuis ${act.debut}) — stop</a>`);
-  $("alert").innerHTML = seg.join("&nbsp;·&nbsp;");
+  if(act){ const lab = act.label.length > 36 ? act.label.slice(0, 35) + "…" : act.label;
+    html += `<a class="seg run" onclick="mutate({op:'clock_stop'})" title="Chrono en cours : ${esc(act.label)} (depuis ${act.debut}) — cliquer pour arrêter">⏱ ${esc(lab)} · ${act.debut} · stop</a>`; }
+  else { const last = lastEndedSession();   // rien en cours : proposer de reprendre le dernier chrono
+    if(last){ const lab = last.label.length > 32 ? last.label.slice(0, 31) + "…" : last.label;
+      html += `<a class="seg resume" onclick="resumeLast()" title="Reprendre le chronométrage : ${esc(last.label)}">▶ Reprendre · ${esc(lab)}</a>`; } }
+  if(!alerts.length) html += chip("Rien d'urgent", {icon: "✓", cls: "ok"});
+  $("alert").innerHTML = html + alerts.join("") + status.join("");
   renderNotif();
 }
 
@@ -579,25 +705,42 @@ function buildReminders(){
   rappelsAFaire(TODAY).forEach(r => {
     const late = r.freq === "ponctuel" && r.date && isLate(r.date);
     out.push({type: "routine", icon: late ? "⏰" : "🔁", label: r.label, sub: rappelMeta(r),
-              late, key: "rp:" + r.id, go: () => setView("planning")});
+              late, key: "rp:" + r.id, go: () => setView("planning"),
+              act: {lbl: "✓ Fait", title: "Marquer cette routine comme faite aujourd'hui",
+                    run: () => mutate({op: "toggle_rappel", id: r.id, date: TODAY})}});
   });
-  // tâches en retard (fin prévue déjà passée)
-  STORE.chantiers.forEach(c => lateTasks(c).forEach(t =>
+  // tâches en retard (fin prévue déjà passée) — seulement celles qu'on peut démarrer
+  // maintenant : les tâches en retard bloquées par un prédécesseur non fini sont masquées
+  // (on ne peut pas les faire tant que l'amont n'est pas terminé).
+  STORE.chantiers.forEach(c => actionableLateTasks(c).forEach(t =>
     out.push({type: "tache", icon: "⏰", label: t.label, sub: "tâche en retard · " + c.titre,
-              late: true, key: "lt:" + t.id, go: () => openChantier(c.id)})));
+              late: true, key: "lt:" + t.id, go: () => openChantier(c.id),
+              // déjà démarrée -> reprendre le chrono (ne pas réécrire start_date via start_tache) ;
+              // sinon la démarrer (start_tache ouvre le chrono et passe le chantier « En cours »).
+              act: t.start_date
+                ? {lbl: "▶ Reprendre", title: "Reprendre le chrono sur cette tâche",
+                   run: () => mutate({op: "clock_start", kind: "tache", chantier_id: c.id, tache_id: t.id})}
+                : {lbl: "▶ Démarrer", title: "Démarrer cette tâche (lance le chrono)",
+                   run: () => mutate({op: "start_tache", chantier_id: c.id, tache_id: t.id})}})));
   // relances à faire (hors chantiers en pause)
   STORE.chantiers.forEach(c => { if(c.hold) return; relancesDues(c).forEach(l =>
     out.push({type: "relance", icon: "📞", label: "Relancer " + l.personne, sub: l.quoi + " · " + c.titre,
-              key: "rl:" + l.id, go: () => setView("people")})); });
+              key: "rl:" + l.id, go: () => setView("people"),
+              act: {lbl: "📞 Relancé", title: "Marquer comme relancé aujourd'hui",
+                    run: () => mutate({op: "update_livrable", chantier_id: c.id, livrable_id: l.id, relance: true})}})); });
   // retours de recette en retard (hors chantiers en pause)
   STORE.chantiers.forEach(c => { if(c.hold) return; retoursLate(c).forEach(r =>
     out.push({type: "retour", icon: "↩️", label: r.quoi, sub: "retour en retard · " + c.titre,
-              late: true, key: "re:" + r.id, go: () => openChantier(c.id)})); });
+              late: true, key: "re:" + r.id, go: () => openChantier(c.id),
+              act: {lbl: "✓ Traité", title: "Marquer ce retour comme traité",
+                    run: () => mutate({op: "update_retour", chantier_id: c.id, iteration_id: r._it.id, retour_id: r.id, statut: "fait"})}})); });
   // chantiers en pause dont la date de reprise est arrivée → "à reprendre"
   STORE.chantiers.forEach(c => {
     if(c.hold && c.hold_until && c.hold_until <= TODAY)
       out.push({type: "resume", icon: "⏯️", label: "À reprendre : " + c.titre,
-                sub: "reprise prévue le " + fmt(c.hold_until), late: true, key: "hr:" + c.id, go: () => openChantier(c.id)});
+                sub: "reprise prévue le " + fmt(c.hold_until), late: true, key: "hr:" + c.id, go: () => openChantier(c.id),
+                act: {lbl: "⏯️ Reprendre", title: "Reprendre ce chantier (le remet dans la charge)",
+                      run: () => mutate({op: "set_hold", chantier_id: c.id, hold: false})}});
   });
   // revues de risque échues
   allRisques().forEach(r => {
@@ -637,10 +780,12 @@ function renderNotif(){
   if(!items.length){
     h += `<div class="notif-empty">Rien à signaler — tout est à jour 👍</div>`;
   } else {
-    h += items.map((it, i) => `<a class="notif-item${it.late ? " late" : ""}" onclick="notifGo(${i})">` +
+    h += items.map((it, i) => `<div class="notif-item${it.late ? " late" : ""}" onclick="notifGo(${i})" title="Ouvrir">` +
       `<span class="ni-ic">${it.icon}</span><span class="ni-tx">` +
       `<span class="ni-lib">${esc(it.label)}</span><span class="ni-sub">${esc(it.sub || "")}</span>` +
-      `</span></a>`).join("");
+      `</span>` +
+      (it.act ? `<button class="ni-act" title="${esc(it.act.title || it.act.lbl)}" onclick="event.stopPropagation();notifAct(${i})">${esc(it.act.lbl)}</button>` : "") +
+      `</div>`).join("");
   }
   list.innerHTML = h;
 }
@@ -648,6 +793,12 @@ function notifGo(i){
   const it = (window._reminders || [])[i]; if(!it) return;
   $("notifMenu").classList.remove("open");
   if(it.go) it.go();
+}
+// Traite un rappel sans quitter la cloche : l'op existante s'exécute, mutate() relit le
+// store et rappelle renderNotif → l'élément traité disparaît, le menu reste ouvert.
+function notifAct(i){
+  const it = (window._reminders || [])[i]; if(!it || !it.act) return;
+  it.act.run();
 }
 function enableDesktopNotifs(){
   if(!("Notification" in window)){ alert("Notifications bureau non supportées par ce navigateur."); return; }
@@ -688,18 +839,32 @@ function topPersAll(m){ return Object.entries(m).sort((a, b) => b[1] - a[1]).sli
 function chartBox(title, svg){ return `<div class="cardx"><div class="cardx-h">${title}</div><div class="cardx-b">${svg}</div></div>`; }
 const STATUT_COLOR = {todo: "var(--gray)", doing: "var(--blue)", block: "var(--red)", recette: "#8b5cf6", done: "var(--green)"};
 
+// Bandes repliables du tableau de bord — l'état de repli est mémorisé entre deux rendus.
+const DASH_OPEN = {perf: true, livr: true, evm: false, vis: true};
+function dband(key, title, inner, extra){
+  const open = DASH_OPEN[key] !== false;
+  return `<details class="dband" ${open ? "open" : ""} ontoggle="DASH_OPEN['${key}']=this.open">` +
+    `<summary class="dband-sum"><span class="dband-t">${title}</span>${extra ? `<span class="dband-x">${extra}</span>` : ""}</summary>` +
+    `<div class="dband-b">${inner}</div></details>`;
+}
+
 function hbar(rows, opts){   // barres horizontales [{label,value,color,disp}]
   opts = opts || {};
   if(!rows.length) return `<div class="empty">—</div>`;
   const max = Math.max(1, ...rows.map(r => r.value));
-  const labelW = opts.labelW || 150, barW = opts.barW || 210, rowH = 22, padT = 4;
-  const W = labelW + barW + 46, H = padT + rows.length * rowH + 6;
+  const labelW = opts.labelW || 150, barW = opts.barW || 210, rowH = 24, padT = 5;
+  // Gouttière de droite dimensionnée sur la valeur la plus longue (montants € inclus)
+  // pour que le libellé ne se fasse jamais rogner hors du SVG.
+  const gutter = Math.max(52, 13 + Math.max(0, ...rows.map(r => String(r.disp != null ? r.disp : r.value).length)) * 6);
+  const W = labelW + barW + gutter, H = padT + rows.length * rowH + 6;
   let g = `<svg width="${W}" height="${H}" class="hbar">`;
   rows.forEach((r, i) => {
-    const y = padT + i * rowH, w = Math.round((r.value / max) * barW);
-    g += `<text x="${labelW - 6}" y="${y + 14}" font-size="11" text-anchor="end" fill="var(--ink)">${esc(String(r.label).slice(0, 24))}</text>`;
-    g += `<rect x="${labelW}" y="${y + 4}" width="${Math.max(0, w)}" height="13" fill="${r.color || "var(--blue)"}"/>`;
-    g += `<text x="${labelW + Math.max(w, 0) + 5}" y="${y + 14}" font-size="10.5" fill="var(--muted)">${r.disp != null ? r.disp : r.value}</text>`;
+    const y = padT + i * rowH, w = Math.max(0, Math.round((r.value / max) * barW));
+    const disp = r.disp != null ? String(r.disp) : String(r.value);
+    g += `<text x="${labelW - 8}" y="${y + 15}" font-size="11" text-anchor="end" fill="var(--ink)">${esc(String(r.label).slice(0, 24))}</text>`;
+    g += `<rect x="${labelW}" y="${y + 5}" width="${barW}" height="13" rx="6.5" fill="var(--line-soft)"/>`;   // piste (fond)
+    g += `<rect x="${labelW}" y="${y + 5}" width="${Math.max(4, w)}" height="13" rx="6.5" fill="${r.color || "var(--blue)"}"><title>${esc(String(r.label))} — ${esc(disp)}</title></rect>`;
+    g += `<text x="${labelW + w + 7}" y="${y + 15}" font-size="10.5" fill="var(--muted)">${esc(disp)}</text>`;
   });
   return `<div class="scrollx">${g}</svg></div>`;
 }
@@ -713,43 +878,60 @@ function divbar(rows){   // barres divergentes [{label,days}] : days>0 retard (r
   rows.forEach((r, i) => {
     const y = padT + i * rowH, w = Math.round((Math.abs(r.days) / maxAbs) * half);
     g += `<text x="${labelW - 6}" y="${y + 14}" font-size="11" text-anchor="end" fill="var(--ink)">${esc(r.label.slice(0, 24))}</text>`;
-    if(r.days > 0) g += `<rect x="${mid}" y="${y + 4}" width="${w}" height="13" fill="var(--red)"/>`;
-    else g += `<rect x="${mid - w}" y="${y + 4}" width="${w}" height="13" fill="var(--green)"/>`;
+    if(r.days > 0) g += `<rect x="${mid}" y="${y + 4}" width="${Math.max(2, w)}" height="13" rx="3" fill="var(--red)"><title>${esc(r.label)} — retard ${r.days} j</title></rect>`;
+    else g += `<rect x="${mid - w}" y="${y + 4}" width="${Math.max(2, w)}" height="13" rx="3" fill="var(--green)"><title>${esc(r.label)} — marge ${-r.days} j</title></rect>`;
     g += `<text x="${r.days > 0 ? mid + w + 4 : mid - w - 4}" y="${y + 14}" font-size="10.5" fill="var(--muted)" text-anchor="${r.days > 0 ? "start" : "end"}">${r.days > 0 ? "+" + r.days + "j" : r.days + "j"}</text>`;
   });
   return `<div class="scrollx">${g}</svg></div><div class="legend"><span><i class="sq green"></i>marge (avance)</span><span><i class="sq red"></i>retard sur échéance</span></div>`;
 }
-function vbar(rows){   // barres verticales [{label,value}]
+function barTop(x, y, w, h, r){   // rect à coins SUPÉRIEURS arrondis (base plate sur l'axe)
+  r = Math.max(0, Math.min(r, w / 2, h));
+  return `M${x},${(y + h).toFixed(1)} V${(y + r).toFixed(1)} Q${x},${y} ${x + r},${y} H${(x + w - r).toFixed(1)} Q${x + w},${y} ${x + w},${(y + r).toFixed(1)} V${(y + h).toFixed(1)} Z`;
+}
+function vbar(rows, opts){   // barres verticales [{label,value,disp,color}]
+  opts = opts || {};
+  if(!rows.length) return `<div class="empty">—</div>`;
   const max = Math.max(1, ...rows.map(r => r.value));
-  const barW = 30, gap = 8, H = 130, padB = 24, padT = 10, padL = 18;
+  const barW = opts.barW || 30, gap = opts.gap != null ? opts.gap : 10, H = 140, padB = 26, padT = 14, padL = 18;
+  const col = opts.color || "var(--green)";
   const W = padL + rows.length * (barW + gap) + 8, plotH = H - padB - padT;
   const y = v => padT + plotH - (v / max) * plotH;
   let g = `<svg width="${W}" height="${H}" class="chart">`;
   rows.forEach((r, i) => {
-    const bx = padL + i * (barW + gap);
-    if(r.value > 0) g += `<rect x="${bx}" y="${y(r.value)}" width="${barW}" height="${y(0) - y(r.value)}" fill="var(--green)"/>`;
-    g += `<text x="${bx + barW / 2}" y="${y(r.value) - 3}" font-size="9" fill="var(--muted)" text-anchor="middle">${r.value || ""}</text>`;
-    g += `<text x="${bx + barW / 2}" y="${H - 8}" font-size="8" fill="var(--faint)" text-anchor="middle">${esc(r.label)}</text>`;
+    const bx = padL + i * (barW + gap), disp = r.disp != null ? String(r.disp) : String(r.value || "");
+    if(r.value > 0) g += `<path d="${barTop(bx, y(r.value), barW, y(0) - y(r.value), 4)}" fill="${r.color || col}"><title>${esc(String(r.label))} — ${esc(disp)}</title></path>`;
+    g += `<text x="${bx + barW / 2}" y="${y(r.value) - 4}" font-size="9" fill="var(--muted)" text-anchor="middle">${esc(r.value ? disp : "")}</text>`;
+    g += `<text x="${bx + barW / 2}" y="${H - 8}" font-size="8" fill="var(--faint)" text-anchor="middle">${esc(String(r.label))}</text>`;
   });
   return `<div class="scrollx">${g}</svg></div>`;
 }
 
-function donutChart(rows){   // [{label,value,color}]
+function donutChart(rows, opts){   // [{label,value,color}] · opts.fmt(v)->str, opts.center{big,small}
+  opts = opts || {};
   const total = rows.reduce((a, x) => a + x.value, 0);
   if(!total) return `<div class="empty">—</div>`;
-  const cx = 70, cy = 70, R = 54, Ri = 33;
+  const fmtv = opts.fmt || (v => String(v));
+  const single = rows.filter(x => x.value > 0).length === 1;   // une seule part = anneau plein
+  const cx = 70, cy = 70, R = 56, Ri = 34;
   let ang = -Math.PI / 2, seg = "";
   rows.forEach(x => {
     if(x.value <= 0) return;
+    if(single){   // 100 % : un arc SVG à 360° a ses extrémités confondues (ignoré par le navigateur) → anneau via <circle>
+      seg += `<circle cx="${cx}" cy="${cy}" r="${(R + Ri) / 2}" fill="none" stroke="${x.color}" stroke-width="${R - Ri}">` +
+        `<title>${esc(x.label)} : ${esc(fmtv(x.value))} (100%)</title></circle>`;
+      return;
+    }
     const a0 = ang, a1 = ang + (x.value / total) * 2 * Math.PI; ang = a1;
-    const lrg = (a1 - a0) > Math.PI ? 1 : 0;
+    const lrg = (a1 - a0) > Math.PI ? 1 : 0, pctv = Math.round(x.value / total * 100);
     const p = (rr, a) => `${(cx + rr * Math.cos(a)).toFixed(1)},${(cy + rr * Math.sin(a)).toFixed(1)}`;
-    seg += `<path d="M${p(R, a0)} A${R},${R} 0 ${lrg} 1 ${p(R, a1)} L${p(Ri, a1)} A${Ri},${Ri} 0 ${lrg} 0 ${p(Ri, a0)} Z" fill="${x.color}"><title>${esc(x.label)}: ${x.value}</title></path>`;
+    seg += `<path d="M${p(R, a0)} A${R},${R} 0 ${lrg} 1 ${p(R, a1)} L${p(Ri, a1)} A${Ri},${Ri} 0 ${lrg} 0 ${p(Ri, a0)} Z" fill="${x.color}" ` +
+      `${single ? "" : `stroke="var(--canvas)" stroke-width="2" stroke-linejoin="round"`}><title>${esc(x.label)} : ${esc(fmtv(x.value))} (${pctv}%)</title></path>`;
   });
-  const lg = rows.filter(x => x.value > 0).map(x => `<span class="lg"><i style="background:${x.color}"></i>${esc(x.label)} <b>${x.value}</b></span>`).join("");
+  const big = String(opts.center ? opts.center.big : total), small = opts.center ? opts.center.small : "total";
+  const lg = rows.filter(x => x.value > 0).map(x => `<span class="lg"><i style="background:${x.color}"></i>${esc(x.label)} <b>${esc(fmtv(x.value))}</b></span>`).join("");
   return `<div class="donutwrap"><svg width="140" height="140" viewBox="0 0 140 140">${seg}` +
-    `<text x="70" y="68" text-anchor="middle" font-size="22" font-weight="700" fill="var(--ink)">${total}</text>` +
-    `<text x="70" y="84" text-anchor="middle" font-size="9" fill="var(--muted)">total</text></svg><div class="dlegend">${lg}</div></div>`;
+    `<text x="70" y="68" text-anchor="middle" font-size="${big.length > 5 ? 15 : 21}" font-weight="700" fill="var(--ink)">${esc(big)}</text>` +
+    `<text x="70" y="84" text-anchor="middle" font-size="9" fill="var(--muted)">${esc(small)}</text></svg><div class="dlegend">${lg}</div></div>`;
 }
 
 function thresholdBar(value, limit, max, unit, over){   // jauge linéaire avec repère de limite
@@ -829,7 +1011,7 @@ function bubbleMap(pts){   // carte des risques : x=jours avant échéance, y=av
 }
 
 function renderDashboard(){
-  const chs = STORE.chantiers;
+  const chs = LIVE();   // tableau de bord : exclut les chantiers en pause
   const scheds = chs.map(c => ({c, S: computeSchedule(c)}));
   const active = chs.filter(c => colOf(c) !== "done");
   // A. Portefeuille
@@ -842,7 +1024,7 @@ function renderDashboard(){
     if(c.hold) return;   // chantier en pause : hors métriques de retard
     if(colOf(c) !== "done" && c.echeance && S.fend > c.echeance) enRetard++;
     if(c.baseline){ const g = daysBetween(c.baseline.project_end, S.fend); if(g > 0) retardCumule += g; }
-    lateTtl += c.taches.filter(t => !t.done && S.sched[t.id] && S.sched[t.id].endDate < TODAY).length;
+    lateTtl += c.taches.filter(t => taskLate(c, S, t.id)).length;
     if(colOf(c) !== "done" && c.echeance){ const j = daysBetween(TODAY, c.echeance); if(j >= 0 && j <= 7) ech7.push(c.titre); }
     c.taches.forEach(t => { if(t.is_milestone && !t.done && S.fc[t.id]){ const d = S.fc[t.id].ffDate; if(d >= TODAY && (!jalon || d < jalon.date)) jalon = {date: d, label: t.label}; } });
   });
@@ -919,70 +1101,83 @@ function renderDashboard(){
       `<div><b>SV</b> / <b>CV</b> (en €) : <b class="g">positif</b> = avance / économie ; <b class="b">négatif</b> = retard / dépassement.</div>` +
       `<div><b>EAC</b> (coût final estimé) : bon s'il reste ≤ budget, c.-à-d. <b>VAC</b> = BAC − EAC <b class="g">≥ 0</b>.</div>` +
       `<div><b>Retards, tâches/livrables en retard, relances, risques critiques</b> : objectif <b class="g">0</b> ; toute valeur &gt; 0 passe en <b class="b">rouge</b>.</div>` +
-      `<div><b>WIP</b> : chantiers en parallèle — bon <b class="g">≤ ${SETTINGS.wip_max}</b> (au-delà : dispersion).</div>` +
+      (wipLimit() ? `<div><b>WIP</b> : chantiers en parallèle — bon <b class="g">≤ ${wipLimit()}</b> (au-delà : dispersion).</div>` : `<div><b>WIP</b> : chantiers en parallèle — <b class="g">aucune limite</b> définie.</div>`) +
       `<div class="muted">Survole un indicateur marqué ⓘ pour son interprétation détaillée.</div>` +
     `</div></div>`;
 
-  // ===== Bande 1 — Performance & délais =====
-  h += `<div class="dlbl">Performance &amp; délais</div><div class="kband">`;
-  h += dkpi("Avancement moyen", avg + " %", active.length + " chantiers actifs", "", "", "Moyenne d'avancement (tâches faites) des chantiers actifs. Indicatif, pas de seuil bon/mauvais.");
-  h += dkpi("WIP — en cours", by.doing + "/" + SETTINGS.wip_max, by.doing > SETTINGS.wip_max ? "limite dépassée" : "dans la limite", by.doing > SETTINGS.wip_max ? "bad" : "good", "", "Chantiers menés en parallèle vs la limite. Bon ≤ " + SETTINGS.wip_max + " ; au-delà = dispersion, tout avance plus lentement.");
+  // ===== Bande 1 — Performance & délais (repliable) =====
+  let b1 = `<div class="kband">`;
+  b1 += dkpi("Avancement moyen", avg + " %", active.length + " chantiers actifs", "", "", "Moyenne d'avancement (tâches faites) des chantiers actifs. Indicatif, pas de seuil bon/mauvais.");
+  const wlim = wipLimit();
+  b1 += dkpi("WIP — en cours", wlim ? (by.doing + "/" + wlim) : String(by.doing), wlim ? (by.doing > wlim ? "limite dépassée" : "dans la limite") : "illimité", wlim && by.doing > wlim ? "bad" : "good", "", wlim ? ("Chantiers menés en parallèle vs la limite. Bon ≤ " + wlim + " ; au-delà = dispersion, tout avance plus lentement.") : "Chantiers menés en parallèle. Aucune limite WIP définie (réglable dans Charge).");
   if(evmRows.length){
-    h += dkpi("SPI — délai", fmtIdx(pSPI), (pSV >= 0 ? "+" : "") + fmtEur(pSV), idxCls(pSPI), "", "Indice de performance délai (EV/PV). ≥1 = à l'heure ou en avance · 0,90–1 = léger retard · <0,90 = en retard. Sous-texte = SV, l'écart en €.");
-    h += dkpi("CPI — coût", fmtIdx(pCPI), pCV != null ? (pCV >= 0 ? "+" : "") + fmtEur(pCV) : "taux ?", idxCls(pCPI), "", "Indice de performance coût (EV/AC). ≥1 = sous budget · 0,90–1 = léger dépassement · <0,90 = dépassement. Requiert un taux journalier (réglages Charge).");
-    h += dkpi("Coût final (EAC)", fmtEur(pEAC), pVAC != null ? "VAC " + (pVAC >= 0 ? "+" : "") + fmtEur(pVAC) : "—", pVAC != null ? (pVAC >= 0 ? "good" : "bad") : "", "", "Coût final estimé du portefeuille (BAC/CPI). Bon s'il reste ≤ budget : VAC ≥ 0 (vert), VAC < 0 = dépassement prévu (rouge).");
+    b1 += dkpi("SPI — délai", fmtIdx(pSPI), (pSV >= 0 ? "+" : "") + fmtEur(pSV), idxCls(pSPI), "", "Indice de performance délai (EV/PV). ≥1 = à l'heure ou en avance · 0,90–1 = léger retard · <0,90 = en retard. Sous-texte = SV, l'écart en €.");
+    b1 += dkpi("CPI — coût", fmtIdx(pCPI), pCV != null ? (pCV >= 0 ? "+" : "") + fmtEur(pCV) : "taux ?", idxCls(pCPI), "", "Indice de performance coût (EV/AC). ≥1 = sous budget · 0,90–1 = léger dépassement · <0,90 = dépassement. Requiert un taux journalier (réglages Charge).");
+    b1 += dkpi("Coût final (EAC)", fmtEur(pEAC), pVAC != null ? "VAC " + (pVAC >= 0 ? "+" : "") + fmtEur(pVAC) : "—", pVAC != null ? (pVAC >= 0 ? "good" : "bad") : "", "", "Coût final estimé du portefeuille (BAC/CPI). Bon s'il reste ≤ budget : VAC ≥ 0 (vert), VAC < 0 = dépassement prévu (rouge).");
   }
-  h += dkpi("Retard cumulé", retardCumule + " j", "Σ glissements / réf.", retardCumule ? "bad" : "good", "", "Somme des glissements de fin vs référence figée, tous chantiers. Objectif 0 j. Nécessite une référence figée.");
-  h += dkpi("Tâches en retard", lateTtl, "à rattraper", lateTtl ? "bad" : "good", "", "Tâches/jalons non finis dont la fin PRÉVUE est déjà passée. Objectif 0.");
-  h += dkpi("Échéances < 7 j", ech7.length, ech7.slice(0, 2).join(", ") || "rien d'imminent", ech7.length ? "bad" : "", "", "Chantiers dont l'échéance tombe dans les 7 prochains jours — à surveiller de près.");
-  h += dkpi("Prochain jalon", jalon ? fmt(jalon.date) : "—", jalon ? jalon.label.slice(0, 22) : "aucun", "", "", "Prochain jalon non atteint, toutes échéances confondues. Informatif.");
-  h += dkpi("Risques critiques", riskCrit, riskAvere + " avéré(s)", riskCrit ? "bad" : "good", "setView('risques')", "Risques ouverts de criticité ≥ 15 (proba × gravité). Objectif 0. Clic → registre des risques.");
-  h += `</div>`;
+  b1 += dkpi("Retard cumulé", retardCumule + " j", "Σ glissements / réf.", retardCumule ? "bad" : "good", "", "Somme des glissements de fin vs référence figée, tous chantiers. Objectif 0 j. Nécessite une référence figée.");
+  b1 += dkpi("Tâches en retard", lateTtl, "à rattraper", lateTtl ? "bad" : "good", "", "Tâches/jalons non finis dont la fin PRÉVUE est déjà passée. Objectif 0.");
+  b1 += dkpi("Échéances < 7 j", ech7.length, ech7.slice(0, 2).join(", ") || "rien d'imminent", ech7.length ? "bad" : "", "", "Chantiers dont l'échéance tombe dans les 7 prochains jours — à surveiller de près.");
+  b1 += dkpi("Prochain jalon", jalon ? fmt(jalon.date) : "—", jalon ? jalon.label.slice(0, 22) : "aucun", "", "", "Prochain jalon non atteint, toutes échéances confondues. Informatif.");
+  b1 += dkpi("Risques critiques", riskCrit, riskAvere + " avéré(s)", riskCrit ? "bad" : "good", "setView('risques')", "Risques ouverts de criticité ≥ 15 (proba × gravité). Objectif 0. Clic → registre des risques.");
+  b1 += `</div>`;
+  h += dband("perf", "Performance &amp; délais", b1);
 
   // ===== Bande 2 — Livraison & activité =====
-  h += `<div class="dlbl">Livraison &amp; activité</div><div class="kband">`;
-  h += dkpi("Livrables attendus", livOpen, livLate + " en retard", livLate ? "bad" : "", "setView('people')", "Livrables encore dûs ; le sous-texte compte ceux en retard (échéance passée). Rouge dès qu'un est en retard.");
-  h += dkpi("Relances à faire", relances, "depuis " + SETTINGS.relance_jours + " j+", relances ? "bad" : "good", "setView('people')", "Livrables en attente depuis plus de " + SETTINGS.relance_jours + " jours → à relancer. Objectif 0.");
-  h += dkpi("Retours ouverts", retOpen, retLate + " en retard", retLate ? "bad" : "", "", "Retours de recette non traités ; sous-texte = ceux en retard. Objectif 0.");
-  h += dkpi("En recette", by.recette, iterOpen + " itér. ouverte(s)", "", "", "Chantiers en phase de recette, et nombre d'itérations ouvertes. Informatif.");
+  let b2 = `<div class="kband">`;
+  b2 += dkpi("Livrables attendus", livOpen, livLate + " en retard", livLate ? "bad" : "", "setView('people')", "Livrables encore dûs ; le sous-texte compte ceux en retard (échéance passée). Rouge dès qu'un est en retard.");
+  b2 += dkpi("Relances à faire", relances, "échéance dépassée", relances ? "bad" : "good", "setView('people')", "Livrables dont l'échéance est passée et non encore livrés → à relancer (puis re-suggéré tous les " + SETTINGS.relance_jours + " j). Tant que la date attendue n'est pas dépassée, aucune relance. Objectif 0.");
+  b2 += dkpi("Retours ouverts", retOpen, retLate + " en retard", retLate ? "bad" : "", "", "Retours de recette non traités ; sous-texte = ceux en retard. Objectif 0.");
+  b2 += dkpi("En recette", by.recette, iterOpen + " itér. ouverte(s)", "", "", "Chantiers en phase de recette, et nombre d'itérations ouvertes. Informatif.");
   const recT = recetteMin(null);
-  h += dkpi("Temps recette", recT ? fmtDur(recT) : "—", "chronométré, tous chantiers", recT ? "" : "", "", "Temps total chronométré sur la recette (bouton « Chronométrer la recette » dans la section Recette d'un chantier). Indicatif.");
-  h += dkpi("Tâches en cours", enCours, "démarrées, non finies", "", "", "Tâches démarrées et pas encore terminées (hors chantiers en pause). Informatif — à recouper avec le WIP.");
-  h += dkpi("Temps de cycle", cycleMoy + " j", cycles.length + " mesurée(s)", "", "", "Durée réelle moyenne d'une tâche (début réel → fin réelle). Plus c'est court, plus le flux est fluide.");
-  h += dkpi("Terminées (7 j)", done7, done30 + " sur 30 j", "good", "", "Débit récent : tâches terminées sur 7 et 30 jours. Plus c'est haut, mieux c'est.");
-  h += dkpi("Ont traîné", traineuses, "cycle ≫ planifié", traineuses ? "bad" : "good", "", "Tâches dont le cycle réel dépasse nettement la durée planifiée (×1,5 et ≥ 2 j). Objectif 0 — pointe les estimations à revoir.");
-  h += dkpi("Sans échéance", sansEch, "chantiers actifs", sansEch ? "bad" : "good", "", "Chantiers actifs sans date d'échéance → impossible de mesurer leur retard. Objectif 0.");
-  h += dkpi("Sans référence", sansRef, "chantiers actifs", sansRef ? "" : "good", "", "Chantiers actifs sans planning de référence figé → pas de mesure de dérive (SV, retard cumulé). À figer.");
-  h += `</div>`;
+  b2 += dkpi("Temps recette", recT ? fmtDur(recT) : "—", "chronométré, tous chantiers", recT ? "" : "", "", "Temps total chronométré sur la recette (bouton « Chronométrer la recette » dans la section Recette d'un chantier). Indicatif.");
+  // Coût main-d'œuvre déjà engagé sur TOUT le portefeuille (pas seulement les chantiers budgétés) :
+  // temps chronométré valorisé au taux horaire. Indépendant du BAC.
+  const mainCost = LIVE().reduce((a, c) => a + eurMin(chantierMin(c.id)), 0);
+  const tauxSet = !!(+SETTINGS.taux_jour);
+  b2 += dkpi("Coût main-d'œuvre", fmtEur(mainCost), fmtEur(tauxHeure()) + "/h" + (tauxSet ? "" : " (défaut)"), "", "setView('charge')", "Coût réel de main-d'œuvre déjà engagé sur TOUS les chantiers = temps chronométré valorisé au taux horaire (taux journalier / heures facturables, réglé dans Charge ; 15 €/h par défaut). Indépendant du budget — visible même sans BAC.");
+  b2 += dkpi("Tâches en cours", enCours, "démarrées, non finies", "", "", "Tâches démarrées et pas encore terminées (hors chantiers en pause). Informatif — à recouper avec le WIP.");
+  b2 += dkpi("Temps de cycle", cycleMoy + " j", cycles.length + " mesurée(s)", "", "", "Durée réelle moyenne d'une tâche (début réel → fin réelle). Plus c'est court, plus le flux est fluide.");
+  b2 += dkpi("Terminées (7 j)", done7, done30 + " sur 30 j", "good", "", "Débit récent : tâches terminées sur 7 et 30 jours. Plus c'est haut, mieux c'est.");
+  b2 += dkpi("Ont traîné", traineuses, "cycle ≫ planifié", traineuses ? "bad" : "good", "", "Tâches dont le cycle réel dépasse nettement la durée planifiée (×1,5 et ≥ 2 j). Objectif 0 — pointe les estimations à revoir.");
+  b2 += dkpi("Sans échéance", sansEch, "chantiers actifs", sansEch ? "bad" : "good", "", "Chantiers actifs sans date d'échéance → impossible de mesurer leur retard. Objectif 0.");
+  b2 += dkpi("Sans référence", sansRef, "chantiers actifs", sansRef ? "" : "good", "", "Chantiers actifs sans planning de référence figé → pas de mesure de dérive (SV, retard cumulé). À figer.");
+  b2 += `</div>`;
+  h += dband("livr", "Livraison &amp; activité", b2);
 
   // ===== Détail EVM (€) si budgété =====
   if(evmRows.length){
-    h += `<div class="dlbl">Valeur acquise (EVM) — détail</div><div class="kband">`;
-    h += dkpi("Budget total (BAC)", fmtEur(pBAC), evmRows.length + " budgété(s)", "", "", "Budget à l'achèvement — somme des budgets saisis sur les chantiers.");
-    h += dkpi("Valeur acquise (EV)", fmtEur(pEV), fmtPctw(pBAC ? pEV / pBAC : null) + " du budget", "", "", "Earned Value : budget correspondant au travail RÉELLEMENT fait (fait = 100 %, en cours = 50 %).");
-    h += dkpi("Valeur planifiée (PV)", fmtEur(pPV), fmtPctw(pBAC ? pPV / pBAC : null) + " prévu à date", "", "", "Planned Value : budget qui DEVRAIT être consommé à aujourd'hui selon le planning. EV vs PV → avance / retard.");
-    h += dkpi("Coût réel (AC)", acOn ? fmtEur(pAC) : "—", acOn ? "temps chrono × taux" : "définis un taux/jour", "", "", "Actual Cost : coût réel main-d'œuvre = temps chronométré (jours-personnes) × taux journalier. EV vs AC → sous / sur budget.");
-    h += dkpi("Reste à dépenser (ETC)", (pEAC != null && acOn) ? fmtEur(pEAC - pAC) : "—", "estimé", "", "", "Estimate To Complete : ce qu'il reste à dépenser pour finir, au rythme de coût actuel (EAC − AC).");
-    h += `</div>`;
+    let be = `<div class="kband">`;
+    be += dkpi("Budget total (BAC)", fmtEur(pBAC), evmRows.length + " budgété(s)", "", "", "Budget à l'achèvement — somme des budgets saisis sur les chantiers.");
+    be += dkpi("Valeur acquise (EV)", fmtEur(pEV), fmtPctw(pBAC ? pEV / pBAC : null) + " du budget", "", "", "Earned Value : budget correspondant au travail RÉELLEMENT fait (fait = 100 %, en cours = 50 %).");
+    be += dkpi("Valeur planifiée (PV)", fmtEur(pPV), fmtPctw(pBAC ? pPV / pBAC : null) + " prévu à date", "", "", "Planned Value : budget qui DEVRAIT être consommé à aujourd'hui selon le planning. EV vs PV → avance / retard.");
+    be += dkpi("Coût réel (AC)", acOn ? fmtEur(pAC) : "—", acOn ? "temps chrono × taux" : "définis un taux/jour", "", "", "Actual Cost : coût réel main-d'œuvre = temps chronométré (jours-personnes) × taux journalier. EV vs AC → sous / sur budget.");
+    be += dkpi("Reste à dépenser (ETC)", (pEAC != null && acOn) ? fmtEur(pEAC - pAC) : "—", "estimé", "", "", "Estimate To Complete : ce qu'il reste à dépenser pour finir, au rythme de coût actuel (EAC − AC).");
+    be += `</div>`;
+    h += dband("evm", "Valeur acquise (EVM) — détail", be);
   }
 
-  // ===== Visuels — grands graphes souples puis grille dense =====
-  h += `<div class="dlbl">Visuels</div>`;
-  h += `<div class="dash-row">` +
+  // ===== Visuels — grands graphes souples puis grille dense (repliable) =====
+  let bv = `<div class="dash-row">` +
     chartBox("Risques — urgence × avancement", bubbleMap(bubblePts)) +
     chartBox("Marge / retard vs échéance (j)", divbar(retardRows)) +
     chartBox("Charge — calendrier (lim. " + cd.cap + ")", cd.days.length ? heatmapCalendar(cd) : `<div class="empty">—</div>`) + `</div>`;
-  h += `<div class="dgrid">`;
-  h += chartBox("Répartition par statut", donutChart(statutRows));
-  h += chartBox("Avancement / chantier", hbar(avancRows, {labelW: 120, barW: 110}));
-  h += chartBox("Livrables / personne", hbar(persRows, {labelW: 120, barW: 110}));
-  h += chartBox("Retours de recette", donutChart(retRows));
-  h += chartBox("Terminées / semaine", vbar(weekRows));
-  h += chartBox("% chemin critique", `<div class="center">${donut(critPct)}<div class="muted small">${critN}/${taskN} tâches</div></div>`);
-  h += chartBox("Taux d'occupation", thresholdBar(occ, 100, Math.max(occ, 100), "%"));
-  h += chartBox("Pic de charge", thresholdBar(peak, cd.cap, Math.max(peak, cd.cap), " tâ./j"));
-  h += chartBox("Jours en surcharge", thresholdBar(cd.overload, 0, Math.max(cd.days.length, 1), " j", cd.overload > 0));
-  h += `</div>`;
+  bv += `<div class="dgrid">`;
+  bv += chartBox("Répartition par statut", donutChart(statutRows));
+  bv += chartBox("Avancement / chantier", hbar(avancRows, {labelW: 120, barW: 110}));
+  const coutRows = LIVE().map(c => ({t: c.titre, m: chantierMin(c.id)})).filter(r => r.m > 0)
+    .sort((a, b) => b.m - a.m).slice(0, 8)
+    .map(r => ({label: r.t, value: eurMin(r.m), disp: fmtEur(eurMin(r.m)), color: "var(--blue)"}));
+  if(coutRows.length) bv += chartBox("Coût main-d'œuvre / chantier", hbar(coutRows, {labelW: 120, barW: 110}));
+  bv += chartBox("Livrables / personne", hbar(persRows, {labelW: 120, barW: 110}));
+  bv += chartBox("Retours de recette", donutChart(retRows));
+  bv += chartBox("Terminées / semaine", vbar(weekRows));
+  bv += chartBox("% chemin critique", `<div class="center">${donut(critPct)}<div class="muted small">${critN}/${taskN} tâches</div></div>`);
+  bv += chartBox("Taux d'occupation", thresholdBar(occ, 100, Math.max(occ, 100), "%"));
+  bv += chartBox("Pic de charge", thresholdBar(peak, cd.cap, Math.max(peak, cd.cap), " tâ./j"));
+  bv += chartBox("Jours en surcharge", thresholdBar(cd.overload, 0, Math.max(cd.days.length, 1), " j", cd.overload > 0));
+  bv += `</div>`;
+  h += dband("vis", "Visuels", bv);
 
   $("dash").innerHTML = h;
 }
@@ -991,7 +1186,7 @@ function renderCharge(){
   const cd = chargeData();
   let h = `<div class="settings">` +
     fldNum("Capacité / jour", "capacite_jour", 1) +
-    fldNum("Max chantiers en cours", "wip_max", 1) +
+    fldNum("Max chantiers en cours (0 = illimité)", "wip_max", 0) +
     fldNum("Relance après (j)", "relance_jours", 1) +
     fldNum("Taux journalier (€)", "taux_jour", 0) +
     fldNum("Heures facturables/j", "heures_jour", 1) +
@@ -1068,12 +1263,26 @@ function chargeChart(cd){
 function renderBoard(){
   const b = $("board"); b.innerHTML = "";
   COLS.forEach(col => {
-    const cards = STORE.chantiers.filter(c => colOf(c) === col.key)
-                       .sort((a, c) => (a.ordre || 0) - (c.ordre || 0));
+    const isDone = col.key === "done";
+    const isTodo = col.key === "todo";
+    let cards;
+    if(isTodo){        // À faire = todos actifs + TOUS les chantiers en pause, rangés selon TODO_SORT
+      cards = sortTodo(STORE.chantiers.filter(c => c.hold || colOf(c) === "todo"));
+    } else if(isDone){ // Terminé : du plus récemment terminé au plus ancien
+      cards = LIVE().filter(c => colOf(c) === col.key)
+        .sort((a, c) => (lastDoneDate(c) < lastDoneDate(a) ? -1 : lastDoneDate(c) > lastDoneDate(a) ? 1 : (a.ordre || 0) - (c.ordre || 0)));
+    } else {           // autres colonnes : ordre manuel du board
+      cards = LIVE().filter(c => colOf(c) === col.key).sort((a, c) => (a.ordre || 0) - (c.ordre || 0));
+    }
+    const total = cards.length;
+    // À faire / Terminé repliés : on ne montre que les N premiers ; un bouton déplie le reste.
+    const preview = isDone ? DONE_PREVIEW : TODO_PREVIEW;
+    const collapsed = ((isDone && !SHOW_ALL_DONE) || (isTodo && TODO_COLLAPSED)) && total > preview;
+    const visible = collapsed ? cards.slice(0, preview) : cards;
     const el = document.createElement("div");
     el.className = "col"; el.dataset.col = col.key;
     const autoNote = col.key === "block" ? `<span class="auto">auto</span>` : "";
-    el.innerHTML = `<div class="col-h s-${col.key}"><span class="nm">${col.label}</span>${autoNote}<span class="ct">${cards.length}</span></div>`;
+    el.innerHTML = `<div class="col-h s-${col.key}"><span class="nm">${col.label}</span>${autoNote}<span class="ct">${total}</span></div>`;
     const body = document.createElement("div"); body.className = "col-body";
     if(col.key !== "block"){   // la colonne Bloqué est calculée → pas une cible de drop
       el.addEventListener("dragover", e => { e.preventDefault(); el.classList.add("over"); });
@@ -1084,8 +1293,15 @@ function renderBoard(){
         if(c && c.statut !== col.key) mutate({op: "move_chantier", id, statut: col.key});
       });
     }
-    if(!cards.length) body.innerHTML = `<div class="empty">—</div>`;
-    cards.forEach(c => {
+    if(isTodo && total){   // barre de tri : Échéance / Avancement
+      const bar = document.createElement("div"); bar.className = "todo-tools";
+      bar.innerHTML = `<span class="tt-lbl">Trier</span>` +
+        `<button class="tt-seg ${TODO_SORT === "echeance" ? "on" : ""}" onclick="event.stopPropagation();TODO_SORT='echeance';renderBoard()">Échéance</button>` +
+        `<button class="tt-seg ${TODO_SORT === "avancement" ? "on" : ""}" onclick="event.stopPropagation();TODO_SORT='avancement';renderBoard()">Avancement</button>`;
+      body.appendChild(bar);
+    }
+    if(!visible.length){ const e = document.createElement("div"); e.className = "empty"; e.textContent = "—"; body.appendChild(e); }
+    visible.forEach(c => {
       const open = openAtt(c), late = lateAtt(c);
       const card = document.createElement("div");
       card.className = `card p-${c.prio}${c.hold ? " on-hold" : ""}`;
@@ -1120,15 +1336,24 @@ function renderBoard(){
       if(c.cdc){ const sc = CDC_ST[c.cdc.statut] || CDC_ST.brouillon;
         bdg.push(`<span class="bdg b-cdc ${sc.cls}">📄 CdC ${sc.lbl}</span>`); }
       if(bdg.length) h += `<div class="c-badges">${bdg.join("")}</div>`;
+      if(c.hold) h += `<div class="c-actions"><button class="btn sm" title="Reprendre ce chantier (le remet dans la charge)" onclick="event.stopPropagation();mutate({op:'set_hold',chantier_id:'${c.id}',hold:false})">▶ Reprendre</button></div>`;
       card.innerHTML = h; body.appendChild(card);
     });
+    if((isDone || isTodo) && total > preview){   // bouton replier / déplier (Terminé & À faire)
+      const tg = document.createElement("button");
+      tg.className = "done-toggle";
+      const expanded = isDone ? SHOW_ALL_DONE : !TODO_COLLAPSED;
+      tg.textContent = expanded ? "▲ Réduire" : `▼ Voir tout (${total})`;
+      tg.onclick = e => { e.stopPropagation(); if(isDone) SHOW_ALL_DONE = !SHOW_ALL_DONE; else TODO_COLLAPSED = !TODO_COLLAPSED; renderBoard(); };
+      body.appendChild(tg);
+    }
     el.appendChild(body); b.appendChild(el);
   });
 }
 
 function renderPeople(){
   const map = {};
-  STORE.chantiers.forEach(c => c.livrables.forEach(l => {
+  LIVE().forEach(c => c.livrables.forEach(l => {
     const ct = contactById(l.contact_id);
     const key = ct ? ct.id : "__none__";
     (map[key] = map[key] || {id: ct ? ct.id : null, nom: ct ? ct.nom : ((l.personne || "").trim() || "(personne non renseignée)"),
@@ -1159,7 +1384,7 @@ function renderPeople(){
 function peopleStats(){
   const st = {};
   STORE.contacts.forEach(c => { st[c.id] = {id: c.id, nom: c.nom, role: c.role || "", moi: !!c.moi, total: 0, open: 0}; });
-  STORE.chantiers.forEach(c => c.livrables.forEach(l => {
+  LIVE().forEach(c => c.livrables.forEach(l => {
     const s = st[l.contact_id]; if(!s) return;
     s.total++; if(livPending(l)) s.open++;
   }));
@@ -1210,6 +1435,92 @@ function removePerson(id, nom, total){
     ? `« ${nom} » a ${total} livrable(s) — ils deviendront « non assignés ». Supprimer ?\n(astuce : « Fusionner » conserve les livrables sur une autre personne.)`
     : `Supprimer « ${nom} » ?`;
   if(confirm(msg)) mutate({op: "remove_contact", id});
+}
+
+// ---- Absences (congés / RTT / fériés) ------------------------------------
+// Poser une absence retire ses jours du calendrier de planning : le CPM les
+// enjambe (addUnits/workOffset), donc toutes les fins de tâches situées après
+// glissent d'autant. L'écart avec la référence figée (baseline) reste visible
+// sur le Gantt — c'est exactement le décalage que les congés provoquent.
+const ABS_TYPES = {conge: "Congés", rtt: "RTT", ferie: "Férié", recup: "Récupération",
+                   formation: "Formation", maladie: "Arrêt maladie", autre: "Absence"};
+const ABSENCES = () => STORE.absences || [];
+function absJours(a){                 // jours ouvrés (hors week-end) couverts par la période
+  let d = a.debut, n = 0, g = 0;
+  while(d <= a.fin && g++ < 400){ if(!isWeekend(dparse(d))) n++; d = addDays(d, 1); }
+  return n;
+}
+function renderAbsences(){
+  const moi = STORE.contacts.find(c => c.moi)?.id || null;
+  const list = ABSENCES().slice().sort((a, b) => a.debut < b.debut ? -1 : 1);
+  const an = TODAY.slice(0, 4);
+  const items = chargeData().items;   // tâches non finies + fenêtre prévisionnelle (un seul calcul)
+
+  const poses = list.filter(a => a.type !== "ferie" && absBlocksPlan(a, moi) && a.debut.slice(0, 4) === an);
+  const nbJours = poses.reduce((s, a) => s + absJours(a), 0);
+  const aVenir = list.filter(a => a.fin >= TODAY);
+  const prochaine = aVenir[0];
+
+  let h = `<div class="ch-h">Congés &amp; absences` +
+    `<button class="btn sm primary" onclick="addAbsence()">+ Poser une absence</button>` +
+    `<button class="btn sm" onclick="importFeries()">Importer les fériés ${an}</button></div>`;
+  h += `<div class="people-hint">Les jours posés sortent du calendrier : le planning les enjambe et les échéances calculées reculent d'autant. ` +
+       `Une absence rattachée à quelqu'un d'autre est <b>informative</b> — sans affectation des tâches, elle ne décale rien.</div>`;
+
+  h += `<div class="abs-kpis">` +
+    `<div class="abs-kpi"><b>${nbJours}</b><span>jour${nbJours > 1 ? "s" : ""} posé${nbJours > 1 ? "s" : ""} en ${an}</span></div>` +
+    `<div class="abs-kpi"><b>${prochaine ? fmtShort(prochaine.debut) : "—"}</b><span>${prochaine ? "prochaine : " + esc(prochaine.label) : "rien de prévu"}</span></div>` +
+    `<div class="abs-kpi"><b>${OFF.size}</b><span>jours hors planning</span></div></div>`;
+
+  h += `<div class="abs-form">` +
+    `<label>Du <input type="date" id="absDebut" value="${TODAY}"></label>` +
+    `<label>au <input type="date" id="absFin"></label>` +
+    `<label>Type <select id="absType">` +
+      Object.entries(ABS_TYPES).filter(([k]) => k !== "ferie")
+        .map(([k, v]) => `<option value="${k}">${v}</option>`).join("") + `</select></label>` +
+    `<label>Libellé <input id="absLabel" placeholder="optionnel"></label>` +
+    `<label>Qui <select id="absQui"><option value="">Moi</option>` +
+      STORE.contacts.filter(c => !c.moi).map(c => `<option value="${c.id}">${esc(c.nom)}</option>`).join("") +
+      `</select></label>` +
+    `<button class="btn sm primary" onclick="submitAbsence()">Poser</button></div>`;
+
+  if(!list.length){ $("absences").innerHTML = h + `<div class="empty">Aucune absence enregistrée. Commence par importer les jours fériés, puis pose tes congés.</div>`; return; }
+
+  h += `<table class="ptable abs-table"><thead><tr><th>Période</th><th>Type</th><th>Libellé</th><th>Jours</th><th>Qui</th><th>Impact planning</th><th></th></tr></thead><tbody>`;
+  list.forEach(a => {
+    const passe = a.fin < TODAY;
+    const pese = absBlocksPlan(a, moi);
+    const touchees = pese && !passe ? items.filter(i => i.start <= a.fin && a.debut < i.end) : [];
+    const chs = [...new Set(touchees.map(i => i.chantier))];
+    const qui = a.contact_id ? (contactById(a.contact_id)?.nom || "?") : "Moi";
+    const per = a.debut === a.fin ? fmt(a.debut) : `${fmt(a.debut)} → ${fmt(a.fin)}`;
+    h += `<tr class="${passe ? "abs-past" : ""}">` +
+      `<td><b>${per}</b></td>` +
+      `<td><span class="abs-tag t-${a.type}">${ABS_TYPES[a.type] || a.type}</span></td>` +
+      `<td>${esc(a.label)}</td>` +
+      `<td>${absJours(a)}</td>` +
+      `<td>${esc(qui)}${pese ? "" : ` <span class="muted" title="n'affecte pas le planning">info</span>`}</td>` +
+      `<td>${passe ? `<span class="muted">passé</span>`
+            : !pese ? `<span class="muted">—</span>`
+            : touchees.length ? `<span class="abs-hit" title="${esc(chs.join(" · "))}">${touchees.length} tâche${touchees.length > 1 ? "s" : ""} décalée${touchees.length > 1 ? "s" : ""} · ${chs.length} chantier${chs.length > 1 ? "s" : ""}</span>`
+            : `<span class="muted">aucune tâche en cours</span>`}</td>` +
+      `<td class="pacts"><a onclick="removeAbsence('${a.id}')" class="danger">Supprimer</a></td></tr>`;
+  });
+  h += `</tbody></table>`;
+  $("absences").innerHTML = h;
+}
+function submitAbsence(){
+  const debut = $("absDebut").value, fin = $("absFin").value || debut;
+  if(!debut){ alert("Indique au moins une date de début."); return; }
+  mutate({op: "add_absence", debut, fin, type: $("absType").value,
+          label: $("absLabel").value.trim(), contact_id: $("absQui").value || null});
+}
+function addAbsence(){ $("absDebut")?.focus(); }
+function importFeries(){ mutate({op: "import_feries", annee: +TODAY.slice(0, 4)}); }
+function removeAbsence(id){
+  const a = ABSENCES().find(x => x.id === id); if(!a) return;
+  if(confirm(`Supprimer « ${a.label} » (${fmt(a.debut)} → ${fmt(a.fin)}) ?\nLes tâches replanifiées reviendront sur ces jours.`))
+    mutate({op: "remove_absence", id});
 }
 
 // ======================================================================== //
@@ -1334,6 +1645,27 @@ function toggleHold(id){
   if(d === null) return;
   mutate({op: "set_hold", chantier_id: id, hold: true, until: (d || "").trim() || null});
 }
+// Replanifie le travail RESTANT pour repartir d'aujourd'hui : glisse la cible (référence
+// figée des tâches non finies + échéance + débuts imposés + livrables attendus) du retard
+// pris, sans toucher aux tâches déjà faites. Sert à effacer le retard dû à un gel/une pause.
+function replanToday(id){
+  const c = chById(id); if(!c) return;
+  const S = computeSchedule(c);
+  const pend = (c.taches || []).filter(t => !t.done);
+  if(!pend.length){ alert("Rien à replanifier — toutes les tâches sont terminées."); return; }
+  let earliest = null;   // début de référence le plus ancien parmi les tâches non finies
+  pend.forEach(t => {
+    let rs = null;
+    if(S.baseline){ const b = (S.baseline.tasks || []).find(x => x.id === t.id); rs = b ? b.start : null; }
+    if(!rs){ const sc = S.sched[t.id]; rs = sc ? sc.startDate : null; }
+    if(rs && (!earliest || rs < earliest)) earliest = rs;
+  });
+  if(!earliest){ alert("Aucune référence de planning sur laquelle s'appuyer pour replanifier."); return; }
+  const days = daysBetween(earliest, TODAY);
+  if(days <= 0){ alert("Déjà à jour — le travail restant ne part pas du passé."); return; }
+  if(!confirm(`Replanifier « ${c.titre} » ?\n\nLe travail restant glisse de ${days} jour(s) pour repartir d'aujourd'hui.\nLes tâches déjà faites ne bougent pas ; plus aucun retard artificiel ne sera affiché.`)) return;
+  mutate({op: "replan_now", chantier_id: id, days});
+}
 document.addEventListener("keydown", e => { if(e.key === "Escape" && CUR) backToBoard(); });
 
 function renderPage(){
@@ -1353,6 +1685,8 @@ function renderPage(){
   h += `<div class="pg-titlewrap"><div class="d-status ${c.hold ? "hold" : blocked ? "block" : c.statut}">${statusTxt} · priorité ${PRIO[c.prio]}</div>` +
        `<h2 class="pg-title" contenteditable="true" onblur="saveField('titre',this.textContent)">${esc(c.titre)}</h2></div>`;
   h += `<div class="grow"></div>`;
+  if(!c.hold && c.statut !== "done" && lateTasks(c).length)
+    h += `<button class="ghost" onclick="replanToday('${c.id}')" title="Glisser le travail restant pour repartir d'aujourd'hui — efface le retard dû à un gel ou une pause">⏩ Replanifier</button>`;
   h += `<button class="ghost ${c.hold ? "held" : ""}" onclick="toggleHold('${c.id}')" title="${c.hold ? "Reprendre ce chantier" : "Mettre en pause : sort le chantier des retards, de la charge et du WIP"}">${c.hold ? "▶ Reprendre" : "⏸ Mettre en pause"}</button>`;
   h += `<select onchange="mutate({op:'move_chantier',id:'${c.id}',statut:this.value})" class="sel" title="État d'avancement (Bloqué est calculé)">` +
        COLS.filter(k => k.key !== "block").map(k => `<option value="${k.key}" ${c.statut === k.key ? "selected" : ""}>${k.label}</option>`).join("") + `</select>`;
@@ -1396,7 +1730,20 @@ function renderPage(){
     h += kpi("Coût final (EAC)", fmtEur(E.EAC), E.VAC != null ? "écart " + (E.VAC >= 0 ? "+" : "") + fmtEur(E.VAC) + " (VAC)" : "—", E.VAC != null ? (E.VAC >= 0 ? "good" : "bad") : "");
     h += `</div>`;
   } else {
-    h += `<div class="muted small evm-empty">Saisis un budget (BAC) pour activer l'analyse de la valeur acquise. Le coût réel (AC) se calcule depuis ton temps chronométré × le taux journalier (réglages dans <a class="lnk" onclick="setView('charge')">Charge</a>).</div>`;
+    // Pas de budget : on montre quand même le coût main-d'œuvre déjà dépensé (temps chronométré
+    // valorisé), qui existe indépendamment du BAC. Avec un taux_jour réglé, il égale l'AC de l'EVM.
+    const cmin = chantierMin(c.id);
+    if(cmin > 0){
+      const tauxSet = !!(+SETTINGS.taux_jour), jp = cmin / ((+SETTINGS.heures_jour || 7) * 60);
+      h += `<div class="kpis">`;
+      h += kpi("Coût main-d'œuvre à date", fmtEur(eurMin(cmin)),
+               (Math.round(jp * 10) / 10) + " j-pers · " + fmtEur(tauxHeure()) + "/h" + (tauxSet ? "" : " (taux défaut)"));
+      h += `</div>`;
+    }
+    h += `<div class="muted small evm-empty">` + (cmin > 0
+      ? `Coût réel déjà engagé ci-dessus. Saisis un budget (BAC) pour l'analyse complète de la valeur acquise (SPI/CPI, coût final estimé).`
+      : `Saisis un budget (BAC) pour activer l'analyse de la valeur acquise. Le coût réel se calcule depuis ton temps chronométré × le taux horaire`)
+      + ` (réglages dans <a class="lnk" onclick="setView('charge')">Charge</a>).</div>`;
   }
 
   // Colonnes : gauche (objectif, anneau, échéance, parties, tags, blocage) / droite (visuels)
@@ -1434,17 +1781,19 @@ function renderPage(){
   h += `</div><div class="pg-right">`;
 
   // Tâches (checklist enrichie)
-  h += card(`Plan de tâches <span class="add" onclick="showAddTache('${c.id}')">+ tâche</span> <span class="add" onclick="showWbs('${c.id}')">+ modèle</span>`, taskTable(c, S));
+  const tasksDoneN = c.taches.filter(t => t.done).length;
+  const tasksHideTog = tasksDoneN ? ` <span class="add" onclick="toggleHideDone()" title="Masquer/afficher les tâches terminées">${HIDE_DONE_TASKS ? "Afficher terminées" : "Masquer terminées (" + tasksDoneN + ")"}</span>` : "";
+  h += card(`Plan de tâches <span class="add" onclick="showAddTache('${c.id}')">+ tâche</span> <span class="add" onclick="showWbs('${c.id}')">+ modèle</span>${tasksHideTog}`, taskTable(c, S), "taches");
 
   // Risques
-  h += card(`Risques <span class="add" onclick="showAddRisque('${c.id}')">+ risque</span>`, risquesBlock(c));
+  h += card(`Risques <span class="add" onclick="showAddRisque('${c.id}')">+ risque</span>`, risquesBlock(c), "risques");
 
   // Recette / itérations (retours utilisateurs)
   if(c.statut === "recette" || (c.iterations || []).length)
-    h += card(`Recette / Itérations <span class="add" onclick="showAddRetour('${c.id}')">+ retour</span>`, recetteCard(c));
+    h += card(`Recette / Itérations <span class="add" onclick="showAddRetour('${c.id}')">+ retour</span>`, recetteCard(c), "recette");
 
   // Gantt
-  h += card("Diagramme de Gantt", S.cycle ? cycleWarn() : ganttSVG(c, S));
+  h += card("Diagramme de Gantt", S.cycle ? cycleWarn() : ganttSVG(c, S), "gantt");
 
   // PERT
   h += card("Réseau PERT — chemin critique", S.cycle ? cycleWarn() : pertSVG(c, S));
@@ -1473,8 +1822,40 @@ function kpi(label, value, sub, cls){
   return `<div class="kpi ${cls || ""}"><div class="lab">${label}</div><div class="num">${esc(value)}</div>` +
          (sub ? `<div class="sub">${esc(sub)}</div>` : "") + `</div>`;
 }
-function card(title, body){
-  return `<section class="cardx"><div class="cardx-h">${title}</div><div class="cardx-b">${body}</div></section>`;
+// Toutes les sections de la page chantier sont réductibles : chevron dans l'en-tête,
+// état plié/déplié mémorisé. La clé est explicite si fournie, sinon dérivée du titre.
+function card(title, body, key){
+  key = key || slugKey(title);
+  const col = isCollapsed(key);
+  return `<section class="cardx collapsible${col ? " collapsed" : ""}" id="card_${key}">` +
+    `<div class="cardx-h" onclick="cardHeadClick(event,'${key}')">` +
+      `<span class="cardx-fold" title="Réduire / déployer">▸</span>${title}</div>` +
+    `<div class="cardx-b">${body}</div></section>`;
+}
+// Clé stable dérivée du titre : texte avant le 1er tag HTML, sans accents, en slug.
+function slugKey(title){
+  return String(title).split("<")[0]
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "sec";
+}
+// Sections réductibles — état conservé dans localStorage : la page étant reconstruite
+// à chaque mutation, un simple booléen en mémoire ne suffirait pas ; on le persiste
+// donc aussi entre rechargements.
+function collapsedSet(){
+  try { return JSON.parse(localStorage.getItem("collapsed_sections") || "{}") || {}; }
+  catch(e){ return {}; }
+}
+function isCollapsed(key){ return collapsedSet()[key] === true; }
+function toggleCollapse(key){
+  const s = collapsedSet();
+  if(s[key]) delete s[key]; else s[key] = true;
+  try { localStorage.setItem("collapsed_sections", JSON.stringify(s)); } catch(e){}
+  const el = document.getElementById("card_" + key);   // bascule sur place, sans re-rendu
+  if(el) el.classList.toggle("collapsed", !!s[key]);
+}
+function cardHeadClick(e, key){
+  if(e.target.closest(".add")) return;   // clic sur un bouton d'action (+ tâche, + risque…) : ne pas plier
+  toggleCollapse(key);
 }
 function cycleWarn(){
   return `<div class="empty">Dépendances circulaires détectées — corrige les prédécesseurs pour calculer le planning.</div>`;
@@ -1536,11 +1917,15 @@ function setBaseline(){
   mutate({op: "set_baseline", chantier_id: c.id, baseline});
 }
 
+let HIDE_DONE_TASKS = false;   // bascule globale : masquer les tâches terminées de la LISTE (l'ordonnancement/Gantt reste complet)
+function toggleHideDone(){ HIDE_DONE_TASKS = !HIDE_DONE_TASKS; renderPage(); }
 function taskTable(c, S){
   if(!c.taches.length) return `<div class="empty">Aucune tâche — ajoute des tâches (durée + prédécesseurs) pour générer le Gantt et le PERT.</div><div id="addTache_${c.id}"></div>`;
   const lbl = {}; c.taches.forEach(x => lbl[x.id] = x.label);
+  const order = HIDE_DONE_TASKS ? S.order.filter(id => !S.sched[id].task.done) : S.order;
+  const hiddenDone = S.order.length - order.length;
   let h = `<div class="ttable">`;
-  S.order.forEach(id => {
+  order.forEach(id => {
     const s = S.sched[id], t = s.task;
     const fixed = !!t.start_fix;
     h += `<div class="trow ${s.critical ? "crit" : ""}">`;
@@ -1556,19 +1941,25 @@ function taskTable(c, S){
       h += `<button class="tprog-done" title="Terminé — cliquer pour rouvrir" onclick="mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">✓ Terminé</button>`;
     } else if(t.start_date){
       h += `<span class="tstate inprog${act ? " running" : ""}" title="${act ? "Chrono en cours (depuis " + act.debut + ")" : "Démarrée — chrono en pause"}">${act ? "⏱ en cours" : "● en cours"}</span>`;
+    } else if(startBlocked(c)){
+      h += `<button class="tstart blocked" title="Limite de ${SETTINGS.wip_max || 3} chantiers « En cours » atteinte — terminez ou mettez en pause un chantier d'abord" onclick="alert('${wipFullMsg()}')">▶ Démarrer</button>`;
     } else {
       h += `<button class="tstart" title="Démarrer — lance le chrono et enregistre le début réel" onclick="mutate({op:'start_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">▶ Démarrer</button>`;
     }
     h += `<input class="tlabel ${t.done ? "done" : ""}" value="${esc(t.label)}" ` +
-         `onblur="if(this.value.trim()&&this.value!=='${esc(t.label)}')mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',label:this.value.trim()})">`;
+         `onblur="if(this.value.trim()&&this.value!=='${jqs(t.label)}')mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',label:this.value.trim()})">`;
     h += `<label class="ms" title="Jalon (durée 0)"><input type="checkbox" ${t.is_milestone ? "checked" : ""} ` +
          `onchange="mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',is_milestone:this.checked})"> jalon</label>`;
     // actions secondaires — terminée : récap réel ; en cours : ✓ Terminer + chrono + début réel + annuler
     if(!t.is_milestone && t.done){
-      if(t.start_date)
-        h += `<span class="tstate real" title="Début → fin réels${tmin ? " · temps chrono " + fmtDur(tmin) : ""}">réel ${fmtShort(t.start_date)} → ${fmtShort(t.done_date)}${tmin ? " · ⏱ " + fmtDur(tmin) : ""}</span>`;
-      else if(tmin)
-        h += `<span class="tstate real" title="Temps chronométré">⏱ ${fmtDur(tmin)}</span>`;
+      // dates réelles éditables (corriger l'historique d'une tâche terminée)
+      h += `<span class="fld"><span class="fl">réel</span>` +
+        `<input type="date" class="tstart-date" value="${t.start_date || ""}" title="Début réel" ` +
+        `onchange="mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',start_date:this.value||null})">` +
+        `<span class="dl-sep">→</span>` +
+        `<input type="date" class="tstart-date" value="${t.done_date || ""}" title="Fin réelle" ` +
+        `onchange="mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',done_date:this.value||null})"></span>` +
+        (tmin ? `<span class="tstate real" title="Temps chronométré">⏱ ${fmtDur(tmin)}</span>` : "");
     } else if(!t.is_milestone && t.start_date){
       h += `<button class="tfinish" title="Terminer la tâche (enregistre la fin réelle)" onclick="mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">✓ Terminer</button>`;
       h += act
@@ -1635,7 +2026,9 @@ function taskTable(c, S){
     h += `</div>`;
     h += `</div>`;   // fin trow
   });
-  h += `</div><div id="addTache_${c.id}"></div>`;
+  h += `</div>`;
+  if(hiddenDone) h += `<div class="muted small" style="padding:6px 2px 2px">${hiddenDone} tâche${hiddenDone > 1 ? "s" : ""} terminée${hiddenDone > 1 ? "s" : ""} masquée${hiddenDone > 1 ? "s" : ""} — <a class="lnk" onclick="toggleHideDone()">afficher</a></div>`;
+  h += `<div id="addTache_${c.id}"></div>`;
   return h;
 }
 function setStart(cid, tid, val){
@@ -1647,7 +2040,7 @@ function setEnd(cid, tid, val){
   const S = computeSchedule(c);
   const t = c.taches.find(x => x.id === tid);
   const eff = t.start_fix || S.sched[tid].startDate;   // debut effectif (impose ou calcule)
-  const duree = Math.max(0, daysBetween(eff, val));
+  const duree = Math.max(0, workOffset(eff, val));   // en unités de planning (jours ouvrés si réglé), comme le rendu
   mutate({op: "update_tache", chantier_id: cid, tache_id: tid, duree});
 }
 function addPred(cid, tid, pid){
@@ -1689,9 +2082,10 @@ function ganttSVG(c, S){
     } else if(rs != null){
       actMap[id] = {s: rs, e: Math.max(rs + dur, tIdx)};                 // en cours
     } else {
-      // pas démarré : décalé par les preds en retard ET par un livrable attendu non reçu (gateF, comme fc)
+      // pas démarré : ne JAMAIS placer dans le passé (≥ aujourd'hui), décalé par les preds
+      // en retard ET par un livrable attendu non reçu (gateF, comme fc)
       const gate = (S.gateF && (id in S.gateF)) ? S.gateF[id] : -1;
-      const s = Math.max(r.s, predEnd, gate);
+      const s = Math.max(r.s, predEnd, gate, tIdx);
       actMap[id] = {s, e: s + dur};
     }
   });
@@ -1729,9 +2123,9 @@ function ganttSVG(c, S){
   tasks.forEach((id, i) => {
     const s = S.sched[id], t = s.task, y0 = top + i * rowH + 5, r = refOf(id), a = actOf(id);
     g += `<text x="${labelW - 8}" y="${y0 + 10}" font-size="11" text-anchor="end" fill="var(--ink)">${esc(t.label.slice(0, 26))}</text>`;
-    const yRef = y0 + 1, yAct = y0 + 9;
+    const yRef = y0 + 1, yAct = hasBl ? y0 + 9 : y0 + 7;   // sans référence figée : barre seule, un peu remontée
     const inprog = !t.done && !!t.start_date;
-    const late = !t.done && !inprog && r.e < tIdx;
+    const late = !inprog && taskLate(c, S, id);   // retard = prévision vs référence/échéance (pas le plan auto)
     // dépassement = DURÉE propre de la tâche (réelle vs prévue), pas la fin calendaire
     const plannedDur = Math.max(0, r.e - r.s), actualDur = Math.max(0, a.e - a.s);
     const over = !t.is_milestone && actualDur > plannedDur;
@@ -1745,12 +2139,12 @@ function ganttSVG(c, S){
     const tip = `${esc(t.label)}\nPlanifié : ${fmt(addUnits(S.start, r.s))} → ${fmt(addUnits(S.start, r.e))}\nRéel : ${real}` +
                 (lateStart ? `\nDémarrage : +${lateStart} j de retard` : "") + durTxt + `\n(${dlabel})`;
     if(t.is_milestone){
-      g += `<path d="M${x(r.s)},${yRef + 3} L${x(r.s) + 4},${yRef + 7} L${x(r.s)},${yRef + 11} L${x(r.s) - 4},${yRef + 7} Z" fill="none" stroke="#cbd5e1"/>`;
+      if(hasBl) g += `<path d="M${x(r.s)},${yRef + 3} L${x(r.s) + 4},${yRef + 7} L${x(r.s)},${yRef + 11} L${x(r.s) - 4},${yRef + 7} Z" fill="none" stroke="#cbd5e1"/>`;
       const mx = x(t.done ? a.e : r.s), cy = yAct + 7, rr = 6;
       g += `<path d="M${mx},${cy - rr} L${mx + rr},${cy} L${mx},${cy + rr} L${mx - rr},${cy} Z" fill="${t.done ? "var(--green)" : late ? "var(--red)" : s.critical ? "#059669" : "var(--ink)"}"><title>${tip}</title></path>`;
     } else {
-      // référence (plan) — barre fine grise
-      g += `<rect x="${x(r.s)}" y="${yRef}" width="${Math.max(2, (r.e - r.s) * dayW)}" height="5" rx="1" fill="#e5e7eb"><title>${tip}</title></rect>`;
+      // référence (plan) — barre fine grise UNIQUEMENT si une référence est figée
+      if(hasBl) g += `<rect x="${x(r.s)}" y="${yRef}" width="${Math.max(2, (r.e - r.s) * dayW)}" height="5" rx="1" fill="#e5e7eb"><title>${tip}</title></rect>`;
       // réalisé — segment dans le plan ; priorité : terminé > en cours > en retard > critique > à faire
       let fill, stroke = "";
       if(t.done) fill = "var(--green)";
@@ -1767,7 +2161,7 @@ function ganttSVG(c, S){
     // DÉRIVE calendaire : écart de FIN réelle/projetée vs plan (fin trait sous la barre).
     // Rouge = fini/projeté plus tard que prévu, vert = plus tôt. La dérive s'accumule le long de la chaîne.
     const endSlip = a.e - r.e;
-    if(endSlip !== 0){
+    if(hasBl && endSlip !== 0){   // dérive vs référence figée seulement (pas vs un plan auto non figé)
       const dyl = y0 + 26, xa = x(Math.min(r.e, a.e)), xb = x(Math.max(r.e, a.e));
       const dc = endSlip > 0 ? "rgba(220,38,38,.55)" : "rgba(5,150,105,.55)";
       g += `<line x1="${xa}" y1="${dyl}" x2="${xb}" y2="${dyl}" stroke="${dc}" stroke-width="3" stroke-linecap="round">` +
@@ -1775,7 +2169,7 @@ function ganttSVG(c, S){
     }
   });
   g += `</svg></div>`;
-  g += `<div class="legend"><span><i class="sq refb"></i>plan${hasBl ? " (figé)" : ""}</span>` +
+  g += `<div class="legend">` + (hasBl ? `<span><i class="sq refb"></i>référence figée</span>` : ``) +
        `<span><i class="sq todob"></i>à faire</span><span><i class="sq inprogb"></i>en cours</span>` +
        `<span><i class="sq red"></i>en retard</span><span><i class="sq critb"></i>critique</span>` +
        `<span><i class="sq green"></i>terminée</span><span><i class="sq ovb"></i>dépassement (durée)</span>` +
@@ -2454,6 +2848,22 @@ const tacheMin = tid => TIMELOG().filter(s => s.tache_id === tid).reduce((a, s) 
 const chantierMin = cid => TIMELOG().filter(s => s.chantier_id === cid).reduce((a, s) => a + sessMin(s), 0);
 const recetteMin = cid => TIMELOG().filter(s => s.kind === "recette" && (!cid || s.chantier_id === cid)).reduce((a, s) => a + sessMin(s), 0);
 
+// Reprise du chrono : relancer le dernier travail chronométré (ou une plage précise) sans
+// re-saisir chantier + tâche. clock_start ferme d'abord tout chrono actif (un seul à la fois),
+// et son filtre de refs ignore les champs nuls — on peut donc tout passer tel quel.
+function lastEndedSession(){
+  const done = TIMELOG().filter(s => s.fin);
+  if(!done.length) return null;
+  return done.slice().sort((a, b) => (a.date + a.fin) < (b.date + b.fin) ? -1 : 1).pop();   // fin la plus récente
+}
+function resumeSessOp(s){
+  return {op: "clock_start", kind: s.kind, label: s.label,
+          chantier_id: s.chantier_id, tache_id: s.tache_id,
+          rappel_id: s.rappel_id, iteration_id: s.iteration_id};
+}
+function resumeLast(){ const s = lastEndedSession(); if(s) mutate(resumeSessOp(s)); }
+function resumeSess(id){ const s = TIMELOG().find(x => x.id === id); if(s) mutate(resumeSessOp(s)); }
+
 // ===== EVM (valeur acquise / Earned Value Management) =====================
 // PV & EV = budget (BAC) pondéré par la durée planifiée des tâches.
 //   PV = part planifiée qui DEVRAIT être faite à aujourd'hui (lissée sur la fenêtre planifiée).
@@ -2493,6 +2903,33 @@ function evm(c, S){
   return {BAC, PV, EV, AC, SPI, CPI, SV, CV, EAC, ETC, VAC, pvFrac, evFrac, pjours, taux};
 }
 const fmtEur = v => v == null ? "—" : Math.round(v).toLocaleString("fr-FR") + " €";
+// Taux horaire = taux journalier / heures facturables. Repli sur 15 €/h tant que
+// le taux journalier n'est pas configuré, pour que la valorisation reste lisible.
+const TAUX_H_DEFAUT = 15;
+function tauxHeure(){
+  const t = +SETTINGS.taux_jour || 0, hj = +SETTINGS.heures_jour || 7;
+  return t ? t / hj : TAUX_H_DEFAUT;
+}
+const eurMin = m => m / 60 * tauxHeure();   // minutes chronométrées -> €
+
+// Mode d'affichage de la vue Activité : "temps" (heures en avant — lecture équipe)
+// ou "argent" (valorisation en avant — lecture pilotage/manager). Persisté entre
+// sessions ; la page étant reconstruite à chaque rendu, un booléen mémoire ne suffit pas.
+function actMode(){
+  try { return localStorage.getItem("act_mode") === "argent" ? "argent" : "temps"; }
+  catch(e){ return "temps"; }
+}
+function setActMode(m){
+  try { localStorage.setItem("act_mode", m); } catch(e){}
+  renderActivite();
+}
+function actToggle(){   // interrupteur segmenté Temps / Argent
+  const m = actMode();
+  return `<div class="disptog" role="group" aria-label="Afficher le temps ou sa valeur en argent">` +
+    `<button type="button" class="${m === "temps" ? "on" : ""}" onclick="setActMode('temps')" title="Vue équipe : les heures en avant">⏱ Temps</button>` +
+    `<button type="button" class="${m === "argent" ? "on" : ""}" onclick="setActMode('argent')" title="Vue pilotage : la valorisation € en avant">€ Argent</button>` +
+    `</div>`;
+}
 const fmtIdx = v => v == null ? "—" : v.toFixed(2);
 const fmtPctw = v => v == null ? "—" : Math.round(v * 100) + " %";
 const idxCls = v => v == null ? "" : v >= 1 ? "good" : v >= 0.9 ? "warn" : "bad";   // ≥1 bon · ≥.9 vigilance · <.9 mauvais
@@ -2503,12 +2940,25 @@ async function rappelStop(rid){           // terminer une routine : arrête le c
   const r = (STORE.rappels || []).find(x => x.id === rid);
   if(r && !rappelFait(r, TODAY)) await mutate({op: "toggle_rappel", id: rid, date: TODAY});
 }
+function tlSyncTaches(){   // peuple la liste des tâches selon le chantier choisi (jalons exclus : pas de temps)
+  const sel = $("tl_tache"); if(!sel) return;
+  const c = $("tl_chantier").value ? chById($("tl_chantier").value) : null;
+  const taches = c ? c.taches.filter(t => !t.is_milestone) : [];
+  if(!taches.length){ sel.style.display = "none"; sel.innerHTML = ""; return; }
+  sel.style.display = "";
+  sel.innerHTML = `<option value="">— le chantier seul —</option>` +
+    taches.map(t => `<option value="${t.id}">${esc(t.label)}</option>`).join("");
+}
 function addManualSession(){
-  const label = $("tl_label").value.trim();
   const debut = $("tl_debut").value, fin = $("tl_fin").value;
+  const cid = $("tl_chantier") ? $("tl_chantier").value : "";
+  const tid = (cid && $("tl_tache")) ? $("tl_tache").value : "";
+  let label = $("tl_label").value.trim();
+  if(!label && tid){ const t = chById(cid).taches.find(x => x.id === tid); if(t) label = t.label; }   // tâche choisie sans libellé : reprend son nom
   if(!label){ $("tl_label").focus(); return; }
   if(!debut || !fin){ alert("Indique l'heure de début ET de fin (plage terminée)."); return; }
-  mutate({op: "clock_add", label, debut, fin, kind: "libre"});
+  mutate({op: "clock_add", label, debut, fin,
+          kind: tid ? "tache" : "libre", chantier_id: cid || null, tache_id: tid || null});
 }
 
 function maJourneeSection(){
@@ -2534,16 +2984,21 @@ function maJourneeSection(){
           : `<input type="time" class="dl-t" value="${s.fin}" title="Fin" onchange="mutate({op:'clock_edit',id:'${s.id}',fin:this.value})">`) +
         `<span class="dl-dur" title="${lunchOverlap(s.debut, s.fin || nowHM(), s.date) ? "Pause déjeuner déduite (" + fmtDur(lunchOverlap(s.debut, s.fin || nowHM(), s.date)) + ")" : ""}">${fmtDur(sessMin(s))}${lunchOverlap(s.debut, s.fin || nowHM(), s.date) ? ` <span class="dl-pause">⏸ déj.</span>` : ""}</span>` +
         `<input class="dl-lib" value="${esc(s.label)}" onblur="if(this.value.trim()&&this.value!=='${jqs(s.label)}')mutate({op:'clock_edit',id:'${s.id}',label:this.value.trim()})">` +
+        (s.chantier_id && chById(s.chantier_id) ? `<span class="dl-asg" title="Temps compté pour ce chantier${s.tache_id ? " / cette tâche" : ""}">🗂 ${esc(chById(s.chantier_id).titre)}</span>` : "") +
+        (running ? "" : `<button class="dl-resume" title="Reprendre cette activité (relance le chrono)" onclick="resumeSess('${s.id}')">▶</button>`) +
         `<span class="del" title="Supprimer cette plage" onclick="if(confirm('Supprimer cette plage ?'))mutate({op:'clock_delete',id:'${s.id}'})">×</span>` +
         `</div>`;
     });
   }
-  // saisie manuelle d'une plage (chose faite hors de l'appli)
+  // saisie manuelle d'une plage (chose faite hors de l'appli) — rattachable à un chantier / une tâche
   h += `<div class="dl-add">` +
     `<input id="tl_label" placeholder="Ajouter une plage (ex. Appel fournisseur)" onkeydown="if(event.key==='Enter')addManualSession()">` +
     `<input id="tl_debut" type="time" title="Début">` +
     `<span class="dl-sep">→</span>` +
     `<input id="tl_fin" type="time" title="Fin (requise)">` +
+    `<select id="tl_chantier" title="Rattacher à un chantier (son temps y sera compté)" onchange="tlSyncTaches()"><option value="">— sans chantier —</option>` +
+      LIVE().map(c => `<option value="${c.id}">${esc(c.titre)}</option>`).join("") + `</select>` +
+    `<select id="tl_tache" title="Rattacher à une tâche précise (sinon : chantier seul)" style="display:none"></select>` +
     `<button class="btn sm primary" onclick="addManualSession()">Ajouter</button>` +
     `</div>`;
   h += `</div></details>`;
@@ -2574,7 +3029,7 @@ function routinesSection(){
           `onclick="mutate({op:'toggle_rappel',id:'${r.id}',date:'${TODAY}'})"></span>` +
         `<div class="rt-body"><div class="rt-lib">${esc(r.label)}` +
           (late ? ` <span class="bdg b-late">⏰ en retard</span>` : ``) + durTxt + `</div>` +
-          `<div class="rt-meta">${esc(rappelMeta(r))}</div>` +
+          `<div class="rt-meta">${esc(rappelMeta(r))}${r.chantier_id && chById(r.chantier_id) ? " · 🗂 " + esc(chById(r.chantier_id).titre) : ""}</div>` +
           (r.note ? `<div class="rt-note">${esc(r.note)}</div>` : ``) + `</div>` +
         ctrl +
         `<span class="del" title="Supprimer cette routine" onclick="if(confirm('Supprimer « ${jqs(r.label)} » ?'))mutate({op:'remove_rappel',id:'${r.id}'})">×</span>` +
@@ -2593,6 +3048,8 @@ function routinesSection(){
     `<span id="rp_moiswrap" style="display:none">le <input id="rp_jourmois" type="number" min="1" max="28" class="rp-num" placeholder="j"></span>` +
     `<span id="rp_datewrap" style="display:none"><input id="rp_date" type="date" title="Échéance"></span>` +
     `<input id="rp_heure" type="time" class="rp-time" title="Heure (optionnel, pour la notif bureau)">` +
+    `<select id="rp_chantier" title="Rattacher à un chantier (le temps chronométré y sera compté)"><option value="">— sans chantier —</option>` +
+      LIVE().map(c => `<option value="${c.id}">${esc(c.titre)}</option>`).join("") + `</select>` +
     `<input id="rp_desc" class="rp-desc" placeholder="description (optionnel)" onkeydown="if(event.key==='Enter')addRappel()">` +
     `<button class="btn sm primary" onclick="addRappel()">Ajouter</button>` +
     `</div>`;
@@ -2601,6 +3058,8 @@ function routinesSection(){
   if(all.length){
     h += `<details class="rt-manage"><summary>Gérer mes routines (${all.length})</summary><div class="rt-mlist">`;
     all.forEach(r => {
+      const rch = r.chantier_id ? chById(r.chantier_id) : null;
+      const rchTaches = rch ? rch.taches.filter(t => !t.is_milestone) : [];
       h += `<div class="rt-mrow${r.actif ? "" : " off"}">` +
         `<div class="rt-mhead">` +
           `<label class="rt-toggle" title="${r.actif ? "Active — décocher pour mettre en pause" : "En pause — cocher pour réactiver"}">` +
@@ -2609,6 +3068,13 @@ function routinesSection(){
             `onblur="if(this.value.trim()&&this.value!=='${jqs(r.label)}')mutate({op:'update_rappel',id:'${r.id}',label:this.value.trim()})">` +
           `<select class="rt-mfreq" onchange="mutate({op:'update_rappel',id:'${r.id}',freq:this.value})">` +
             Object.entries(RFREQ).map(([k, v]) => `<option value="${k}" ${r.freq === k ? "selected" : ""}>${v}</option>`).join("") + `</select>` +
+          `<select class="rt-mch" title="Chantier rattaché (le temps chronométré y sera compté)" onchange="mutate({op:'update_rappel',id:'${r.id}',chantier_id:this.value||null,tache_id:null})">` +
+            `<option value="">— sans chantier —</option>` +
+            LIVE().map(c => `<option value="${c.id}" ${r.chantier_id === c.id ? "selected" : ""}>${esc(c.titre)}</option>`).join("") + `</select>` +
+          (rchTaches.length
+            ? `<select class="rt-mta" title="Tâche précise du chantier (sinon : chantier seul)" onchange="mutate({op:'update_rappel',id:'${r.id}',tache_id:this.value||null})"><option value="">— chantier seul —</option>` +
+                rchTaches.map(t => `<option value="${t.id}" ${r.tache_id === t.id ? "selected" : ""}>${esc(t.label)}</option>`).join("") + `</select>`
+            : "") +
           `<span class="rt-mmeta">${esc(rappelMeta(r))}</span>` +
           `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer « ${jqs(r.label)} » ?'))mutate({op:'remove_rappel',id:'${r.id}'})">×</span>` +
         `</div>` +
@@ -2636,8 +3102,9 @@ function addRappel(){
   const date = $("rp_date").value || null;
   const heure = $("rp_heure").value || null;
   const note = $("rp_desc").value.trim();
+  const chantier_id = ($("rp_chantier") && $("rp_chantier").value) || null;
   if(freq === "ponctuel" && !date){ alert("Un rappel ponctuel nécessite une date d'échéance."); return; }
-  mutate({op: "add_rappel", label, freq, jours, jour_mois: jm, date, heure, note});
+  mutate({op: "add_rappel", label, freq, jours, jour_mois: jm, date, heure, note, chantier_id});
 }
 
 // ======================================================================== //
@@ -2655,7 +3122,7 @@ function planningTasks(){
       const f = S.fc[t.id], s = S.sched[t.id];
       if(!f || f.fsDate > TODAY) return;                 // commence plus tard → pas aujourd'hui
       const gated = (S.gateInfo[t.id] || []).some(l => l.statut !== "recu");   // attend un livrable
-      const late = !!s && s.endDate < TODAY;              // fin PRÉVUE déjà passée
+      const late = taskLate(c, S, t.id);                  // retard vs référence/échéance
       items.push({c, t, due: f.ffDate, planEnd: s ? s.endDate : f.ffDate, late, gated,
                   slack: s ? s.slack : 0, critical: !!s && s.critical});
     });
@@ -2671,7 +3138,7 @@ function planningTasks(){
 }
 
 function portfolioGantt(){
-  const rows = STORE.chantiers.map(c => ({c, S: computeSchedule(c)}))
+  const rows = LIVE().map(c => ({c, S: computeSchedule(c)}))
     .filter(r => r.S.order.length || r.c.echeance);
   if(!rows.length) return `<div class="empty">Aucun chantier planifiable (ajoute des tâches ou une échéance).</div>`;
   rows.sort((a, b) => {
@@ -2741,8 +3208,15 @@ function renderPlanning(){
       if(it.gated) tags.push(`<span class="bdg b-wait">⌛ attend un livrable</span>`);
       if(it.critical) tags.push(`<span class="bdg red">critique</span>`);
       else if(it.slack > 0) tags.push(`<span class="muted small">marge ${it.slack} j</span>`);
+      // Tâche démarrée : case « fait » + un toggle chrono (reprendre / arrêter selon l'état actif).
+      // Tâche non démarrée : bouton ▶ démarrer (ou bloqué si plafond WIP atteint).
       const lead = t.start_date
-        ? `<span class="box ${t.done ? "ok" : ""}" title="Marquer fait" onclick="event.stopPropagation();mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})"></span>`
+        ? `<span class="box ${t.done ? "ok" : ""}" title="Marquer fait" onclick="event.stopPropagation();mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})"></span>` +
+          (t.done ? "" : (activeForTache(t.id)
+            ? `<button class="tstart stop" title="Chrono en cours sur cette tâche — arrêter" onclick="event.stopPropagation();mutate({op:'clock_stop'})">⏹</button>`
+            : `<button class="tstart" title="Reprendre le chrono sur cette tâche" onclick="event.stopPropagation();mutate({op:'clock_start',kind:'tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">▶</button>`))
+        : startBlocked(c)
+        ? `<button class="tstart blocked" title="Limite de ${SETTINGS.wip_max || 3} chantiers « En cours » atteinte" onclick="event.stopPropagation();alert('${wipFullMsg()}')">▶</button>`
         : `<button class="tstart" title="Démarrer cette tâche" onclick="event.stopPropagation();mutate({op:'start_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">▶</button>`;
       h += `<div class="td-row">` + lead +
         `<div class="td-body" onclick="openChantier('${c.id}')">` +
@@ -2767,10 +3241,101 @@ function weekStart(ds){   // lundi de la semaine de `ds` (YYYY-MM-DD)
   dt.setUTCDate(dt.getUTCDate() - day);
   return dstr(dt);
 }
+// ======================================================================== //
+//  Analyse du temps (chrono) — agrégats et visuels pour la vue Activité.
+//  Toutes les durées passent par sessMin() : pause déjeuner déduite, journée
+//  bornée à l'heure de fin réglée (mêmes règles que « Ma journée »).
+// ======================================================================== //
+const KIND_LABEL = {tache: "Tâches", recette: "Recette", libre: "Libre / divers", rappel: "Routines"};
+const KIND_COLOR = {tache: "var(--blue)", recette: "var(--violet)", libre: "var(--gray)", rappel: "var(--amber)"};
+const DOW_NAMES = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"];
+
+function timeStats(){
+  const tl = TIMELOG();
+  const byKind = {}, byChantier = {}, byWeek = {}, byHour = {}, byDay = {}, byDow = [0, 0, 0, 0, 0, 0, 0];
+  let total = 0;
+  tl.forEach(s => {
+    const m = sessMin(s);
+    total += m;
+    byKind[s.kind] = (byKind[s.kind] || 0) + m;
+    const ch = s.chantier_id ? chById(s.chantier_id) : null;
+    const name = ch ? ch.titre : "Sans chantier / libre";
+    byChantier[name] = (byChantier[name] || 0) + m;
+    if(s.date){
+      byDay[s.date] = (byDay[s.date] || 0) + m;
+      const ws = weekStart(s.date); byWeek[ws] = (byWeek[ws] || 0) + m;
+      byDow[(dparse(s.date).getUTCDay() + 6) % 7] += m;   // 0 = lundi
+    }
+    const hh = (s.debut || "00:00").slice(0, 2); byHour[hh] = (byHour[hh] || 0) + m;
+  });
+  const daysWorked = Object.values(byDay).filter(v => v > 0).length;
+  return {tl, total, byKind, byChantier, byWeek, byHour, byDay, byDow, daysWorked};
+}
+
+function timeInsights(){
+  const st = timeStats();
+  if(!st.total){
+    return dsection("Temps passé — chrono") +
+      `<div class="muted small">Aucune plage chronométrée pour l'instant. Démarre une tâche ou une routine (bouton ▶), ou ajoute une plage dans « Ma journée » — la répartition par type, par chantier, par semaine et par heure s'affichera ici automatiquement.</div>`;
+  }
+  const hj = +SETTINGS.heures_jour || 7;
+  const jp = st.total / (hj * 60);
+  const moy = st.daysWorked ? st.total / st.daysWorked : 0;
+  const thisMon = weekStart(TODAY), semaine = st.byWeek[thisMon] || 0;
+  const rec = st.byKind.recette || 0;
+
+  const th = tauxHeure(), tauxSet = !!(+SETTINGS.taux_jour);
+  const money = actMode() === "argent";
+  // Une seule unité à la fois : V = temps OU argent selon le mode. Pas de second
+  // affichage — l'interrupteur choisit lequel des deux on regarde.
+  const V = m => money ? fmtEur(eurMin(m)) : fmtDur(m);
+
+  // — En-tête avec l'interrupteur Temps / Argent —
+  let h = `<div class="ch-h act-head"><span>Temps passé — chrono</span>${actToggle()}</div>`;
+  h += `<div class="kband">`;
+  h += dkpi("Temps total", V(st.total), st.tl.length + " sessions · " + st.daysWorked + " j travaillés", "", "",
+            "Temps total chronométré, toutes activités confondues. " +
+            "Pause déjeuner déduite ; journée bornée à l'heure de fin réglée dans Charge." +
+            (money ? " Valorisé à " + fmtEur(th) + "/h" + (tauxSet ? " (taux journalier / heures facturables)." : " — taux par défaut, aucun taux journalier réglé dans Charge.") : ""));
+  h += dkpi("En jours-personne", jp.toFixed(1).replace(".", ",") + " j", "à " + hj + " h/jour", "", "", "Temps total converti en jours-personnes (heures facturables/jour, réglable dans Charge). Base du coût réel (AC) de l'EVM.");
+  h += dkpi("Moyenne / jour", V(moy), "sur jours travaillés", "", "", "Moyenne par jour effectivement travaillé, dans l'unité choisie (temps ou argent).");
+  h += dkpi("Cette semaine", V(semaine), "depuis le " + fmtShort(thisMon), "", "", "Cumul depuis lundi de la semaine en cours, dans l'unité choisie.");
+  h += dkpi("Part recette", Math.round(rec / st.total * 100) + " %", fmtDur(rec) + " de test", rec / st.total > 0.25 ? "warn" : "", "", "Part du temps passée en recette (tests, itérations). Un ratio élevé peut signaler des allers-retours qualité.");
+  h += `</div>`;
+
+  // — Grands graphes : type / semaine / chantiers —
+  const kindOrder = ["tache", "rappel", "recette", "libre"];   // ordre = bleu et violet non adjacents (lisible en daltonisme)
+  const kindRows = kindOrder.filter(k => st.byKind[k] > 0)
+    .map(k => ({label: KIND_LABEL[k] || k, value: Math.round(st.byKind[k]), color: KIND_COLOR[k] || "var(--gray)"}));
+  const weekRows = Object.keys(st.byWeek).sort()
+    .map(k => ({label: fmtShort(k), value: st.byWeek[k], disp: V(st.byWeek[k])}));
+  const chRows = Object.entries(st.byChantier).sort((a, b) => b[1] - a[1]).slice(0, 8)
+    .map(([n, v]) => ({label: n, value: v, disp: V(v),
+                       color: n === "Sans chantier / libre" ? "var(--gray)" : "var(--blue)"}));
+  const donutTitle = money ? "Valeur par type" : "Répartition par type";
+  const weekTitle = money ? "Valorisation par semaine" : "Temps par semaine";
+  h += `<div class="dash-row">` +
+    chartBox(donutTitle, donutChart(kindRows, {fmt: V, center: {big: V(st.total), small: "total"}})) +
+    chartBox(weekTitle, vbar(weekRows, {barW: 34, color: "var(--blue)"})) +
+    chartBox("Top chantiers", hbar(chRows, {labelW: 150, barW: 150})) + `</div>`;
+
+  // — Grille dense : rythme (jour de semaine / heure de début) —
+  const dowRows = [];
+  for(let i = 0; i < 7; i++) if(st.byDow[i] > 0)
+    dowRows.push({label: DOW_NAMES[i], value: st.byDow[i], disp: V(st.byDow[i]), color: "var(--blue)"});
+  const hourRows = Object.keys(st.byHour).sort()
+    .map(hh => ({label: hh + "h", value: st.byHour[hh], disp: V(st.byHour[hh])}));
+  h += `<div class="dgrid">`;
+  h += chartBox("Par jour de la semaine", hbar(dowRows, {labelW: 82, barW: 150}));
+  h += chartBox("Quand tu travailles (heure de début)", vbar(hourRows, {barW: 22, gap: 6, color: "var(--blue)"}));
+  h += `</div>`;
+  return h;
+}
+
 function weeklyActivity(){
   const wk = {};
   const ensure = k => (wk[k] = wk[k] || {taches: 0, jalons: 0, notes: 0, retours: 0, relances: 0, actions: 0, events: []});
-  STORE.chantiers.forEach(c => {
+  LIVE().forEach(c => {
     (c.taches || []).forEach(t => { if(t.done && t.done_date){ const w = ensure(weekStart(t.done_date)); w.taches++; if(t.is_milestone) w.jalons++; } });
     (c.histo || []).forEach(e => { if(e.d) ensure(weekStart(e.d)).notes++; });
     (c.livrables || []).forEach(l => { if(l.derniere) ensure(weekStart(l.derniere)).relances++; });
@@ -2788,7 +3353,8 @@ function renderActivite(){
   const z = {taches: 0, jalons: 0, notes: 0, retours: 0, relances: 0, actions: 0, events: []};
   const thisMon = weekStart(TODAY), lastMon = weekStart(addDays(thisMon, -1));
   const cur = wk[thisMon] || z, prev = wk[lastMon] || z;
-  let h = dsection(`Cette semaine — du ${fmt(thisMon)}`);
+  let h = timeInsights();                     // en tête : où part mon temps (chrono)
+  h += dsection(`Cette semaine — du ${fmt(thisMon)}`);
   h += `<div class="kpis">` +
     actKpi("Tâches terminées", cur.taches, prev.taches) +
     actKpi("Jalons franchis", cur.jalons, prev.jalons) +
@@ -2857,7 +3423,7 @@ function cdcSummary(c){
 
 function cdcHeader(c, cdc){
   let h = `<div class="cdc-top">`;
-  h += `<button class="ghost" onclick="backFromCdc()">← ${esc(c.titre)}</button>`;
+  h += `<button class="ghost" onclick="backFromCdc()" title="Revenir à « ${esc(c.titre)} »">← Chantier</button>`;
   h += `<div class="cdc-toptitle"><div class="d-status">Cahier des charges</div>` +
        `<h2 class="pg-title">${esc((cdc && cdc.titre) || c.titre)}</h2></div>`;
   h += `<div class="grow"></div>`;
@@ -3032,10 +3598,10 @@ function cdcPrint(){
 // Vue d'ensemble : tous les cahiers des charges
 function renderCahiers(){
   if(!STORE.chantiers.length){ $("cahiers").innerHTML = `<div class="ch-h">Cahiers des charges</div><div class="empty">Aucun chantier.</div>`; return; }
-  const n = STORE.chantiers.filter(c => c.cdc).length;
-  let h = `<div class="ch-h">Cahiers des charges <span class="muted small">· ${n}/${STORE.chantiers.length} chantier(s)</span></div>`;
+  const n = LIVE().filter(c => c.cdc).length;
+  let h = `<div class="ch-h">Cahiers des charges <span class="muted small">· ${n}/${LIVE().length} chantier(s)</span></div>`;
   h += `<table class="ptable"><thead><tr><th>Chantier</th><th>Référence</th><th>Indice</th><th>Statut</th><th>Mis à jour</th><th>Validé</th><th></th></tr></thead><tbody>`;
-  STORE.chantiers.forEach(c => {
+  LIVE().forEach(c => {
     if(c.cdc){
       const cdc = c.cdc, st = CDC_ST[cdc.statut] || CDC_ST.brouillon;
       h += `<tr class="cdc-clk" onclick="openCdc('${c.id}')"><td><b>${esc(c.titre)}</b></td>` +

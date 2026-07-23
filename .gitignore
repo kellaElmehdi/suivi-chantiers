@@ -6,6 +6,9 @@ __pycache__/
 # Données personnelles (régénérées au 1er lancement)
 data/
 
+# Paquet de distribution (régénérable)
+dist/
+
 # Divers
 *.lnk
 .env

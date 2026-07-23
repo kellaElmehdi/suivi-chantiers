@@ -13,6 +13,7 @@ import sys
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(BASE, "static")
@@ -37,6 +38,8 @@ def _load_dotenv() -> None:
 _load_dotenv()
 
 import store  # noqa: E402  (apres .env, au cas ou)
+
+_STORE_LOCK = threading.Lock()   # serialise lecture-modif-ecriture du store (ThreadingHTTPServer multi-thread)
 
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
@@ -64,8 +67,18 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _json_body(self):
-        n = int(self.headers.get("Content-Length", 0))
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        if n > 16 * 1024 * 1024:                  # 16 MiB : borne anti-abus (import xlsx en base64 compris)
+            raise ValueError("Corps de requete trop volumineux")
         return json.loads(self.rfile.read(n) or b"{}") if n else {}
+
+    def _local_only(self) -> bool:
+        # anti-CSRF : on n'accepte les requetes mutantes que depuis l'appli locale (origine/host loopback)
+        origin = self.headers.get("Origin")
+        if origin and urlparse(origin).hostname not in ("127.0.0.1", "localhost", "::1"):
+            return False
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
+        return host in ("", "127.0.0.1", "localhost", "::1")
 
     def _store_payload(self):
         return {"store": store.load(), "today": store.today()}
@@ -94,8 +107,15 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return self.wfile.write(data)
         if path.startswith("/static/"):
-            rel = path[len("/static/"):].replace("..", "")
-            return self._file(os.path.join(STATIC, rel))
+            rel = path[len("/static/"):].lstrip("/\\")
+            static_root = os.path.realpath(STATIC)
+            full = os.path.realpath(os.path.join(static_root, rel))
+            try:   # confinement strict a static/ : bloque .. , chemins absolus, lettre de lecteur, UNC
+                if os.path.commonpath([static_root, full]) != static_root:
+                    raise ValueError
+            except ValueError:
+                return self._send(404, {"error": "not found"})
+            return self._file(full)
         return self._send(404, {"error": "not found"})
 
     def _file(self, fp):
@@ -108,30 +128,34 @@ class Handler(BaseHTTPRequestHandler):
     # -- POST ------------------------------------------------------------ #
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        if not self._local_only():                     # anti-CSRF : refuse les ecritures cross-site
+            return self._send(403, {"error": "origine refusee"})
         try:
             body = self._json_body()
         except Exception:  # noqa: BLE001
             return self._send(400, {"error": "JSON invalide"})
 
         if path == "/api/mutate":
-            st = store.load()
-            try:
-                msg = store.apply_op(st, body)
-            except ValueError as e:
-                return self._send(400, {"error": str(e)})
-            except KeyError as e:                      # champ requis manquant -> 400 propre (pas un 500 muet)
-                return self._send(400, {"error": f"Champ requis manquant : {e}"})
-            store.save(st)
-            return self._send(200, {"ok": True, "message": msg, **self._store_payload()})
+            with _STORE_LOCK:                          # lecture-modif-ecriture atomique : pas de perte d'ecriture concurrente
+                st = store.load()
+                try:
+                    msg = store.apply_op(st, body)
+                except ValueError as e:
+                    return self._send(400, {"error": str(e)})
+                except KeyError as e:                  # champ requis manquant -> 400 propre (pas un 500 muet)
+                    return self._send(400, {"error": f"Champ requis manquant : {e}"})
+                store.save(st)
+                return self._send(200, {"ok": True, "message": msg, **self._store_payload()})
 
         if path == "/api/import":
             import base64
             import export_xlsx
             try:
                 raw = base64.b64decode((body.get("b64") or "").split(",")[-1])
-                st = store.load()
-                n_ch, n_t, n_l = export_xlsx.import_into(st, raw)
-                store.save(st)
+                with _STORE_LOCK:
+                    st = store.load()
+                    n_ch, n_t, n_l = export_xlsx.import_into(st, raw)
+                    store.save(st)
             except Exception as e:  # noqa: BLE001
                 return self._send(400, {"error": f"Import impossible : {e}"})
             return self._send(200, {"ok": True,
