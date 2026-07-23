@@ -372,19 +372,21 @@ function wipLimit(){ return +SETTINGS.wip_max || 0; }
 function startBlocked(c){ const lim = wipLimit(); return lim > 0 && c.statut === "todo" && !c.hold && doingCount() >= lim; }
 function wipFullMsg(){ return `Limite de ${wipLimit()} chantiers « En cours » atteinte.\\nTerminez ou mettez en pause un chantier avant de démarrer un nouveau.`; }
 // Colonne « À faire » : inclut les chantiers en pause, rangés par échéance ou avancement,
-// repliée aux TODO_PREVIEW premiers.
-let TODO_SORT = "echeance";   // "echeance" | "avancement"
+// repliée aux TODO_PREVIEW premiers. « En cours » partage le même tri (état indépendant).
+let TODO_SORT = "echeance";    // "echeance" | "avancement"
+let DOING_SORT = "echeance";   // idem pour la colonne « En cours »
 let TODO_COLLAPSED = true;
 const TODO_PREVIEW = 5;
-function sortTodo(list){
+function sortColumn(list, mode){
   return list.slice().sort((a, c) => {
     const ha = a.hold ? 1 : 0, hc = c.hold ? 1 : 0;
-    if(ha !== hc) return ha - hc;                                                     // actifs toujours avant les pausés
-    if(TODO_SORT === "avancement"){ const d = pct(c) - pct(a); if(d) return d; }   // plus avancé d'abord
-    const ea = a.echeance || "9999-99-99", eb = c.echeance || "9999-99-99";          // sans échéance en dernier
+    if(ha !== hc) return ha - hc;                                                // actifs toujours avant les pausés
+    if(mode === "avancement"){ const d = pct(c) - pct(a); if(d) return d; }    // plus avancé d'abord
+    const ea = a.echeance || "9999-99-99", eb = c.echeance || "9999-99-99";      // sans échéance en dernier
     return ea < eb ? -1 : ea > eb ? 1 : 0;
   });
 }
+function sortTodo(list){ return sortColumn(list, TODO_SORT); }
 function showView(v){
   if(["board", "charge", "people", "dash", "contacts", "absences", "risques", "planning", "activite", "cahiers"].includes(v)) VIEW = v;
   $("board").style.display = v === "board" ? "flex" : "none";
@@ -1419,6 +1421,8 @@ function renderBoard(){
     } else if(isDone){ // Terminé : du plus récemment terminé au plus ancien
       cards = LIVE().filter(c => colOf(c) === col.key)
         .sort((a, c) => (lastDoneDate(c) < lastDoneDate(a) ? -1 : lastDoneDate(c) > lastDoneDate(a) ? 1 : (a.ordre || 0) - (c.ordre || 0)));
+    } else if(col.key === "doing"){   // En cours : rangée par échéance ou avancement (comme « À faire »)
+      cards = sortColumn(LIVE().filter(c => colOf(c) === col.key), DOING_SORT);
     } else {           // autres colonnes : ordre manuel du board
       cards = LIVE().filter(c => colOf(c) === col.key).sort((a, c) => (a.ordre || 0) - (c.ordre || 0));
     }
@@ -1442,11 +1446,12 @@ function renderBoard(){
         if(c && c.statut !== col.key) mutate({op: "move_chantier", id, statut: col.key});
       });
     }
-    if(isTodo && total){   // barre de tri : Échéance / Avancement
+    if((isTodo || col.key === "doing") && total){   // barre de tri : Échéance / Avancement (À faire + En cours)
+      const setter = isTodo ? "TODO_SORT" : "DOING_SORT", mode = isTodo ? TODO_SORT : DOING_SORT;
       const bar = document.createElement("div"); bar.className = "todo-tools";
       bar.innerHTML = `<span class="tt-lbl">Trier</span>` +
-        `<button class="tt-seg ${TODO_SORT === "echeance" ? "on" : ""}" onclick="event.stopPropagation();TODO_SORT='echeance';renderBoard()">Échéance</button>` +
-        `<button class="tt-seg ${TODO_SORT === "avancement" ? "on" : ""}" onclick="event.stopPropagation();TODO_SORT='avancement';renderBoard()">Avancement</button>`;
+        `<button class="tt-seg ${mode === "echeance" ? "on" : ""}" onclick="event.stopPropagation();${setter}='echeance';renderBoard()">Échéance</button>` +
+        `<button class="tt-seg ${mode === "avancement" ? "on" : ""}" onclick="event.stopPropagation();${setter}='avancement';renderBoard()">Avancement</button>`;
       body.appendChild(bar);
     }
     if(!visible.length){ const e = document.createElement("div"); e.className = "empty"; e.textContent = "—"; body.appendChild(e); }
