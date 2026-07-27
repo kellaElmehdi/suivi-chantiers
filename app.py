@@ -162,6 +162,24 @@ class Handler(BaseHTTPRequestHandler):
                                     "message": f"{n_ch} chantier(s), {n_t} tâche(s), {n_l} livrable(s) importés.",
                                     **self._store_payload()})
 
+        if path == "/api/rapport_mail":
+            # prépare l'e-mail du rapport : PDF (Edge headless) + brouillon Outlook
+            try:
+                import rapport_mail
+                st = store.load()
+                rap = next((x for x in st.get("rapports", [])
+                            if x.get("id") == body.get("rapport_id")), None)
+                if rap is None:
+                    return self._send(400, {"error": "Rapport introuvable."})
+                html = body.get("html") or ""
+                if not html.strip():
+                    return self._send(400, {"error": "Contenu du rapport manquant."})
+                res = rapport_mail.send(rap, html)
+            except Exception as e:  # noqa: BLE001
+                return self._send(200, {"ok": False,
+                                        "message": f"Préparation de l'e-mail impossible : {e}"})
+            return self._send(200, {"ok": True, **res})
+
         return self._send(404, {"error": "not found"})
 
 

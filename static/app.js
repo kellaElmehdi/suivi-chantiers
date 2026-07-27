@@ -388,11 +388,12 @@ function sortColumn(list, mode){
 }
 function sortTodo(list){ return sortColumn(list, TODO_SORT); }
 function showView(v){
-  if(["board", "charge", "people", "dash", "contacts", "absences", "risques", "planning", "activite", "cahiers"].includes(v)) VIEW = v;
+  if(["board", "charge", "people", "dash", "contacts", "absences", "risques", "planning", "activite", "cahiers", "rapport"].includes(v)) VIEW = v;
   $("board").style.display = v === "board" ? "flex" : "none";
   $("planning").style.display = v === "planning" ? "block" : "none";
   $("dash").style.display = v === "dash" ? "block" : "none";
   $("activite").style.display = v === "activite" ? "block" : "none";
+  $("rapport").style.display = v === "rapport" ? "block" : "none";
   $("charge").style.display = v === "charge" ? "block" : "none";
   $("risques").style.display = v === "risques" ? "block" : "none";
   $("people").style.display = v === "people" ? "grid" : "none";
@@ -410,6 +411,7 @@ function showView(v){
   if(v === "planning") renderPlanning();
   if(v === "dash") renderDashboard();
   if(v === "activite") renderActivite();
+  if(v === "rapport") renderRapport();
   if(v === "charge") renderCharge();
   if(v === "risques") renderRisques();
   if(v === "people") renderPeople();
@@ -3702,6 +3704,569 @@ function renderActivite(){
     h += `</div>`;
   });
   $("activite").innerHTML = h;
+}
+
+// ======================================================================== //
+//  Rapport hebdomadaire — bilan de la semaine, programme à venir, REX.
+//  Les FAITS (tâches finies, notes, temps, échéances…) sont calculés par le
+//  serveur (op rapport_generate) et recalculables tant que le rapport est en
+//  brouillon ; la RÉDACTION (synthèse, avancement, REX par point, REX général,
+//  priorités) est saisie ici et n'est jamais écrasée par un recalcul.
+// ======================================================================== //
+let RAPPORT_MON = null;   // lundi (YYYY-MM-DD) de la semaine affichée
+const RAP_ST_LBL = {todo: "À faire", doing: "En cours", block: "Bloqué", recette: "En recette", done: "Terminé"};
+function isoWeekStr(ds){  // "2026-W30" — numéro de semaine ISO (règle du jeudi)
+  const dt = dparse(ds);
+  dt.setUTCDate(dt.getUTCDate() + 3 - (dt.getUTCDay() + 6) % 7);
+  const y = dt.getUTCFullYear(), jan4 = new Date(Date.UTC(y, 0, 4));
+  const w = 1 + Math.round(((dt - jan4) / 86400000 - 3 + (jan4.getUTCDay() + 6) % 7) / 7);
+  return `${y}-W${String(w).padStart(2, "0")}`;
+}
+const rapports = () => STORE.rapports || [];
+function rapShift(d){ RAPPORT_MON = addDays(RAPPORT_MON || weekStart(TODAY), d); renderRapport(); }
+function rapGoto(mon){ RAPPORT_MON = mon; showView("rapport"); window.scrollTo(0, 0); }
+function rapField(rid, field, val){ mutate({op: "rapport_update", rapport_id: rid, [field]: val}); }
+function rapPointField(rid, cid, field, val){ mutate({op: "rapport_point_update", rapport_id: rid, chantier_id: cid, [field]: val}); }
+// Zone de rédaction : n'enregistre qu'en cas de changement réel (sinon blur = rien)
+function rapTA(ph, val, handler, dis){
+  return `<textarea class="rap-ta" placeholder="${esc(ph)}"` +
+    (dis ? " disabled" : ` onblur="if(this.value!==this.defaultValue)${handler}"`) +
+    `>${esc(val || "")}</textarea>`;
+}
+
+// Brouillon d'avancement composé depuis les faits calculés — premier étage de
+// l'automatisation de la rédaction (à retoucher ensuite, puis enregistré).
+function rapDraft(p){
+  const a = p.auto || {}, L = [];
+  (a.taches || []).forEach(t => L.push(`${t.jalon ? "★ Jalon franchi" : "✔ Terminé"} : ${t.label} (${fmtShort(t.date)})`));
+  (a.notes || []).forEach(n => L.push(`— ${fmtShort(n.d)} : ${n.t}`));
+  (a.retours || []).forEach(r => L.push(`Retour recette (${RET[r.statut] || r.statut}) : ${r.quoi}`));
+  if(a.temps_min) L.push(`Temps passé : ${fmtDur(a.temps_min)}.`);
+  if(a.relances) L.push(`${a.relances} relance(s) envoyée(s).`);
+  return L.join("\n");
+}
+function rapPrefill(rid, cid){
+  const r = rapports().find(x => x.id === rid), p = r && (r.points || []).find(x => x.chantier_id === cid);
+  if(!p) return;
+  const draft = rapDraft(p);
+  if(!draft){ alert("Aucun fait détecté cette semaine pour ce chantier — rien à pré-remplir."); return; }
+  if((p.avancement || "").trim() && !confirm("Remplacer le commentaire d'avancement existant par le pré-remplissage ?")) return;
+  rapPointField(rid, cid, "avancement", draft);
+}
+function rapRetardField(rid, cid, val){ mutate({op: "rapport_retard_update", rapport_id: rid, chantier_id: cid, justification: val}); }
+function rapFinalize(rid){
+  const r = rapports().find(x => x.id === rid);
+  const manq = ((r && r.retards) || []).filter(x => !(x.justification || "").trim());
+  if(manq.length){
+    alert(`Impossible de finaliser : ${manq.length} retard(s) sans justification.\nLa justification des retards est obligatoire (section « Retards à justifier »).`);
+    return;
+  }
+  if(confirm("Finaliser ce rapport ?\nLes données calculées sont figées (plus d'actualisation) et le rapport est visé à ton nom. Tu pourras le rouvrir si besoin."))
+    mutate({op: "rapport_finalize", rapport_id: rid});
+}
+function rapDelete(rid){
+  if(confirm("Supprimer définitivement ce rapport hebdomadaire ?")) mutate({op: "rapport_delete", rapport_id: rid});
+}
+
+function rapPointCard(r, p, dis){
+  const a = p.auto || {}, c = chById(p.chantier_id);
+  const nj = (a.taches || []).filter(t => t.jalon).length;
+  const enc = a.en_cours || [];
+  const fini = (r.termines || []).some(x => x.chantier_id === p.chantier_id);
+  // livré (recette) ou terminé = pas « en retard », même échéance dépassée
+  const late = !fini && a.statut !== "recette" && a.statut !== "done" && a.echeance && a.echeance < TODAY;
+  const chips = [];
+  if(fini) chips.push(`<span class="chip done">🏁 terminé cette semaine</span>`);
+  if(late) chips.push(`<span class="chip late">⏰ en retard</span>`);
+  if((a.taches || []).length) chips.push(`<span class="chip ok">✔ ${a.taches.length} tâche${a.taches.length > 1 ? "s" : ""}</span>`);
+  if(nj) chips.push(`<span class="chip star">★ ${nj} jalon${nj > 1 ? "s" : ""}</span>`);
+  if(enc.length) chips.push(`<span class="chip run">▶ ${enc.length} en cours</span>`);
+  if(a.temps_min) chips.push(`<span class="chip">⏱ ${fmtDur(a.temps_min)}</span>`);
+  if((a.notes || []).length) chips.push(`<span class="chip">🗒 ${a.notes.length} note${a.notes.length > 1 ? "s" : ""}</span>`);
+  if(a.relances) chips.push(`<span class="chip">✉ ${a.relances} relance${a.relances > 1 ? "s" : ""}</span>`);
+  if((a.retours || []).length) chips.push(`<span class="chip vio">🧪 ${a.retours.length} retour${a.retours.length > 1 ? "s" : ""}</span>`);
+  if(!chips.length) chips.push(`<span class="chip off">aucun fait détecté</span>`);
+  let h = `<div class="cardx rap-point"><div class="cardx-h">` +
+    `<span class="rap-pt-title"${c ? ` onclick="openChantier('${p.chantier_id}')" title="Ouvrir le chantier"` : ""}>${esc(p.chantier)}</span>` +
+    (a.pct != null ? `<span class="rap-avlbl">avancement</span><span class="rap-prog" title="Avancement ${a.pct} %"><i style="width:${a.pct}%"></i></span><span class="rap-pct">${a.pct} %</span>` : "") +
+    `<span class="muted rap-pt-meta">${RAP_ST_LBL[a.statut] || ""}` +
+    `${a.echeance ? ` · échéance <b class="${late ? "bad-t" : ""}">${fmtShort(a.echeance)}</b>` : ""}</span>` +
+    `<span class="rap-chips">${chips.join("")}</span>` +
+    (dis ? "" : `<span class="del" title="Retirer ce chantier du rapport" onclick="mutate({op:'rapport_point_remove',rapport_id:'${r.id}',chantier_id:'${p.chantier_id}'})">×</span>`) +
+    `</div><div class="cardx-b">`;
+  const faits = [];
+  enc.forEach(t => faits.push(`<div class="rap-fact run"><span class="rap-fact-d">▶</span><span><b>${esc(t.label)}</b> — en cours${t.depuis ? ` <span class="muted">depuis le ${fmtShort(t.depuis)}</span>` : ""}</span></div>`));
+  (a.taches || []).forEach(t => faits.push(`<div class="rap-fact"><span class="rap-fact-d">${fmtShort(t.date)}</span><span>${t.jalon ? "★" : "✔"} ${esc(t.label)}</span></div>`));
+  (a.notes || []).forEach(n => faits.push(`<div class="rap-fact"><span class="rap-fact-d">${fmtShort(n.d)}</span><span>🗒 ${esc(n.t)}</span></div>`));
+  (a.retours || []).forEach(x => faits.push(`<div class="rap-fact"><span class="rap-fact-d"></span><span>🧪 ${esc(x.quoi)} <span class="muted">(${RET[x.statut] || x.statut})</span></span></div>`));
+  if(faits.length) h += `<div class="rap-facts">${faits.join("")}</div>`;
+  h += `<div class="rap-cols">`;
+  h += `<div><div class="lab">Avancement — commentaire` +
+    (dis ? "" : ` <span class="add" title="Pré-remplit depuis les faits ci-dessus (tâches, notes, temps) — à retoucher ensuite" onclick="rapPrefill('${r.id}','${p.chantier_id}')">⚡ pré-remplir</span>`) +
+    `</div>` + rapTA("Où en est ce chantier, ce qui a avancé, ce qui bloque…", p.avancement,
+                     `rapPointField('${r.id}','${p.chantier_id}','avancement',this.value)`, dis) + `</div>`;
+  h += `<div><div class="lab">REX du point</div>` +
+    rapTA("Leçon apprise sur CE chantier : ce qu'on referait, ce qu'on éviterait…", p.rex,
+          `rapPointField('${r.id}','${p.chantier_id}','rex',this.value)`, dis) + `</div>`;
+  h += `</div></div></div>`;
+  return h;
+}
+
+function rapAvenir(r){
+  const av = r.avenir || {};
+  const box = (title, rows, empty) => `<div class="cardx"><div class="cardx-h">${title}</div><div class="cardx-b">` +
+    (rows.length ? rows.join("") : `<div class="empty">${empty}</div>`) + `</div></div>`;
+  const line = (d, txt, late) => `<div class="rap-fact"><span class="rap-fact-d${late ? " bad-t" : ""}">${d}</span><span>${txt}</span></div>`;
+  const ech = (av.echeances || []).map(x => line(fmtShort(x.date), `<b>${esc(x.chantier)}</b>${x.late ? ` <span class="bad-t">en retard</span>` : ""}`, x.late));
+  const jal = (av.jalons || []).map(x => line("★", `${esc(x.label)} <span class="muted">· ${esc(x.chantier)}</span>`));
+  const liv = (av.livrables || []).map(x => line(fmtShort(x.date), `${esc(x.quoi)} <span class="muted">· ${esc(x.personne)} · ${esc(x.chantier)}</span>${x.late ? ` <span class="bad-t">en retard</span>` : ""}`, x.late));
+  const pro = (av.prochaines || []).map(x => line("", `<b>${esc(x.chantier)}</b> : ${(x.taches || []).map(esc).join(" · ")}`));
+  const ris = (av.risques || []).map(x => line(fmtShort(x.date), `${esc(x.libelle)} <span class="muted">· ${esc(x.chantier)}</span>`));
+  const rec = (av.recette || []).map(x => line("🧪", `<b>${esc(x.chantier)}</b> <span class="muted">en attente de recette</span>` +
+    (x.depasse_j ? ` · <span class="bad-t">échéance dépassée depuis ${x.depasse_j} j</span>` : "") +
+    (x.retours_ouverts ? ` · ${x.retours_ouverts} retour(s) ouvert(s)` : "")));
+  const rap2 = (av.rappels || []).map(x => line(fmtShort(x.date), esc(x.label)));
+  let h = `<div class="avenir-grid">`;
+  h += box("Échéances de chantiers", ech, "Aucune échéance sous 3 semaines.");
+  h += box("Jalons à franchir", jal, "Aucun jalon en attente.");
+  h += box("Livrables attendus des autres", liv, "Rien d'attendu sous 3 semaines.");
+  h += box("Prochaines tâches prêtes", pro, "Rien de prêt à démarrer.");
+  if(rec.length) h += box("En attente de recette", rec, "");
+  if(ris.length) h += box("Risques à revoir", ris, "");
+  if(rap2.length) h += box("Rappels à échéance", rap2, "");
+  h += `</div>`;
+  return h;
+}
+
+function rapArchive(curSem){
+  const list = rapports().slice().sort((a, b) => a.semaine < b.semaine ? 1 : -1);
+  if(!list.length) return "";
+  let h = dsection("Rapports archivés");
+  h += `<table class="ptable"><thead><tr><th>Semaine</th><th>Période</th><th>Statut</th><th>Visa</th><th>Tâches</th><th>Retards</th><th>Temps</th><th></th></tr></thead><tbody>`;
+  list.forEach(x => {
+    const s = x.stats || {};
+    h += `<tr${x.semaine === curSem ? ` class="rap-cur"` : ""}><td><b>${esc(x.semaine)}</b></td>` +
+      `<td>${fmtShort(x.debut)} → ${fmtShort(x.fin)}</td>` +
+      `<td><span class="rap-badge sm${x.statut === "finalise" ? " ok" : ""}">${x.statut === "finalise" ? "Finalisé" : "Brouillon"}</span></td>` +
+      `<td>${x.statut === "finalise" && x.vise_par ? esc(x.vise_par) : `<span class="muted">—</span>`}</td>` +
+      `<td>${s.taches || 0}</td>` +
+      `<td>${s.retards ? `<b class="bad-t">${s.retards}</b>` : "0"}</td>` +
+      `<td>${s.temps_min ? fmtDur(s.temps_min) : "—"}</td>` +
+      `<td class="pacts"><a onclick="rapGoto('${x.debut}')">Ouvrir</a></td></tr>`;
+  });
+  h += `</tbody></table>`;
+  return h;
+}
+
+function renderRapport(){
+  if(!RAPPORT_MON) RAPPORT_MON = weekStart(TODAY);
+  const mon = RAPPORT_MON, dim = addDays(mon, 6), sem = isoWeekStr(mon);
+  const r = rapports().find(x => x.semaine === sem);
+  const curMon = weekStart(TODAY);
+
+  let h = `<div class="rap-top">`;
+  h += `<div class="rap-nav"><button class="ghost" onclick="rapShift(-7)" title="Semaine précédente">‹</button>` +
+       `<button class="ghost"${mon === curMon ? " disabled" : ""} onclick="RAPPORT_MON=null;renderRapport()">Cette semaine</button>` +
+       `<button class="ghost" onclick="rapShift(7)" title="Semaine suivante">›</button></div>`;
+  h += `<div><div class="d-status">Rapport hebdomadaire${mon === curMon ? "" : (mon < curMon ? " · semaine passée" : " · semaine future")}</div>` +
+       `<h2 class="pg-title">Semaine ${+sem.split("-W")[1]} · du ${fmt(mon)} au ${fmt(dim)}</h2></div>`;
+  h += `<div class="grow"></div>`;
+  if(r){
+    const fin = r.statut === "finalise";
+    h += `<span class="rap-badge${fin ? " ok" : ""}">${fin ? "Finalisé" : "Brouillon"}</span>`;
+    if(!fin) h += `<button class="ghost" title="Recalcule les faits (tâches, temps, notes, à venir…) sans toucher à ta rédaction" onclick="mutate({op:'rapport_generate',semaine:'${sem}'})">↻ Actualiser les données</button>`;
+    h += fin ? `<button class="ghost" onclick="mutate({op:'rapport_reopen',rapport_id:'${r.id}'})">Rouvrir</button>`
+             : `<button class="ghost primary" onclick="rapFinalize('${r.id}')">Finaliser</button>`;
+    h += `<button class="ghost" onclick="rapportPrint('${r.id}')">Imprimer / PDF</button>`;
+    if(fin) h += `<button class="ghost primary" onclick="rapportMail('${r.id}')" title="Génère le PDF et ouvre un brouillon Outlook avec la pièce jointe">✉ Envoyer par mail</button>`;
+    h += `<span class="danger-link" onclick="rapDelete('${r.id}')">Supprimer</span>`;
+  }
+  h += `</div>`;
+
+  if(!r){
+    const vendredi = addDays(mon, 4), ouvert = TODAY >= vendredi;
+    h += `<div class="cardx rap-emptycard"><div class="cardx-b">` +
+      `<p><b>Aucun rapport pour cette semaine.</b></p>` +
+      `<p class="muted">« Générer » construit le bilan automatiquement à partir de ce que l'appli sait déjà : tâches terminées, jalons franchis, notes de chantier, temps chronométré, relances, retours de recette — plus le programme à venir (échéances, jalons, livrables attendus, risques à revoir, prochaines tâches). Il ne reste qu'à rédiger : synthèse, commentaire d'avancement par chantier, REX par point et REX général.</p>` +
+      `<p class="muted">💡 Pose des <b>notes</b> sur tes chantiers au fil de la semaine (page chantier → « + note ») : elles remontent automatiquement dans le bilan et servent de matière au pré-remplissage.</p>` +
+      (ouvert
+        ? `<button class="btn primary" onclick="mutate({op:'rapport_generate',semaine:'${sem}'})">Générer le rapport de cette semaine</button>`
+        : `<button class="btn" disabled title="Rituel du vendredi : le bilan s'établit en fin de semaine">Générer le rapport de cette semaine</button>` +
+          `<div class="rap-verrou">🔒 Le bilan d'une semaine s'établit à partir de son <b>vendredi</b> — celui-ci s'ouvrira le ${fmt(vendredi)}. Les semaines passées restent générables (rattrapage).</div>`) +
+      `</div></div>`;
+    h += rapArchive(sem);
+    $("rapport").innerHTML = h;
+    return;
+  }
+
+  const dis = r.statut === "finalise";
+  const st = r.stats || {};
+  const retards = r.retards || [];
+  const manq = retards.filter(x => !(x.justification || "").trim()).length;
+  // Rapport d'une version précédente (avant Gantt / en cours / retards) : inviter à recalculer
+  if(!dis && (st.en_cours == null || !(r.gantt || []).length))
+    h += `<div class="rap-warnbanner">⚠ Ce rapport a été calculé avec une version précédente — clique <b>« ↻ Actualiser les données »</b> pour compléter : chantiers en cours, avancement global, Gantt, retards à justifier. Ta rédaction est conservée.</div>`;
+  h += `<div class="kpis">` +
+    kpi("Chantiers en cours", String(st.en_cours != null ? st.en_cours : "—"),
+        `avancement global ${st.avancement != null ? st.avancement + " %" : "—"} · ${st.termines || 0} terminé(s) cette semaine${st.termines ? " 🏁" : ""}`, st.termines ? "good" : "") +
+    kpi("Tâches terminées", String(st.taches || 0), `${st.jalons || 0} jalon(s) franchi(s)`, st.taches ? "good" : "") +
+    kpi("Temps chronométré", st.temps_min ? fmtDur(st.temps_min) : "—", `${st.notes || 0} note(s) · ${st.actions || 0} action(s) tracée(s)`) +
+    kpi("Retards à justifier", String(retards.length), retards.length ? (manq ? `${manq} justification(s) manquante(s)` : "tout est justifié ✓") : "aucun retard 🎉", retards.length ? (manq ? "bad" : "good") : "good") + `</div>`;
+  h += `<div class="muted small rap-maj">${r.cree_par ? `Établi par <b>${esc(r.cree_par)}</b>${r.cree_le ? ` le ${fmtDT(r.cree_le)}` : ""} · ` : ""}` +
+       `${r.maj_le ? `données calculées le ${fmtDT(r.maj_le)} · ` : ""}` +
+       (dis ? `<b>visé par ${esc(r.vise_par || "—")}</b> le ${fmtDT(r.finalise_le)} — données figées, rédaction verrouillée (« Rouvrir » pour modifier).`
+            : `« ↻ Actualiser » recalcule les faits ; ta rédaction (synthèse, avancements, REX, justifications) n'est jamais écrasée.`) + `</div>`;
+
+  if(retards.length){
+    h += dsection(`Retards à justifier <span class="muted small">· obligatoire avant finalisation</span>`);
+    retards.forEach(x => {
+      const ok = (x.justification || "").trim();
+      h += `<div class="cardx rap-late"><div class="cardx-h">` +
+        `<span class="rap-pt-title"${chById(x.chantier_id) ? ` onclick="openChantier('${x.chantier_id}')"` : ""}>${esc(x.chantier)}</span>` +
+        `<span class="muted rap-pt-meta">échéance ${fmt(x.echeance)} · <b class="bad-t">${x.jours} j de retard</b></span>` +
+        `<span class="rap-chips">${ok ? `<span class="chip ok">✔ justifié</span>` : `<span class="chip late">à justifier</span>`}</span></div>` +
+        `<div class="cardx-b">` +
+        rapTA("Justification obligatoire : cause du retard, impact, plan de rattrapage, nouvelle date visée…",
+              x.justification, `rapRetardField('${r.id}','${x.chantier_id}',this.value)`, dis) +
+        `</div></div>`;
+    });
+  }
+
+  h += dsection("Synthèse de la semaine");
+  h += rapTA("Deux ou trois phrases pour la direction : l'essentiel de la semaine, les décisions prises, les alertes…",
+             r.synthese, `rapField('${r.id}','synthese',this.value)`, dis);
+
+  h += dsection(`Bilan par chantier <span class="muted small">· ${(r.points || []).length} point(s)</span>`);
+  if(!(r.points || []).length)
+    h += `<div class="empty">Aucune activité détectée cette semaine (tâche terminée, note, temps chronométré, relance ou retour de recette).</div>`;
+  (r.points || []).forEach(p => { h += rapPointCard(r, p, dis); });
+  const hc = r.hors_chantier || [];
+  if(hc.length){
+    const tot = hc.reduce((a, x) => a + (x.temps_min || 0), 0);
+    h += `<div class="cardx rap-point"><div class="cardx-h"><span class="rap-pt-title">Hors chantier — réunions, RDV, divers</span>` +
+      `<span class="rap-chips"><span class="chip">⏱ ${fmtDur(tot)}</span><span class="chip">${hc.length} action${hc.length > 1 ? "s" : ""}</span></span></div>` +
+      `<div class="cardx-b"><div class="rap-facts">` +
+      hc.map(x => `<div class="rap-fact"><span class="rap-fact-d">${fmtDur(x.temps_min)}</span>` +
+        `<span><b>${esc(x.label)}</b>${x.kind === "rappel" ? ` <span class="muted">· routine</span>` : ""}` +
+        ` <span class="muted">(${(x.jours || []).map(fmtShort).join(", ")})</span></span></div>`).join("") +
+      `</div></div></div>`;
+  }
+  if(!dis){
+    const dans = new Set((r.points || []).map(p => p.chantier_id));
+    const dispo = STORE.chantiers.filter(c => !dans.has(c.id));
+    if(dispo.length){
+      h += `<div class="rap-add"><select id="rapAddSel" class="sel">` +
+        dispo.map(c => `<option value="${c.id}">${esc(c.titre)}</option>`).join("") +
+        `</select> <button class="btn sm" onclick="mutate({op:'rapport_point_add',rapport_id:'${r.id}',chantier_id:document.getElementById('rapAddSel').value})">+ Ajouter ce chantier au rapport</button></div>`;
+    }
+  }
+
+  h += dsection(`Programmé pour la suite <span class="muted small">· jusqu'au ${fmt(addDays(dim, 14))}</span>`);
+  h += rapAvenir(r);
+  h += `<div class="cardx rap-blk"><div class="cardx-h">Priorités de la semaine prochaine</div><div class="cardx-b">` +
+       rapTA("Les 3 à 5 priorités que tu annonces pour la semaine à venir…", r.priorites,
+             `rapField('${r.id}','priorites',this.value)`, dis) + `</div></div>`;
+
+  h += dsection("REX général de la semaine");
+  const rg = r.rex_general || {};
+  h += `<div class="rex-grid">` +
+    `<div class="cardx"><div class="cardx-h rex-plus">✚ Ce qui a bien fonctionné</div><div class="cardx-b">` +
+      rapTA("Pratiques à garder, réussites, bonnes surprises…", rg.positif, `rapField('${r.id}','rex_positif',this.value)`, dis) + `</div></div>` +
+    `<div class="cardx"><div class="cardx-h rex-minus">− Ce qui a coincé</div><div class="cardx-b">` +
+      rapTA("Frictions, pertes de temps, blocages, mauvaises surprises…", rg.negatif, `rapField('${r.id}','rex_negatif',this.value)`, dis) + `</div></div>` +
+    `<div class="cardx"><div class="cardx-h rex-act">➜ Actions d'amélioration</div><div class="cardx-b">` +
+      rapTA("Ce qu'on change dès lundi : qui, quoi, quand…", rg.actions, `rapField('${r.id}','rex_actions',this.value)`, dis) + `</div></div>` +
+    `</div>`;
+
+  h += rapArchive(sem);
+  $("rapport").innerHTML = h;
+}
+
+// ---- Document imprimable (→ PDF via le navigateur) : le livrable à envoyer.
+const GANTT_COL = {doing: "#2563eb", recette: "#7c3aed", todo: "#94a3b8", done: "#10b981"};
+const MOIS_C = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."];
+function moisSuivant(iso){   // 1er jour du mois suivant "YYYY-MM-DD"
+  const y = +iso.slice(0, 4), m = +iso.slice(5, 7);
+  return m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, "0")}-01`;
+}
+// Gantt global CSS pur (imprimable) : chaque chantier = une barre datée, la
+// semaine du rapport est surlignée, les retards sont cerclés de rouge.
+function rapGanttHTML(r){
+  const rows = r.gantt || [];
+  if(!rows.length) return "";
+  let lo = r.debut, hi = addDays(r.fin, 14);
+  rows.forEach(g => { if(g.debut < lo) lo = g.debut; if(g.fin > hi) hi = g.fin; });
+  const capLo = addDays(r.debut, -70), capHi = addDays(r.fin, 70);   // borne l'axe (~5 mois max)
+  if(lo < capLo) lo = capLo;
+  if(hi > capHi) hi = capHi;
+  const span = Math.max(1, daysBetween(lo, hi));
+  const pos = d => Math.max(0, Math.min(100, daysBetween(lo, d < lo ? lo : d) / span * 100));
+  const weekL = pos(r.debut), weekW = Math.max(0.5, pos(addDays(r.fin, 1)) - weekL);
+  // axe : un repère au 1er de chaque mois
+  let ticks = "", mt = moisSuivant(lo.slice(0, 8) + "01");
+  if(lo.slice(8, 10) === "01") mt = lo;
+  for(; mt <= hi; mt = moisSuivant(mt))
+    ticks += `<span class="gtick" style="left:${pos(mt)}%">${MOIS_C[+mt.slice(5, 7) - 1]}</span>`;
+  let h = `<div class="grow2"><span class="gname"></span><div class="gaxis">${ticks}</div><span class="gpct"></span></div>`;
+  rows.forEach(g => {
+    const l = pos(g.debut), w = Math.max(1, pos(g.fin) - l);
+    const col = GANTT_COL[g.statut] || "#94a3b8";
+    h += `<div class="grow2"><span class="gname" title="${esc(g.chantier)}">${esc(g.chantier)}</span>` +
+      `<div class="gtrack"><span class="gweek" style="left:${weekL}%;width:${weekW}%"></span>` +
+      `<span class="gbar${g.late ? " glate" : ""}" style="left:${l}%;width:${w}%;background:${col}"></span></div>` +
+      `<span class="gpct">${g.pct != null ? g.pct + " %" : ""}${g.late ? ` <b class="lt2">retard</b>` : ""}${g.sans_echeance ? " (sans éch.)" : ""}</span></div>`;
+  });
+  h += `<div class="gleg"><span><i style="background:${GANTT_COL.doing}"></i> en cours</span>` +
+    `<span><i style="background:${GANTT_COL.recette}"></i> en recette</span>` +
+    `<span><i style="background:${GANTT_COL.todo}"></i> à faire</span>` +
+    `<span><i style="background:${GANTT_COL.done}"></i> terminé</span>` +
+    `<span><i class="gleg-late"></i> en retard</span>` +
+    `<span><i class="gleg-week"></i> semaine du rapport</span></div>`;
+  return h;
+}
+// Barres « part du temps de la semaine par chantier » — en POURCENTAGE du temps
+// total chronométré (le reste — réunions, RDV, divers — apparaît en « hors chantier »).
+function rapTempsHTML(r){
+  const total = (r.stats || {}).temps_min || 0;
+  if(!total) return "";
+  const tp = (r.points || []).map(p => ({n: p.chantier, m: (p.auto || {}).temps_min || 0}))
+    .filter(x => x.m > 0).sort((a, b) => b.m - a.m).slice(0, 10);
+  if(!tp.length) return "";
+  const reste = total - tp.reduce((a, x) => a + x.m, 0);
+  if(reste > total * 0.02) tp.push({n: "Hors chantier (réunions, RDV, divers)", m: reste, off: true});
+  const mx = Math.max(...tp.map(x => x.m));
+  const pc = m => Math.round(100 * m / total);
+  return tp.map(x =>
+    `<div class="grow2"><span class="gname" title="${esc(x.n)}">${esc(x.n)}</span>` +
+    `<div class="gtrack tbar"><span class="gbar" style="left:0;width:${Math.max(1.5, x.m / mx * 100)}%;background:${x.off ? "#94a3b8" : "#2563eb"}"></span></div>` +
+    `<span class="gpct"><b>${pc(x.m)} %</b> du temps</span></div>`).join("");
+}
+// Donut « répartition du temps par type » (conic-gradient, imprimable) :
+// tâches planifiées / routines / recette / libre (réunions, RDV ajoutés à la main).
+const RAP_KIND_LBL = {tache: "Tâches des chantiers", rappel: "Routines", recette: "Recette / tests", libre: "Libre (réunions, RDV…)"};
+const RAP_KIND_COL = {tache: "#2563eb", rappel: "#d97706", recette: "#7c3aed", libre: "#94a3b8"};
+function rapDonutHTML(r){
+  const st = r.stats || {}, kinds = st.temps_kinds || {}, total = st.temps_min || 0;
+  const rows = ["tache", "rappel", "recette", "libre"].map(k => ({k, m: kinds[k] || 0})).filter(x => x.m > 0);
+  if(!total || !rows.length) return "";
+  rows.sort((a, b) => b.m - a.m);
+  let acc = 0;
+  const stops = rows.map(x => {
+    const from = acc / total * 100, to = (acc + x.m) / total * 100;
+    acc += x.m;
+    return `${RAP_KIND_COL[x.k]} ${from.toFixed(2)}% ${to.toFixed(2)}%`;
+  }).join(", ");
+  const leg = rows.map(x =>
+    `<div class="dlegrow"><i style="background:${RAP_KIND_COL[x.k]}"></i>${RAP_KIND_LBL[x.k] || x.k}` +
+    `<b>${Math.round(100 * x.m / total)} %</b></div>`).join("");
+  return `<div class="donutwrap"><div class="donut" style="background:conic-gradient(${stops})"><i>${fmtDur(total)}</i></div>` +
+    `<div class="dleg">${leg}</div></div>`;
+}
+function rapportDocHTML(r){
+  const st = r.stats || {}, rg = r.rex_general || {}, av = r.avenir || {};
+  const para = t => `<div class="txt">${esc(t).replace(/\n/g, "<br>")}</div>`;
+  const num = +r.semaine.split("-W")[1];
+  const finalise = r.statut === "finalise";
+  const termineIds = new Set((r.termines || []).map(x => x.chantier_id));
+
+  // — bilan par chantier : avancement/durée bien visibles dans l'en-tête —
+  let pts = "";
+  (r.points || []).forEach(p => {
+    const a = p.auto || {}, enc = a.en_cours || [];
+    const late = !termineIds.has(p.chantier_id) && a.statut !== "recette" && a.statut !== "done"
+                 && a.echeance && a.echeance < TODAY;
+    const faits = [
+      ...(a.taches || []).map(t => `<li><span class="fk${t.jalon ? " fkj" : ""}">${t.jalon ? "Jalon" : "Tâche"}</span>${esc(t.label)} <span class="d">${fmtShort(t.date)}</span></li>`),
+      ...(a.notes || []).map(n => `<li><span class="fk fkn">Note</span>${esc(n.t)} <span class="d">${fmtShort(n.d)}</span></li>`),
+      ...(a.retours || []).map(x => `<li><span class="fk fkr">Retour</span>${esc(x.quoi)} <span class="d">${RET[x.statut] || x.statut}</span></li>`),
+    ].join("");
+    const badge = termineIds.has(p.chantier_id) ? `<span class="tag tdone">Terminé cette semaine</span>`
+                : late ? `<span class="tag tlate">En retard</span>` : "";
+    pts += `<div class="pt"><h2><span class="ptitle">${esc(p.chantier)}</span>${badge}` +
+      `<span class="plab">avancement</span><span class="pbar"><i style="width:${a.pct || 0}%"></i></span><span class="ppct">${a.pct != null ? a.pct + " %" : ""}</span></h2>` +
+      `<div class="pmeta">${[RAP_ST_LBL[a.statut] || "",
+                            a.temps_min ? `${fmtDur(a.temps_min)} passées cette semaine` : "",
+                            a.echeance ? `échéance ${fmt(a.echeance)}` : ""].filter(Boolean).join(" · ")}</div>` +
+      (enc.length ? `<div class="enc"><b>En ce moment&nbsp;:</b> ${enc.map(t => `${esc(t.label)}${t.depuis ? ` <span class="d">(depuis le ${fmtShort(t.depuis)})</span>` : ""}`).join(" · ")}</div>` : "") +
+      (faits ? `<ul class="faits">${faits}</ul>` : "") +
+      ((p.avancement || "").trim() ? `<div class="blk"><b>Avancement</b>${para(p.avancement)}</div>` : "") +
+      ((p.rex || "").trim() ? `<div class="blk rex"><b>REX</b>${para(p.rex)}</div>` : "") + `</div>`;
+  });
+
+  // — retards : tableau justifications (obligatoires) —
+  const retards = r.retards || [];
+  const retH = retards.length
+    ? `<table class="rtable"><thead><tr><th>Chantier</th><th>Échéance</th><th>Retard</th><th>Justification</th></tr></thead><tbody>` +
+      retards.map(x => `<tr><td><b>${esc(x.chantier)}</b></td><td>${fmt(x.echeance)}</td>` +
+        `<td class="lt">${x.jours} j</td><td>${(x.justification || "").trim() ? esc(x.justification).replace(/\n/g, "<br>") : `<i class="mq">à justifier</i>`}</td></tr>`).join("") +
+      `</tbody></table>` : "";
+
+  const termH = (r.termines || []).length
+    ? `<ul>${r.termines.map(x => `<li><b>${esc(x.chantier)}</b> — terminé le ${fmt(x.date)}</li>`).join("")}</ul>` : "";
+
+  // chaque famille a son sous-titre (échéances, jalons, attentes, recettes…)
+  const avSec = (titre, rows) => rows.length ? `<div class="sub4">${titre}</div><ul>${rows.join("")}</ul>` : "";
+  const avH = [
+    avSec("Échéances de chantiers", (av.echeances || []).map(x => `<li>${fmt(x.date)} — <b>${esc(x.chantier)}</b>${x.late ? ` <span class="lt2">en retard</span>` : ""}</li>`)),
+    avSec("Jalons à franchir", (av.jalons || []).map(x => `<li><span class="fk fkj">Jalon</span>${esc(x.label)} — <b>${esc(x.chantier)}</b></li>`)),
+    avSec("Livrables attendus des autres", (av.livrables || []).map(x => `<li>${fmt(x.date)} — ${esc(x.quoi)} <span class="d">(${esc(x.personne)} · ${esc(x.chantier)})</span>${x.late ? ` <span class="lt2">en retard</span>` : ""}</li>`)),
+    avSec("Prochaines tâches prêtes à démarrer", (av.prochaines || []).map(x => `<li><b>${esc(x.chantier)}</b> : ${(x.taches || []).map(esc).join(" · ")}</li>`)),
+    avSec("En attente de recette", (av.recette || []).map(x => `<li><b>${esc(x.chantier)}</b>` +
+      (x.depasse_j ? ` — <span class="lt2">échéance dépassée depuis ${x.depasse_j} j</span>` : "") +
+      (x.retours_ouverts ? ` — ${x.retours_ouverts} retour(s) ouvert(s)` : "") + `</li>`)),
+    avSec("Risques à revoir", (av.risques || []).map(x => `<li>${fmt(x.date)} — ${esc(x.libelle)} <span class="d">(${esc(x.chantier)})</span></li>`)),
+  ].filter(Boolean).join("");
+  const rexG = [["Points positifs — ce qui a bien fonctionné", rg.positif],
+                ["Points de friction — ce qui a coincé", rg.negatif],
+                ["Actions d'amélioration", rg.actions]]
+    .filter(([, v]) => (v || "").trim())
+    .map(([t, v]) => `<div class="blk"><b>${t}</b>${para(v)}</div>`).join("");
+  const gantt = rapGanttHTML(r), temps = rapTempsHTML(r), donut = rapDonutHTML(r);
+  const tempsSec = (donut || temps)
+    ? `<h3 class="sec">Répartition du temps de la semaine</h3><div class="tflex">` +
+      (donut ? `<div class="tcol tcol-d"><div class="sub4">Par type d'activité</div>${donut}</div>` : "") +
+      (temps ? `<div class="tcol"><div class="sub4">Par chantier — part du temps total</div>${temps}</div>` : "") +
+      `</div>` : "";
+
+  return `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Rapport hebdomadaire — S${num}</title>` +
+    `<style>@page{margin:1.8cm}` +
+    `body{font-family:Inter,"Segoe UI",Arial,sans-serif;color:#111;line-height:1.5;max-width:880px;margin:0 auto;padding:24px;` +
+    `-webkit-print-color-adjust:exact;print-color-adjust:exact}` +
+    `h1{font-size:22px;margin:0 0 2px;letter-spacing:-.02em}` +
+    `.hdr{display:flex;align-items:flex-start;gap:16px;margin-bottom:8px}` +
+    `.hdr>div:first-child{flex:1}` +
+    `.ovl{font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:#666;margin-bottom:4px}` +
+    `.sub1{font-size:12.5px;color:#444;font-weight:600}` +
+    `.hst{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;padding:6px 14px;` +
+    `border:2px solid;border-radius:6px;margin-top:6px}` +
+    `.hst.hok{color:#065f46;border-color:#065f46;background:#ecfdf5}` +
+    `.hst.hdr2{color:#92400e;border-color:#b45309;background:#fffbeb}` +
+    `.meta0{color:#555;font-size:11.5px;margin-bottom:14px;border-bottom:2px solid #111;padding-bottom:10px}` +
+    `.fk{display:inline-block;font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;` +
+    `color:#475569;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:3px;padding:1px 6px;` +
+    `margin-right:7px;vertical-align:1px;min-width:36px;text-align:center}` +
+    `.fk.fkj{color:#92400e;background:#fef3c7;border-color:#fde68a}` +
+    `.fk.fkn{color:#1e40af;background:#eff6ff;border-color:#bfdbfe}` +
+    `.fk.fkr{color:#5b21b6;background:#f5f3ff;border-color:#ddd6fe}` +
+    `.foot{margin-top:14px;font-size:10px;color:#999;text-align:center}` +
+    `.kband{display:flex;gap:8px;margin:12px 0 18px}` +
+    `.kband>span{flex:1;border:1px solid #e5e7eb;border-radius:8px;padding:8px 12px;font-size:11px;color:#555}` +
+    `.kband b{font-size:18px;display:block;color:#111;font-variant-numeric:tabular-nums}` +
+    `.kband .warn b{color:#dc2626}` +
+    `h2{font-size:14px;margin:14px 0 2px;border-bottom:1px solid #e5e7eb;padding-bottom:3px;display:flex;align-items:center;gap:8px}` +
+    `h2 .ptitle{flex-shrink:1}` +
+    `h3.sec{font-size:11.5px;text-transform:uppercase;letter-spacing:.6px;margin:20px 0 6px;color:#333;` +
+    `border-left:3px solid #111;padding-left:8px}` +
+    `.plab{font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:600;margin-left:auto}` +
+    `.pbar{flex:1;min-width:60px;max-width:160px;height:7px;background:#eef2f7;border-radius:4px;overflow:hidden}` +
+    `.pbar i{display:block;height:100%;background:#10b981}` +
+    `.ppct{font-size:11px;color:#333;font-weight:600;min-width:34px;text-align:right}` +
+    `.sub4{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#374151;margin:10px 0 3px}` +
+    `.lt2{color:#dc2626;font-weight:700;font-size:11px}` +
+    `.tflex{display:flex;gap:26px;align-items:flex-start}` +
+    `.tcol{flex:1;min-width:0}.tcol-d{flex:0 0 300px}` +
+    `.donutwrap{display:flex;gap:14px;align-items:center;margin-top:6px}` +
+    `.donut{position:relative;width:120px;height:120px;border-radius:50%;flex-shrink:0}` +
+    `.donut i{position:absolute;inset:26px;background:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;` +
+    `font-style:normal;font-size:12px;font-weight:700;color:#333}` +
+    `.dleg{font-size:11px;color:#333}` +
+    `.dlegrow{display:flex;align-items:center;gap:6px;margin:3px 0;white-space:nowrap}` +
+    `.dlegrow i{width:10px;height:10px;border-radius:3px;flex-shrink:0}` +
+    `.dlegrow b{margin-left:6px;font-variant-numeric:tabular-nums}` +
+    `.pmeta{font-size:11.5px;color:#555;margin:2px 0 4px;font-weight:600}` +
+    `.enc{font-size:12px;background:#eff6ff;border-left:3px solid #2563eb;padding:5px 9px;margin:4px 0}` +
+    `.tag{font-size:10px;font-weight:700;padding:2px 7px;border-radius:9px;white-space:nowrap}` +
+    `.tag.tdone{background:#d1fae5;color:#065f46}.tag.tlate{background:#fee2e2;color:#991b1b}` +
+    `.txt{white-space:pre-wrap;font-size:12.5px;margin:2px 0 6px}.blk{margin:6px 0}` +
+    `.blk.rex .txt{background:#f6f6f4;padding:6px 10px;border-left:3px solid #bbb}` +
+    `ul{margin:4px 0 8px;padding-left:20px;font-size:12px}ul.faits{list-style:none;padding-left:4px}` +
+    `.d{color:#888;font-size:10.5px}.pt{page-break-inside:avoid}` +
+    `.grow2{display:flex;align-items:center;gap:7px;margin:2.5px 0}` +
+    `.gname{width:200px;font-size:10px;text-align:right;color:#333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0}` +
+    `.gtrack{position:relative;flex:1;height:12px;background:#f1f5f9;border-radius:3px}` +
+    `.gtrack.tbar{background:#f8fafc}` +
+    `.gweek{position:absolute;top:-2px;bottom:-2px;background:rgba(37,99,235,.09);border-left:1px solid rgba(37,99,235,.35);border-right:1px solid rgba(37,99,235,.35)}` +
+    `.gbar{position:absolute;top:2px;bottom:2px;border-radius:3px;min-width:2px}` +
+    `.gbar.glate{box-shadow:0 0 0 1.5px #dc2626}` +
+    `.gpct{width:68px;font-size:9.5px;color:#555;flex-shrink:0}` +
+    `.gaxis{position:relative;flex:1;height:13px}` +
+    `.gtick{position:absolute;top:0;font-size:9px;color:#999;border-left:1px solid #ddd;padding-left:3px;height:13px}` +
+    `.gleg{display:flex;gap:14px;font-size:10px;color:#555;margin:8px 0 0 207px;flex-wrap:wrap}` +
+    `.gleg i{display:inline-block;width:14px;height:8px;border-radius:2px;margin-right:4px;vertical-align:middle}` +
+    `.gleg-late{box-shadow:0 0 0 1.5px #dc2626;background:#fff!important}` +
+    `.gleg-week{background:rgba(37,99,235,.15)!important;border:1px solid rgba(37,99,235,.4)}` +
+    `.rtable{border-collapse:collapse;width:100%;font-size:11.5px;margin:4px 0 8px}` +
+    `.rtable th{text-align:left;background:#f8fafc;border:1px solid #e2e8f0;padding:5px 8px;font-size:10.5px;text-transform:uppercase;letter-spacing:.3px;color:#334155}` +
+    `.rtable td{border:1px solid #e5e7eb;padding:5px 8px;vertical-align:top}` +
+    `.rtable .lt{color:#dc2626;font-weight:700;white-space:nowrap}.mq{color:#dc2626}` +
+    `.visa{display:flex;gap:24px;margin-top:26px;padding-top:12px;border-top:2px solid #111;font-size:12px}` +
+    `.visa>div{flex:1;border:1px solid #e5e7eb;border-radius:8px;padding:10px 12px;min-height:58px}` +
+    `.visa .vt{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#666;margin-bottom:4px}` +
+    `.draft{color:#b45309;font-weight:700}` +
+    `</style></head><body>` +
+    `<div class="hdr"><div>` +
+    `<div class="ovl">Suivi des chantiers · Pilotage hebdomadaire</div>` +
+    `<h1>Rapport hebdomadaire — Semaine ${num}</h1>` +
+    `<div class="sub1">Du ${fmt(r.debut)} au ${fmt(r.fin)}</div></div>` +
+    `<div class="hst ${finalise ? "hok" : "hdr2"}">${finalise ? "Finalisé" : "Brouillon"}</div></div>` +
+    `<div class="meta0">${r.cree_par ? `Établi par ${esc(r.cree_par)}${r.cree_le ? ` le ${fmtDT(r.cree_le)}` : ""}` : ""}` +
+    `${r.maj_le ? ` · données du ${fmtDT(r.maj_le)}` : ""}` +
+    `${finalise && r.vise_par ? ` · <b>visé par ${esc(r.vise_par)} le ${fmtDT(r.finalise_le)}</b>` : ""}</div>` +
+    `<div class="kband">` +
+    `<span><b>${st.en_cours != null ? st.en_cours : "—"}</b>chantiers en cours</span>` +
+    `<span><b>${st.avancement != null ? st.avancement + " %" : "—"}</b>avancement global (en cours)</span>` +
+    `<span><b>${st.termines || 0}</b>terminés cette semaine</span>` +
+    `<span><b>${st.taches || 0}</b>tâches finies · ${st.jalons || 0} jalon(s)</span>` +
+    `<span><b>${st.temps_min ? fmtDur(st.temps_min) : "—"}</b>temps chronométré</span>` +
+    `<span${retards.length ? ` class="warn"` : ""}><b>${retards.length}</b>retard(s) justifié(s)</span>` +
+    `</div>` +
+    ((r.synthese || "").trim() ? `<h3 class="sec">Synthèse</h3>${para(r.synthese)}` : "") +
+    (gantt ? `<h3 class="sec">Vue d'ensemble du portefeuille — Gantt</h3>${gantt}` : "") +
+    tempsSec +
+    (termH ? `<h3 class="sec">Chantiers terminés cette semaine</h3>${termH}` : "") +
+    (retH ? `<h3 class="sec">Retards et justifications</h3>${retH}` : "") +
+    `<h3 class="sec">Bilan par chantier</h3>` + (pts || `<div class="txt">Aucune activité détectée cette semaine.</div>`) +
+    ((r.hors_chantier || []).length
+      ? `<div class="pt"><h2><span class="ptitle">Hors chantier — réunions, rendez-vous, divers</span></h2><ul class="faits">` +
+        r.hors_chantier.map(x => `<li><span class="fk">${x.kind === "rappel" ? "Routine" : "Libre"}</span>${esc(x.label)}` +
+          ` <span class="d">${fmtDur(x.temps_min)} · ${(x.jours || []).map(fmtShort).join(", ")}</span></li>`).join("") + `</ul></div>`
+      : "") +
+    (avH ? `<h3 class="sec">Programmé pour la suite</h3>${avH}` : "") +
+    ((r.priorites || "").trim() ? `<h3 class="sec">Priorités de la semaine prochaine</h3>${para(r.priorites)}` : "") +
+    (rexG ? `<h3 class="sec">REX général</h3>${rexG}` : "") +
+    `<div class="visa">` +
+    `<div><div class="vt">Établi par</div>${r.cree_par ? `<b>${esc(r.cree_par)}</b>` : "________________"}` +
+    `${r.cree_le ? `<br><span class="d">le ${fmtDT(r.cree_le)}</span>` : ""}</div>` +
+    `<div><div class="vt">Visé (finalisé) par</div>${finalise && r.vise_par ? `<b>${esc(r.vise_par)}</b>` : "________________"}` +
+    `${finalise && r.finalise_le ? `<br><span class="d">le ${fmtDT(r.finalise_le)}</span>` : ""}</div>` +
+    `</div>` +
+    `<div class="foot">Rapport généré depuis l'application Suivi des chantiers${r.maj_le ? ` — données du ${fmtDT(r.maj_le)}` : ""}</div>` +
+    `</body></html>`;
+}
+function rapportPrint(rid){
+  const r = rapports().find(x => x.id === rid); if(!r) return;
+  const w = window.open("", "_blank");
+  if(!w){ alert("Autorise les pop-ups pour imprimer / exporter en PDF."); return; }
+  w.document.write(rapportDocHTML(r)); w.document.close(); w.focus();
+  setTimeout(() => { try { w.print(); } catch(e){} }, 350);
+}
+
+// Envoi par e-mail : le serveur convertit le document en PDF (Edge headless),
+// l'archive dans data/rapports/ puis ouvre un brouillon Outlook pièce jointe.
+let RAP_MAIL_BUSY = false;
+async function rapportMail(rid){
+  const r = rapports().find(x => x.id === rid); if(!r) return;
+  if(r.statut !== "finalise"){
+    alert("Finalise d'abord le rapport — c'est la version finale, visée, qui part par mail.");
+    return;
+  }
+  if(RAP_MAIL_BUSY) return;
+  RAP_MAIL_BUSY = true;
+  try{
+    const d = await api("POST", "/api/rapport_mail", {rapport_id: rid, html: rapportDocHTML(r)});
+    alert(d.message || "E-mail préparé.");
+  }catch(e){ /* bandeau de connexion déjà affiché par api() */ }
+  finally{ RAP_MAIL_BUSY = false; }
 }
 
 // ======================================================================== //

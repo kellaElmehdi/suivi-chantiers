@@ -405,7 +405,10 @@ def _absence_overlap(store: dict, debut: str, fin: str, typ: str, contact_id,
 JOURNAL_SKIP = {"set_settings", "cdc_section_update", "cdc_section_move",
                 "add_rappel", "update_rappel", "toggle_rappel", "remove_rappel",
                 "clock_start", "clock_stop", "clock_edit", "clock_delete", "clock_add",
-                "update_subtask", "apply_template"}   # bruit d'édition : pas une "action" à tracer
+                "update_subtask", "apply_template",
+                "rapport_update", "rapport_point_update",       # rédaction du rapport hebdo :
+                "rapport_point_add", "rapport_point_remove",    # bruit d'édition, pas une action
+                "rapport_retard_update"}
 # (add/toggle/remove_subtask SONT journalisés : traçabilité des étapes voulue par l'utilisateur)
 JOURNAL_MAX = 3000                # garde les N dernières lignes
 
@@ -432,6 +435,307 @@ def _journal(store: dict, op: dict, msg: str) -> None:
               "chantier_id": cid, "chantier": titre, "msg": msg})
     if len(j) > JOURNAL_MAX:
         del j[:len(j) - JOURNAL_MAX]
+
+
+# --------------------------------------------------------------------------- #
+# Rapport hebdomadaire — bilan de semaine, programme à venir, REX.
+#
+# Principe (base de l'automatisation) : tout ce qui est DÉDUCTIBLE des données
+# est calculé ici (`_rapport_facts`) et rangé dans des champs `auto` / `stats` /
+# `avenir`, recalculables à volonté tant que le rapport est en brouillon. La
+# rédaction humaine (synthèse, avancement par point, REX par point, REX général,
+# priorités) vit dans des champs séparés que le recalcul n'écrase JAMAIS.
+# Automatiser plus tard = générer un brouillon de texte à partir de `auto`,
+# sans changer ni le modèle ni l'UI.
+# --------------------------------------------------------------------------- #
+RAPPORT_STATUTS = {"brouillon", "finalise"}
+RAPPORT_HORIZON = 14      # jours couverts par « à venir » au-delà de la semaine
+
+
+def _week_bounds(semaine: str) -> tuple[str, str]:
+    """'2026-W30' -> (lundi, dimanche) en ISO."""
+    try:
+        y, w = semaine.upper().split("-W")
+        monday = date.fromisocalendar(int(y), int(w), 1)
+    except Exception:
+        raise ValueError("Semaine invalide (format attendu : AAAA-Wnn).")
+    return monday.isoformat(), (monday + timedelta(days=6)).isoformat()
+
+
+def _hm_min(h) -> int:
+    try:
+        a, b = (str(h or "0:0").split(":") + ["0"])[:2]
+        return int(a) * 60 + int(b or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _sess_min(store: dict, s: dict) -> int:
+    """Durée d'une session en minutes — mêmes règles que l'UI (sessMin) :
+    session active bornée à maintenant / fin de journée, pause déjeuner
+    déduite (aucune le vendredi)."""
+    d = s.get("date") or ""
+    fin = s.get("fin")
+    if not fin:
+        de = _day_end(store, d)
+        fin = de if d < today() else min(_hm(), de)
+    deb = s.get("debut") or "00:00"
+    m = _hm_min(fin) - _hm_min(deb)
+    if m < 0:
+        m += 1440
+    try:
+        vendredi = bool(d) and date.fromisoformat(d).weekday() == 4
+    except ValueError:
+        vendredi = False
+    if not vendredi:
+        stg = store.get("settings", {})
+        pd, pf = stg.get("pause_debut") or "", stg.get("pause_fin") or ""
+        if pd and pf and pf > pd:
+            m -= max(0, min(_hm_min(fin), _hm_min(pf)) - max(_hm_min(deb), _hm_min(pd)))
+    return max(0, m)
+
+
+def _moi_nom(store: dict) -> str:
+    """Nom du contact marqué « moi » — sert de visa (traçabilité)."""
+    ct = next((c for c in store.get("contacts", []) if c.get("moi")), None)
+    return (ct or {}).get("nom", "")
+
+
+def _ch_fin_date(c: dict) -> str:
+    """Date de fin effective d'un chantier : dernière tâche complétée."""
+    d = ""
+    for t in c.get("taches", []):
+        if t.get("done") and t.get("done_date") and t["done_date"] > d:
+            d = t["done_date"]
+    return d
+
+
+def _ch_pct(c: dict) -> int:
+    """Avancement d'un chantier : part des tâches complétées."""
+    taches = c.get("taches", [])
+    return round(100 * sum(1 for t in taches if t.get("done")) / len(taches)) if taches else 0
+
+
+def _rapport_auto_ctx(c: dict) -> dict:
+    """Photo du chantier au moment du calcul (affichée sur le point)."""
+    taches = c.get("taches", [])
+    return {"statut": c.get("statut", "todo"), "hold": bool(c.get("hold")),
+            "pct": _ch_pct(c),
+            "echeance": c.get("echeance"), "prio": c.get("prio", "m"),
+            # tâches démarrées non finies : le « en ce moment » du chantier
+            "en_cours": [{"label": t.get("label", ""), "depuis": t.get("start_date")}
+                         for t in taches
+                         if t.get("start_date") and not t.get("done") and not t.get("is_milestone")]}
+
+
+def _rapport_auto_vide(c: dict | None) -> dict:
+    base = {"taches": [], "notes": [], "retours": [], "relances": 0,
+            "temps_min": 0, "actions": 0}
+    if c:
+        base.update(_rapport_auto_ctx(c))
+    return base
+
+
+def _rapport_facts(store: dict, debut: str, fin: str) -> dict:
+    """Faits de la semaine [debut..fin] + programme à venir, déduits des données
+    (tâches finies, notes, temps chronométré, journal, échéances, jalons…)."""
+    by_id = {c.get("id"): c for c in store.get("chantiers", [])}
+    pts: dict[str, dict] = {}
+
+    def _pt(cid):
+        if cid not in pts:
+            pts[cid] = {"taches": [], "notes": [], "retours": [], "relances": 0,
+                        "temps_min": 0, "actions": 0}
+        return pts[cid]
+
+    for c in store.get("chantiers", []):
+        cid = c.get("id")
+        for t in c.get("taches", []):
+            dd = t.get("done_date")
+            if t.get("done") and dd and debut <= dd <= fin:
+                _pt(cid)["taches"].append({"label": t.get("label", ""), "date": dd,
+                                           "jalon": bool(t.get("is_milestone"))})
+        for e in c.get("histo", []):    # notes posées au fil de la semaine -> remontent seules
+            if e.get("d") and debut <= e["d"] <= fin:
+                _pt(cid)["notes"].append({"d": e["d"], "t": e.get("t", "")})
+        for l in c.get("livrables", []):
+            if l.get("derniere") and debut <= l["derniere"] <= fin:
+                _pt(cid)["relances"] += 1
+        for it in c.get("iterations", []):
+            for r in it.get("retours", []):
+                if r.get("date") and debut <= r["date"] <= fin:
+                    _pt(cid)["retours"].append({"quoi": r.get("quoi", ""),
+                                                "statut": r.get("statut", "")})
+    actions = 0
+    for j in store.get("journal", []):
+        jd = j.get("date")
+        if jd and debut <= jd <= fin:
+            actions += 1
+            if j.get("chantier_id") in by_id:
+                _pt(j["chantier_id"])["actions"] += 1
+    temps_total = 0
+    temps_kinds: dict[str, int] = {}   # tache / rappel / recette / libre (réunions, RDV…)
+    hors: dict[str, dict] = {}         # actions sans chantier : réunions, RDV, routines…
+    for s in store.get("timelog", []):
+        sd = s.get("date")
+        if sd and debut <= sd <= fin:
+            m = _sess_min(store, s)
+            temps_total += m
+            k = s.get("kind") or "libre"
+            temps_kinds[k] = temps_kinds.get(k, 0) + m
+            if s.get("chantier_id") in by_id:
+                _pt(s["chantier_id"])["temps_min"] += m
+            else:   # hors chantier : agrégé par libellé pour figurer au bilan
+                lbl = (s.get("label") or "").strip() or ("Routine" if k == "rappel" else "Divers")
+                hx = hors.setdefault(lbl, {"label": lbl, "kind": k, "temps_min": 0, "jours": []})
+                hx["temps_min"] += m
+                if sd not in hx["jours"]:
+                    hx["jours"].append(sd)
+    hors_chantier = sorted(hors.values(), key=lambda x: -x["temps_min"])[:12]
+    # Un point n'existe que s'il a de la MATIÈRE (tâche finie, note, temps,
+    # relance, retour). De simples éditions de fiche (journal seul) ne créent
+    # pas de carte « aucun fait détecté » — l'ajout manuel reste possible.
+    pts = {cid: p for cid, p in pts.items()
+           if p["taches"] or p["notes"] or p["retours"] or p["relances"] or p["temps_min"]}
+    for cid, p in pts.items():
+        p.update(_rapport_auto_ctx(by_id[cid]))
+        p["taches"].sort(key=lambda t: t["date"])
+        p["notes"].sort(key=lambda n: n["d"])
+
+    # Chantiers terminés pendant la semaine (fin = dernière tâche complétée).
+    termines = []
+    for c in store.get("chantiers", []):
+        if c.get("statut") == "done":
+            fd = _ch_fin_date(c)
+            if fd and debut <= fd <= fin:
+                termines.append({"chantier_id": c.get("id"), "chantier": c.get("titre", ""),
+                                 "date": fd})
+    termines.sort(key=lambda x: x["date"])
+
+    # Retards à date : échéance dépassée sur un chantier PAS ENCORE LIVRÉ
+    # (à faire / en cours). Un chantier en recette n'est pas en retard : le
+    # travail est fait, on attend la validation — il est signalé dans la liste
+    # « en attente de recette » (avec l'échéance dépassée à titre indicatif).
+    # La justification est OBLIGATOIRE avant finalisation (saisie manuelle,
+    # conservée d'un recalcul à l'autre).
+    retards = []
+    for c in store.get("chantiers", []):
+        ech = c.get("echeance")
+        if c.get("statut") in ("todo", "doing") and not c.get("hold") and ech and ech < today():
+            try:
+                jours = (date.today() - date.fromisoformat(ech)).days
+            except ValueError:
+                jours = 0
+            retards.append({"chantier_id": c.get("id"), "chantier": c.get("titre", ""),
+                            "echeance": ech, "jours": jours, "justification": ""})
+    retards.sort(key=lambda x: x["echeance"])
+
+    # Gantt global du portefeuille (photo au moment du calcul, figée avec le
+    # rapport) : chantiers ouverts + ceux terminés cette semaine.
+    gantt = []
+    for c in store.get("chantiers", []):
+        if c.get("hold"):
+            continue
+        fini = c.get("statut") == "done"
+        fdate = _ch_fin_date(c) if fini else ""
+        if fini and not (fdate and debut <= fdate <= fin):
+            continue
+        g_deb = c.get("date_debut") or debut
+        g_fin = c.get("echeance") or (fdate if fini else _shift_iso(fin, RAPPORT_HORIZON))
+        if g_fin < g_deb:
+            g_fin = g_deb
+        ctx = _rapport_auto_ctx(c)
+        gantt.append({"chantier_id": c.get("id"), "chantier": c.get("titre", ""),
+                      "debut": g_deb, "fin": g_fin, "statut": c.get("statut", "todo"),
+                      "pct": ctx["pct"],
+                      # même règle que les retards : livré (recette) = pas en retard
+                      "late": c.get("statut") in ("todo", "doing")
+                              and bool(c.get("echeance")) and c["echeance"] < today(),
+                      "sans_echeance": not c.get("echeance") and not fini})
+    gantt.sort(key=lambda g: (g["fin"], g["debut"]))
+
+    encours_pcts = [_ch_pct(c) for c in store.get("chantiers", [])
+                    if c.get("statut") == "doing" and not c.get("hold")]
+    stats = {"chantiers": len(pts),
+             "en_cours": len(encours_pcts),
+             # avancement global du portefeuille en cours (moyenne des %)
+             "avancement": round(sum(encours_pcts) / len(encours_pcts)) if encours_pcts else 0,
+             "termines": len(termines), "retards": len(retards),
+             "taches": sum(len(p["taches"]) for p in pts.values()),
+             "jalons": sum(1 for p in pts.values() for t in p["taches"] if t["jalon"]),
+             "notes": sum(len(p["notes"]) for p in pts.values()),
+             "temps_min": temps_total, "temps_kinds": temps_kinds, "actions": actions}
+
+    # -- Programmé pour la suite : semaine suivante + horizon ---------------- #
+    horizon = _shift_iso(fin, RAPPORT_HORIZON)
+    av = {"echeances": [], "jalons": [], "livrables": [], "risques": [],
+          "rappels": [], "recette": [], "prochaines": []}
+    for c in store.get("chantiers", []):
+        if c.get("statut") == "done" or c.get("hold"):
+            continue
+        cid, titre = c.get("id"), c.get("titre", "")
+        ech = c.get("echeance")
+        if ech and ech <= horizon:
+            # même règle que les retards : seul un chantier PAS ENCORE LIVRÉ est
+            # « en retard ». L'échéance passée d'un chantier en recette ne figure
+            # pas ici (elle est annotée dans la liste « en attente de recette »).
+            en_livraison = c.get("statut") in ("todo", "doing")
+            if en_livraison or ech >= today():
+                av["echeances"].append({"chantier_id": cid, "chantier": titre,
+                                        "date": ech,
+                                        "late": en_livraison and ech < today()})
+        if c.get("statut") == "recette":
+            dep = 0
+            if ech and ech < today():
+                try:
+                    dep = (date.today() - date.fromisoformat(ech)).days
+                except ValueError:
+                    dep = 0
+            ouverts = sum(1 for it in c.get("iterations", []) for x in it.get("retours", [])
+                          if x.get("statut") in ("a_traiter", "en_cours"))
+            av["recette"].append({"chantier_id": cid, "chantier": titre, "echeance": ech,
+                                  "depasse_j": dep, "retours_ouverts": ouverts})
+        if c.get("statut") in ("doing", "recette"):
+            done_ids = {t["id"] for t in c.get("taches", []) if t.get("done")}
+            for t in c.get("taches", []):
+                if not t.get("done") and t.get("is_milestone"):
+                    av["jalons"].append({"chantier_id": cid, "chantier": titre,
+                                         "label": t.get("label", "")})
+            libres = [t.get("label", "") for t in c.get("taches", [])
+                      if not t.get("done") and not t.get("is_milestone")
+                      and all(p in done_ids for p in t.get("preds", []))]
+            if libres:
+                av["prochaines"].append({"chantier_id": cid, "chantier": titre,
+                                         "taches": libres[:3]})
+        for l in c.get("livrables", []):
+            if l.get("statut") in ("attente", "partiel") and l.get("date") and l["date"] <= horizon:
+                av["livrables"].append({"chantier_id": cid, "chantier": titre,
+                                        "personne": l.get("personne", ""),
+                                        "quoi": l.get("quoi", ""),
+                                        "date": l["date"], "late": l["date"] < today()})
+        for rk in c.get("risques", []):
+            if rk.get("statut") in ("ouvert", "avere") and rk.get("echeance_revue") \
+               and rk["echeance_revue"] <= horizon:
+                av["risques"].append({"chantier_id": cid, "chantier": titre,
+                                      "libelle": rk.get("libelle", ""),
+                                      "date": rk["echeance_revue"]})
+    for rp in store.get("rappels", []):
+        if rp.get("actif") and rp.get("freq") == "ponctuel" and rp.get("date") \
+           and not rp.get("ticks") and rp["date"] <= horizon:
+            av["rappels"].append({"label": rp.get("label", ""), "date": rp["date"]})
+    for k in ("echeances", "livrables", "risques", "rappels"):
+        av[k].sort(key=lambda x: x.get("date") or "")
+    return {"points": pts, "stats": stats, "avenir": av,
+            "termines": termines, "retards": retards, "gantt": gantt,
+            "hors_chantier": hors_chantier,
+            "titres": {cid: by_id[cid].get("titre", "") for cid in pts}}
+
+
+def _rapport(store: dict, rid: str) -> dict:
+    r = next((x for x in store.setdefault("rapports", []) if x.get("id") == rid), None)
+    if r is None:
+        raise ValueError(f"Rapport introuvable: {rid}")
+    return r
 
 
 # --------------------------------------------------------------------------- #
@@ -702,6 +1006,47 @@ def _normalize(store: dict) -> dict:
         if a["fin"] < a["debut"]:               # robustesse : periode inversee saisie a la main
             a["debut"], a["fin"] = a["fin"], a["debut"]
     store["absences"].sort(key=lambda a: a.get("debut", ""))
+    for r in store.setdefault("rapports", []):   # rapports hebdomadaires (bilan + à venir + REX)
+        r.setdefault("id", _uid("rh_"))
+        r.setdefault("semaine", _iso_week(date.today()))
+        if not r.get("debut") or not r.get("fin"):
+            try:
+                r["debut"], r["fin"] = _week_bounds(r["semaine"])
+            except ValueError:
+                r["debut"] = r["fin"] = today()
+        if r.get("statut") not in RAPPORT_STATUTS:
+            r["statut"] = "brouillon"
+        r.setdefault("cree_le", "")
+        r.setdefault("cree_par", "")             # visa de création
+        r.setdefault("vise_par", "")             # visa de finalisation
+        r.setdefault("maj_le", None)
+        r.setdefault("finalise_le", None)
+        r.setdefault("termines", [])             # chantiers finis pendant la semaine
+        r.setdefault("gantt", [])                # photo Gantt du portefeuille
+        r.setdefault("hors_chantier", [])        # réunions, RDV, routines de la semaine
+        for x in r.setdefault("retards", []):    # retards : justification obligatoire
+            x.setdefault("chantier_id", "")
+            x.setdefault("chantier", "")
+            x.setdefault("echeance", None)
+            x.setdefault("jours", 0)
+            x.setdefault("justification", "")
+        r.setdefault("synthese", "")             # rédaction libre : jamais recalculée
+        r.setdefault("priorites", "")
+        rg = r.setdefault("rex_general", {})
+        rg.setdefault("positif", "")
+        rg.setdefault("negatif", "")
+        rg.setdefault("actions", "")
+        r.setdefault("exclus", [])               # chantiers retirés à la main (le recalcul les ignore)
+        r.setdefault("stats", {})
+        r.setdefault("avenir", {})
+        for p in r.setdefault("points", []):
+            p.setdefault("chantier_id", "")
+            p.setdefault("chantier", "")         # titre dénormalisé : l'archive survit au chantier
+            p.setdefault("manuel", False)
+            p.setdefault("avancement", "")
+            p.setdefault("rex", "")
+            p.setdefault("auto", {})
+    store["rapports"].sort(key=lambda r: r.get("semaine", ""))
     for c in store.get("chantiers", []):
         if c.get("statut") == "block":   # "Bloqué" est desormais calcule, plus un statut manuel
             c["statut"] = "doing"
@@ -1913,6 +2258,160 @@ def _apply_op(store: dict, op: dict) -> str:
             "chantier_id": op.get("chantier_id"), "tache_id": op.get("tache_id"), "rappel_id": op.get("rappel_id"),
         })
         return f"Plage ajoutée : {label}"
+
+    # ---- Rapport hebdomadaire (bilan + à venir + REX) --------------------- #
+    if name == "rapport_generate":   # crée le rapport de la semaine, ou recalcule ses faits
+        semaine = (op.get("semaine") or "").strip() or _iso_week(date.today())
+        debut, fin = _week_bounds(semaine)
+        # Rituel du vendredi : le bilan d'une semaine ne s'établit qu'à partir de
+        # SON vendredi (les semaines passées restent générables : rattrapage).
+        vendredi = _shift_iso(debut, 4)
+        if today() < vendredi:
+            raise ValueError(f"Le bilan de la semaine {semaine} s'établit à partir de son vendredi "
+                             f"({vendredi[8:10]}/{vendredi[5:7]}) — patience, ou navigue vers une semaine passée.")
+        raps = store.setdefault("rapports", [])
+        r = next((x for x in raps if x.get("semaine") == semaine), None)
+        if r is not None and r.get("statut") == "finalise":
+            raise ValueError("Rapport finalisé : rouvre-le avant d'actualiser ses données.")
+        facts = _rapport_facts(store, debut, fin)
+        creation = r is None
+        if creation:
+            r = {"id": _uid("rh_"), "semaine": semaine, "debut": debut, "fin": fin,
+                 "statut": "brouillon",
+                 "cree_le": datetime.now().isoformat(timespec="seconds"),
+                 "cree_par": _moi_nom(store),                    # visa de création (traçabilité)
+                 "vise_par": "",
+                 "maj_le": None, "finalise_le": None,
+                 "synthese": "", "priorites": "",
+                 "rex_general": {"positif": "", "negatif": "", "actions": ""},
+                 "points": [], "exclus": []}
+            raps.append(r)
+            raps.sort(key=lambda x: x.get("semaine", ""))
+        # Fusion : l'auto est remplacé, la rédaction (avancement/rex) est conservée.
+        anciens = {p.get("chantier_id"): p for p in r.get("points", [])}
+        points = []
+        for cid, auto in facts["points"].items():
+            if cid in r.get("exclus", []):
+                continue
+            p = anciens.pop(cid, None) or {"chantier_id": cid, "manuel": False,
+                                           "avancement": "", "rex": ""}
+            p["chantier"] = facts["titres"].get(cid) or p.get("chantier", "")
+            p["auto"] = auto
+            points.append(p)
+        for cid, p in anciens.items():   # ajoutés à la main ou déjà rédigés : jamais perdus
+            if p.get("manuel") or (p.get("avancement") or "").strip() or (p.get("rex") or "").strip():
+                ch = next((c for c in store.get("chantiers", []) if c.get("id") == cid), None)
+                p["auto"] = _rapport_auto_vide(ch) if ch else (p.get("auto") or {})
+                points.append(p)
+        points.sort(key=lambda p: (-(p.get("auto", {}).get("temps_min") or 0),
+                                   -len(p.get("auto", {}).get("taches") or []),
+                                   p.get("chantier", "")))
+        r["points"] = points
+        r["stats"], r["avenir"] = facts["stats"], facts["avenir"]
+        r["termines"], r["gantt"] = facts["termines"], facts["gantt"]
+        r["hors_chantier"] = facts["hors_chantier"]
+        # Retards : la liste est recalculée, les justifications déjà saisies survivent.
+        justifs = {x.get("chantier_id"): x.get("justification", "")
+                   for x in r.get("retards", []) if (x.get("justification") or "").strip()}
+        for x in facts["retards"]:
+            if justifs.get(x["chantier_id"]):
+                x["justification"] = justifs[x["chantier_id"]]
+        r["retards"] = facts["retards"]
+        if not r.get("cree_par"):                # rapports d'avant le visa : rattrapage
+            r["cree_par"] = _moi_nom(store)
+        r["maj_le"] = datetime.now().isoformat(timespec="seconds")
+        return (f"Rapport de la semaine {semaine} " + ("créé" if creation else "actualisé")
+                + f" — {len(points)} chantier(s) au bilan, {len(r['retards'])} retard(s) à justifier")
+
+    if name == "rapport_update":   # rédaction : synthèse, priorités, REX général
+        r = _rapport(store, op["rapport_id"])
+        for f in ("synthese", "priorites"):
+            if f in op and op[f] is not None:
+                r[f] = str(op[f])
+        rg = r.setdefault("rex_general", {"positif": "", "negatif": "", "actions": ""})
+        for f in ("positif", "negatif", "actions"):
+            if "rex_" + f in op and op["rex_" + f] is not None:
+                rg[f] = str(op["rex_" + f])
+        r["maj_le"] = datetime.now().isoformat(timespec="seconds")
+        return "Rapport mis à jour"
+
+    if name == "rapport_point_update":   # rédaction d'un point : avancement, REX
+        r = _rapport(store, op["rapport_id"])
+        p = next((x for x in r.get("points", [])
+                  if x.get("chantier_id") == op.get("chantier_id")), None)
+        if p is None:
+            raise ValueError("Ce chantier n'est pas dans le rapport.")
+        for f in ("avancement", "rex"):
+            if f in op and op[f] is not None:
+                p[f] = str(op[f])
+        r["maj_le"] = datetime.now().isoformat(timespec="seconds")
+        return "Point du rapport mis à jour"
+
+    if name == "rapport_point_add":
+        r = _rapport(store, op["rapport_id"])
+        if r.get("statut") == "finalise":
+            raise ValueError("Rapport finalisé : rouvre-le pour le modifier.")
+        ch = _chantier(store, op["chantier_id"])
+        if any(p.get("chantier_id") == ch["id"] for p in r.get("points", [])):
+            raise ValueError("Ce chantier est déjà dans le rapport.")
+        r["exclus"] = [x for x in r.get("exclus", []) if x != ch["id"]]
+        facts = _rapport_facts(store, r["debut"], r["fin"])
+        auto = facts["points"].get(ch["id"]) or _rapport_auto_vide(ch)
+        r.setdefault("points", []).append({"chantier_id": ch["id"], "chantier": ch.get("titre", ""),
+                                           "manuel": True, "avancement": "", "rex": "",
+                                           "auto": auto})
+        r["maj_le"] = datetime.now().isoformat(timespec="seconds")
+        return f"« {ch.get('titre', '')} » ajouté au rapport"
+
+    if name == "rapport_point_remove":
+        r = _rapport(store, op["rapport_id"])
+        if r.get("statut") == "finalise":
+            raise ValueError("Rapport finalisé : rouvre-le pour le modifier.")
+        cid = op.get("chantier_id")
+        avant = len(r.get("points", []))
+        r["points"] = [p for p in r.get("points", []) if p.get("chantier_id") != cid]
+        if len(r["points"]) == avant:
+            raise ValueError("Ce chantier n'est pas dans le rapport.")
+        if cid not in r.setdefault("exclus", []):
+            r["exclus"].append(cid)
+        r["maj_le"] = datetime.now().isoformat(timespec="seconds")
+        return "Chantier retiré du rapport"
+
+    if name == "rapport_retard_update":   # justification d'un retard (rédaction)
+        r = _rapport(store, op["rapport_id"])
+        x = next((x for x in r.get("retards", [])
+                  if x.get("chantier_id") == op.get("chantier_id")), None)
+        if x is None:
+            raise ValueError("Ce chantier n'est pas dans les retards du rapport.")
+        x["justification"] = str(op.get("justification") or "")
+        r["maj_le"] = datetime.now().isoformat(timespec="seconds")
+        return "Justification du retard enregistrée"
+
+    if name == "rapport_finalize":   # fige les faits calculés (plus d'actualisation)
+        r = _rapport(store, op["rapport_id"])
+        if r.get("statut") == "finalise":
+            return "Rapport déjà finalisé"
+        # Règle : chaque retard DOIT être justifié avant de finaliser.
+        manquants = [x for x in r.get("retards", [])
+                     if not (x.get("justification") or "").strip()]
+        if manquants:
+            raise ValueError(f"{len(manquants)} retard(s) sans justification — la justification "
+                             "des retards est obligatoire avant de finaliser le rapport.")
+        r["statut"] = "finalise"
+        r["finalise_le"] = datetime.now().isoformat(timespec="seconds")
+        r["vise_par"] = _moi_nom(store)                  # visa de finalisation (traçabilité)
+        return f"Rapport de la semaine {r.get('semaine', '')} finalisé — données figées"
+
+    if name == "rapport_reopen":
+        r = _rapport(store, op["rapport_id"])
+        r["statut"] = "brouillon"
+        r["finalise_le"] = None
+        return "Rapport rouvert (brouillon)"
+
+    if name == "rapport_delete":
+        r = _rapport(store, op["rapport_id"])
+        store["rapports"] = [x for x in store["rapports"] if x.get("id") != r["id"]]
+        return f"Rapport de la semaine {r.get('semaine', '')} supprimé"
 
     if name == "set_settings":
         store.setdefault("settings", {}).update(op.get("settings") or {})

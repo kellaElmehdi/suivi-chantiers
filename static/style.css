@@ -564,6 +564,8 @@ textarea{width:100%;resize:vertical;min-height:52px}
 .cdc-sum{margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 
 /* Éditeur de document */
+.cahiers{max-width:1000px;margin:0 auto;padding:18px 22px 64px}
+.cahiers .ptable{max-width:none}   /* la table occupe la largeur du bloc centré */
 .cdc{padding:0}
 .cdc-top{display:flex;align-items:center;gap:10px;padding:14px 22px;border-bottom:1px solid var(--line);
   position:sticky;top:0;background:var(--canvas);z-index:5}
@@ -975,3 +977,73 @@ textarea{width:100%;resize:vertical;min-height:52px}
   position:sticky;top:0;z-index:1;outline:none}
 .search-inp::placeholder{color:var(--muted)}
 
+
+/* ===== Rapport hebdomadaire ============================================= */
+.rapport{max-width:1100px;margin:0 auto;padding:18px 22px 64px}
+.rapport .ptable{max-width:none}   /* archive : même largeur que le reste de la vue */
+.rap-top{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+.rap-nav{display:flex;gap:4px}
+.rap-nav .ghost{padding:9px 12px}
+.rap-badge{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;
+  padding:4px 10px;border-radius:var(--radius-pill);border:1px solid var(--line);
+  background:var(--surface-soft);color:var(--muted)}
+.rap-badge.ok{background:var(--green);border-color:var(--green);color:var(--on-dark)}
+.rap-badge.sm{padding:2px 8px;font-size:10px}
+.rap-maj{margin:-6px 0 14px}
+.rap-emptycard{max-width:720px;margin-bottom:16px}
+.rap-emptycard p{margin:0 0 10px;font-size:13px}
+.rap-ta{width:100%;box-sizing:border-box;min-height:72px;resize:vertical;font:inherit;
+  font-size:13px;line-height:1.5;padding:9px 11px;border:1px solid var(--line);
+  border-radius:var(--radius-sm);background:var(--canvas);color:var(--ink)}
+.rap-ta:focus{outline:none;border-color:var(--ink)}
+.rap-ta:disabled{background:var(--surface-soft);color:var(--muted);cursor:not-allowed}
+.rap-ta::placeholder{color:var(--faint)}
+#rapport > .rap-ta{margin-bottom:6px}
+.rap-point{margin-bottom:12px}
+.rap-point .cardx-h{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.rap-pt-title[onclick]{cursor:pointer}
+.rap-pt-title[onclick]:hover{text-decoration:underline}
+.rap-pt-meta{font-weight:400;text-transform:none;letter-spacing:0;font-size:11.5px}
+.rap-chips{display:flex;gap:5px;flex-wrap:wrap;margin-left:auto}
+.rap-chips .chip.ok{border-color:var(--green);color:var(--green);font-weight:700}
+.rap-chips .chip.star{border-color:var(--amber);color:var(--amber);font-weight:700}
+.rap-chips .chip.vio{border-color:var(--violet);color:var(--violet)}
+.rap-chips .chip.off{color:var(--faint);border-style:dashed}
+.rap-point .del{cursor:pointer;color:var(--red);font-weight:700;font-size:14px;line-height:1}
+.rap-facts{border:1px solid var(--line-soft);border-radius:var(--radius-sm);
+  background:var(--surface-soft);padding:7px 11px;margin-bottom:12px}
+.rap-fact{display:flex;gap:9px;font-size:12.5px;padding:2.5px 0;align-items:baseline}
+.rap-fact-d{font-family:var(--mono);font-size:10.5px;color:var(--faint);min-width:40px;flex-shrink:0}
+.rap-cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.rap-cols .lab{margin-bottom:5px;display:flex;align-items:center;gap:8px}
+.rap-cols .lab .add{cursor:pointer;color:var(--ink);text-decoration:underline;font-weight:600;font-size:11px}
+.rap-add{margin:2px 0 16px;display:flex;gap:8px;align-items:center}
+.avenir-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;margin-bottom:12px}
+.rap-blk{margin-bottom:16px}
+.rex-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px}
+.rex-grid .rex-plus{color:var(--green)}
+.rex-grid .rex-minus{color:var(--red)}
+.rex-grid .rex-act{color:var(--blue)}
+.rap-cur td{background:var(--surface-soft)}
+@media(max-width:940px){.rap-cols,.rex-grid{grid-template-columns:1fr}}
+
+/* Rapport hebdo v2 : retards, verrou vendredi, avancement visible */
+.kpi.bad{border-left:3px solid var(--red)}
+.kpi.bad .sub{color:var(--red);font-weight:600}
+.rap-chips .chip.done{border-color:var(--green);background:var(--green);color:var(--on-dark);font-weight:700}
+.rap-chips .chip.late{border-color:var(--red);background:var(--red);color:var(--on-dark);font-weight:700}
+.rap-chips .chip.run{border-color:var(--blue);color:var(--blue);font-weight:700}
+.rap-late{margin-bottom:12px;border-color:var(--red)}
+.rap-late .cardx-h{background:#fef2f2;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.rap-prog{width:90px;height:7px;border-radius:4px;background:var(--surface-card);overflow:hidden;flex-shrink:0}
+.rap-prog i{display:block;height:100%;background:var(--green)}
+.rap-pct{font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--ink)}
+.rap-fact.run{font-weight:600}
+.rap-fact.run .rap-fact-d{color:var(--blue)}
+.rap-verrou{margin-top:10px;font-size:12.5px;color:var(--muted);background:var(--surface-soft);
+  border:1px dashed var(--line);border-radius:var(--radius-sm);padding:9px 12px}
+
+/* Rapport hebdo v3 : libellé avancement, bandeau ancien schéma */
+.rap-avlbl{font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);font-weight:700;flex-shrink:0}
+.rap-warnbanner{margin:0 0 14px;font-size:12.5px;background:var(--amber-bg);border:1px solid var(--amber);
+  border-radius:var(--radius-sm);padding:9px 12px;color:var(--ink)}

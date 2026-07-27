@@ -21,10 +21,11 @@
     <button data-v="planning" onclick="setView('planning')">Planning</button>
     <button data-v="cahiers" onclick="setView('cahiers')">Cahiers des charges</button>
     <div class="menu" id="navPilotage">
-      <button data-group="dash,activite,charge,risques" onclick="toggleMenu(event,'navPilotage')">Pilotage ▾</button>
+      <button data-group="dash,activite,charge,risques,rapport" onclick="toggleMenu(event,'navPilotage')">Pilotage ▾</button>
       <div class="menu-list">
         <a onclick="setView('dash')">Tableau de bord</a>
         <a onclick="setView('activite')">Activité</a>
+        <a onclick="setView('rapport')">Rapport hebdo</a>
         <a onclick="setView('charge')">Charge</a>
         <a onclick="setView('risques')">Risques</a>
       </div>
@@ -69,6 +70,7 @@
     <div class="planning" id="planning" style="display:none"></div>
     <div class="dash" id="dash" style="display:none"></div>
     <div class="activite" id="activite" style="display:none"></div>
+    <div class="rapport" id="rapport" style="display:none"></div>
     <div class="charge" id="charge" style="display:none"></div>
     <div class="risques" id="risques" style="display:none"></div>
     <div class="people" id="people" style="display:none"></div>
