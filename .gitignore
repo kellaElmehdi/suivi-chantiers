@@ -9,6 +9,12 @@ data/
 # Paquet de distribution (régénérable)
 dist/
 
+# Fichiers de travail personnels (classeurs d'import reels, notes de conception)
+les imports/
+DESIGN-cal.md
+demo.html
+ui-styles-preview.html
+
 # Divers
 *.lnk
 .env
