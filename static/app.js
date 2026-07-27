@@ -242,6 +242,41 @@ const chById = id => STORE.chantiers.find(c => c.id === id);
 // Chantiers "vivants" (hors pause) — un chantier en pause disparaît de TOUTES les vues
 // (board, planning, tableau de bord, charge, personnes, risques, activité, cahiers).
 const LIVE = () => STORE.chantiers.filter(c => !c.hold);
+
+// ---- Thèmes : maille transverse, liste FERMÉE (10 max) --------------------
+// Un thème classe tout ce qui n'est pas un chantier (actions, notes, temps libre).
+// Le choix se fait dans une liste : pas de saisie libre, donc pas de doublons.
+const THEMES = () => (STORE.themes || []);
+const THEMES_ON = () => THEMES().filter(t => !t.archive);
+const thById = id => THEMES().find(t => t.id === id) || null;
+const THEMES_MAX = 10;
+const SANS_THEME = {id: "", nom: "Sans thème", icone: "○", couleur: "var(--gray)"};
+function themeOf(x){ return (x && x.theme_id) ? thById(x.theme_id) : null; }
+// Le thème d'une plage de chrono : le sien, sinon celui de son chantier, sinon celui de son action.
+function themeOfSession(s){
+  if(s.theme_id) return thById(s.theme_id);
+  const c = s.chantier_id ? chById(s.chantier_id) : null;
+  if(c && c.theme_id) return thById(c.theme_id);
+  const a = s.action_id ? acById(s.action_id) : null;
+  return (a && a.theme_id) ? thById(a.theme_id) : null;
+}
+function themeChip(id, opts){
+  const t = thById(id);
+  if(!t) return (opts && opts.vide) ? `<span class="th-chip none">○ sans thème</span>` : "";
+  return `<span class="th-chip" style="--th:${t.couleur}"${opts && opts.click ? ` onclick="${opts.click}"` : ""}>` +
+         `${t.icone} ${esc(t.nom)}</span>`;
+}
+function themeDot(id){
+  const t = thById(id);
+  return `<span class="th-dot" style="background:${t ? t.couleur : "var(--line)"}" title="${t ? esc(t.nom) : "sans thème"}"></span>`;
+}
+// <select> de thèmes — le seul moyen d'en affecter un (aucune saisie libre nulle part).
+function themeSelect(cur, onchange, cls){
+  return `<select class="th-sel ${cls || ""}" onchange="${onchange}" title="Thème (liste fermée)">` +
+    `<option value="">— sans thème —</option>` +
+    THEMES_ON().map(t => `<option value="${t.id}" ${cur === t.id ? "selected" : ""}>${t.icone} ${esc(t.nom)}</option>`).join("") +
+    `</select>`;
+}
 // "Bloqué" est calculé : point bloquant rempli, OU un livrable non reçu dont
 // l'ÉCHÉANCE EST DÉPASSÉE. Tant que la date attendue n'est pas passée, un livrable
 // ne bloque pas — même rattaché à une tâche : on laisse le délai courir.
@@ -388,8 +423,12 @@ function sortColumn(list, mode){
 }
 function sortTodo(list){ return sortColumn(list, TODO_SORT); }
 function showView(v){
-  if(["board", "charge", "people", "dash", "contacts", "absences", "risques", "planning", "activite", "cahiers", "rapport"].includes(v)) VIEW = v;
+  if(["board", "charge", "people", "dash", "contacts", "absences", "risques", "planning", "activite",
+      "cahiers", "rapport", "actions", "notes", "themes"].includes(v)) VIEW = v;
   $("board").style.display = v === "board" ? "flex" : "none";
+  $("actions").style.display = v === "actions" ? "block" : "none";
+  $("notes").style.display = v === "notes" ? "block" : "none";
+  $("themes").style.display = v === "themes" ? "block" : "none";
   $("planning").style.display = v === "planning" ? "block" : "none";
   $("dash").style.display = v === "dash" ? "block" : "none";
   $("activite").style.display = v === "activite" ? "block" : "none";
@@ -408,6 +447,9 @@ function showView(v){
   });
   renderAlert();
   if(v === "board") renderBoard();
+  if(v === "actions") renderActions();
+  if(v === "notes") renderNotes();
+  if(v === "themes") renderThemes();
   if(v === "planning") renderPlanning();
   if(v === "dash") renderDashboard();
   if(v === "activite") renderActivite();
@@ -697,7 +739,7 @@ function renderAlert(){
 // ======================================================================== //
 function lastActivity(c){   // dernière trace d'activité enregistrée sur le chantier
   const dates = [];
-  (c.histo || []).forEach(h => h.d && dates.push(h.d));
+  notesOf(c.id).forEach(n => n.date && dates.push(n.date));
   (c.taches || []).forEach(t => { if(t.done_date) dates.push(t.done_date); if(t.start_date) dates.push(t.start_date); });
   (STORE.journal || []).forEach(j => { if(j.chantier_id === c.id && j.date) dates.push(j.date); });
   const past = dates.filter(d => d <= TODAY).sort();
@@ -705,14 +747,19 @@ function lastActivity(c){   // dernière trace d'activité enregistrée sur le c
 }
 function buildReminders(){
   const out = [];
-  // routines / rappels du jour non cochés
-  rappelsAFaire(TODAY).forEach(r => {
-    const late = r.freq === "ponctuel" && r.date && isLate(r.date);
-    out.push({type: "routine", icon: late ? "⏰" : "🔁", label: r.label, sub: rappelMeta(r),
-              late, key: "rp:" + r.id, go: () => setView("planning"),
-              act: {lbl: "✓ Fait", title: "Marquer cette routine comme faite aujourd'hui",
-                    run: () => mutate({op: "toggle_rappel", id: r.id, date: TODAY})}});
+  // actions et routines dues aujourd'hui, non faites
+  acDuJour().forEach(a => {
+    const late = acRetard(a);
+    out.push({type: "action", icon: late ? "⏰" : a.recurrence ? "🔁" : "◻", label: a.label,
+              sub: acMeta(a), late, key: "ac:" + a.id, go: () => setView("actions"),
+              act: {lbl: "✓ Fait", title: "Marquer comme fait aujourd'hui",
+                    run: () => mutate({op: "action_done", id: a.id, date: TODAY})}});
   });
+  // occurrences de routine passées et jamais actées : la dette que l'ancien système effaçait
+  const dette = acRoutines().reduce((n, a) => n + occEnSouffrance(a, TODAY).length, 0);
+  if(dette) out.push({type: "dette", icon: "⏰", label: `${dette} occurrence${dette > 1 ? "s" : ""} de routine non actée${dette > 1 ? "s" : ""}`,
+                      sub: "rattraper, sauter ou acter le raté", late: true, key: "dette:" + dette,
+                      go: () => setView("actions")});
   // tâches en retard (fin prévue déjà passée) — seulement celles qu'on peut démarrer
   // maintenant : les tâches en retard bloquées par un prédécesseur non fini sont masquées
   // (on ne peut pas les faire tant que l'amont n'est pas terminé).
@@ -822,13 +869,23 @@ function closeSearch(){ const m = $("searchMenu"); if(m) m.classList.remove("ope
 function buildSearch(q){
   const out = [], hit = s => s && String(s).toLowerCase().includes(q);
   STORE.chantiers.forEach(c => {
-    if(hit(c.titre) || hit(c.objectif) || (c.tags || []).some(hit))
-      out.push({icon: "🗂", label: c.titre, sub: "chantier" + (c.tags && c.tags.length ? " · " + c.tags.join(", ") : ""), go: () => openChantier(c.id)});
+    const th = themeOf(c);
+    if(hit(c.titre) || hit(c.objectif) || (th && hit(th.nom)))
+      out.push({icon: "🗂", label: c.titre, sub: "chantier" + (th ? " · " + th.nom : ""), go: () => openChantier(c.id)});
     (c.livrables || []).forEach(l => { if(hit(l.quoi)) out.push({icon: "📦", label: l.quoi, sub: "livrable · " + c.titre, go: () => openChantier(c.id)}); });
     (c.risques || []).forEach(r => { if(hit(r.libelle)) out.push({icon: "⚠️", label: r.libelle, sub: "risque · " + c.titre, go: () => openChantier(c.id)}); });
     const cd = c.cdc; if(cd && (hit(cd.reference) || hit(cd.titre))) out.push({icon: "📄", label: cd.titre || cd.reference || "Cahier des charges", sub: "cahier des charges · " + c.titre, go: () => openCdc(c.id)});
   });
   (STORE.contacts || []).forEach(ct => { if(hit(ct.nom) || hit(ct.role)) out.push({icon: "👤", label: ct.nom, sub: "personne" + (ct.role ? " · " + ct.role : ""), go: () => setView("contacts")}); });
+  // Actions et notes : le bloc-notes n'a d'intérêt que si on retrouve ce qu'on y a écrit.
+  ACTIONS().forEach(a => { if(hit(a.label) || hit(a.desc))
+    out.push({icon: a.recurrence ? "🔁" : "◻", label: a.label,
+              sub: (a.recurrence ? "routine" : "action") + " · " + acMeta(a), go: () => setView("actions")}); });
+  NOTES().forEach(n => { if(hit(n.titre) || hit(n.corps)){
+    const ex = (n.corps || "").replace(/\s+/g, " ").slice(0, 70);
+    out.push({icon: (NT_TYPE[n.type] || NT_TYPE.note).ic, label: n.titre || ex || "note",
+              sub: "note · " + fmt(n.date) + (n.heure ? " " + n.heure : ""), go: () => setView("notes")});
+  }});
   return out;
 }
 function renderSearch(){
@@ -867,9 +924,9 @@ function checkDesktopNotifs(){
   const hhmm = String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
   items.forEach(it => {
     if(sent[it.key]) return;
-    if(it.type === "routine"){   // routine avec heure : attendre l'heure prévue
-      const r = RAPPELS().find(x => "rp:" + x.id === it.key);
-      if(r && r.heure && hhmm < r.heure) return;
+    if(it.type === "action"){   // action avec heure : attendre l'heure prévue
+      const a = ACTIONS().find(x => "ac:" + x.id === it.key);
+      if(a && a.heure && hhmm < a.heure) return;
     }
     try { new Notification("Suivi des chantiers", {body: it.label + (it.sub ? " — " + it.sub : ""), tag: it.key}); } catch(e){}
     sent[it.key] = 1;
@@ -1379,12 +1436,12 @@ function chargeChart(cd){
 }
 
 // (12) Filtres & recherche du portefeuille — état module, sans appel serveur.
-const BOARD_F = {q: "", prio: null, tags: new Set(), etats: new Set(), _focus: false};
+const BOARD_F = {q: "", prio: null, themes: new Set(), etats: new Set(), _focus: false};
 function matchFilter(c){
   const F = BOARD_F;
   if(F.q && !(c.titre || "").toLowerCase().includes(F.q.toLowerCase())) return false;
   if(F.prio && c.prio !== F.prio) return false;
-  if(F.tags.size && !(c.tags || []).some(t => F.tags.has(t))) return false;
+  if(F.themes.size && !F.themes.has(c.theme_id || "")) return false;
   for(const e of F.etats){
     if(e === "late" && !lateTasks(c).length) return false;
     if(e === "att"  && !openAtt(c).length)   return false;
@@ -1395,22 +1452,27 @@ function matchFilter(c){
 }
 function boardSearch(v){ BOARD_F.q = v; BOARD_F._focus = true; renderBoard(); }
 function boardTogglePrio(p){ BOARD_F.prio = BOARD_F.prio === p ? null : p; renderBoard(); }
-function boardToggleTag(t){ BOARD_F.tags.has(t) ? BOARD_F.tags.delete(t) : BOARD_F.tags.add(t); renderBoard(); }
+function boardToggleTheme(t){ BOARD_F.themes.has(t) ? BOARD_F.themes.delete(t) : BOARD_F.themes.add(t); renderBoard(); }
 function boardToggleEtat(e){ BOARD_F.etats.has(e) ? BOARD_F.etats.delete(e) : BOARD_F.etats.add(e); renderBoard(); }
-function boardClearF(){ BOARD_F.q = ""; BOARD_F.prio = null; BOARD_F.tags.clear(); BOARD_F.etats.clear(); renderBoard(); }
+function boardClearF(){ BOARD_F.q = ""; BOARD_F.prio = null; BOARD_F.themes.clear(); BOARD_F.etats.clear(); renderBoard(); }
 function renderBoard(){
   const b = $("board"); b.innerHTML = "";
   { // (12) barre légère de filtres/recherche, en tête du board
     const F = BOARD_F, bar = document.createElement("div"); bar.className = "board-filter";
-    const allTags = [...new Set(LIVE().flatMap(c => c.tags || []))].sort((a, x) => a.localeCompare(x));
-    const active = F.q || F.prio || F.tags.size || F.etats.size;
+    // Le thème remplace le tag comme axe de filtrage : 10 boutons stables au lieu
+    // d'une liste qui enflait à chaque nouveau chantier.
+    const used = new Set(LIVE().map(c => c.theme_id || ""));
+    const active = F.q || F.prio || F.themes.size || F.etats.size;
     let bh = `<input id="boardQ" class="bf-q" type="text" placeholder="Rechercher un chantier…" value="${esc(F.q)}" oninput="boardSearch(this.value)">`;
     bh += `<span class="bf-grp">` + Object.keys(PRIO).map(p =>
       `<button class="bf-seg ${F.prio === p ? "on" : ""}" onclick="boardTogglePrio('${p}')">${PRIO[p]}</button>`).join("") + `</span>`;
     bh += `<span class="bf-grp">` + [["late", "⏰ retard"], ["att", "⌛ attente"], ["risk", "⚠ risque"], ["hold", "⏸ pause"]].map(([k, l]) =>
       `<button class="bf-seg ${F.etats.has(k) ? "on" : ""}" onclick="boardToggleEtat('${k}')">${l}</button>`).join("") + `</span>`;
-    if(allTags.length) bh += `<span class="bf-grp">` + allTags.map(t =>
-      `<button class="bf-tag ${F.tags.has(t) ? "on" : ""}" onclick="boardToggleTag('${jqs(t)}')">${esc(t)}</button>`).join("") + `</span>`;
+    bh += `<span class="bf-grp th-filter">` + THEMES_ON().filter(t => used.has(t.id)).map(t =>
+      `<button class="th-fb ${F.themes.has(t.id) ? "on" : ""}" style="--th:${t.couleur}" ` +
+      `onclick="boardToggleTheme('${t.id}')">${t.icone} ${esc(t.nom)}</button>`).join("") +
+      (used.has("") ? `<button class="th-fb ${F.themes.has("") ? "on" : ""}" onclick="boardToggleTheme('')">○ sans thème</button>` : "") +
+      `</span>`;
     if(active) bh += `<button class="bf-clear" onclick="boardClearF()">✕ effacer</button>`;
     bar.innerHTML = bh; b.appendChild(bar);
   }
@@ -1492,7 +1554,8 @@ function renderBoard(){
       if(c.cdc){ const sc = CDC_ST[c.cdc.statut] || CDC_ST.brouillon;
         bdg.push(`<span class="bdg b-cdc ${sc.cls}">📄 CdC ${sc.lbl}</span>`); }
       if(bdg.length) h += `<div class="c-badges">${bdg.join("")}</div>`;
-      if(c.tags && c.tags.length) h += `<div class="c-tags">` + c.tags.map(t => `<span class="c-tag${BOARD_F.tags.has(t) ? " on" : ""}" onclick="event.stopPropagation();boardToggleTag('${jqs(t)}')">${esc(t)}</span>`).join("") + `</div>`;
+      if(c.theme_id && thById(c.theme_id)) h += `<div class="c-tags">` +
+        themeChip(c.theme_id, {click: `event.stopPropagation();boardToggleTheme('${c.theme_id}')`}) + `</div>`;
       if(c.hold) h += `<div class="c-actions"><button class="btn sm" title="Reprendre ce chantier (le remet dans la charge)" onclick="event.stopPropagation();mutate({op:'set_hold',chantier_id:'${c.id}',hold:false})">▶ Reprendre</button></div>`;
       card.innerHTML = h; body.appendChild(card);
     });
@@ -1886,8 +1949,23 @@ document.addEventListener("keydown", e => {
   else if(k === "t"){ setView("board"); }
   else if(k === "p"){ setView("planning"); }
   else if(k === "d"){ setView("dash"); }
-  else if(k === "n"){ e.preventDefault(); newChantier(); }
+  // Capture immédiate : c'est le point qui décide si l'outil remplace le papier.
+  // On écrit BEAUCOUP plus souvent une note ou une action qu'on ne crée un chantier,
+  // donc « n » va à la note et la création de chantier passe sur « c ».
+  else if(k === "a"){ e.preventDefault(); captureAction(); }
+  else if(k === "n"){ e.preventDefault(); captureNote(); }
+  else if(k === "c"){ e.preventDefault(); newChantier(); }
 });
+// Ouvre la vue et pose le curseur dans le champ de saisie : zéro clic entre
+// l'idée et sa capture.
+function captureAction(){
+  setView("actions");
+  const el = $("ac_new"); if(el){ el.focus(); el.select(); }
+}
+function captureNote(){
+  setView("notes");
+  const el = $("nt_corps"); if(el) el.focus();
+}
 
 function renderPage(){
   const c = chById(CUR); if(!c){ backToBoard(); return; }
@@ -1989,11 +2067,11 @@ function renderPage(){
       `<span class="del" onclick="mutate({op:'remove_partie',chantier_id:'${c.id}',partie_id:'${pp.id}'})">×</span></div>`).join("")
       : `<div class="empty">Personne pour l'instant.</div>`) + `<div id="addPartie_${c.id}"></div>`);
 
-  // Tags
-  h += card(`Tags <span class="add" onclick="showAddTag('${c.id}')">+ ajouter</span>`,
-    `<div class="chips edit">` + (c.tags.length ? c.tags.map(t =>
-      `<span class="chip">${esc(t)} <span class="x" onclick="mutate({op:'remove_tag',chantier_id:'${c.id}',tag:'${jqs(t)}'})">×</span></span>`).join("")
-      : `<span class="empty">Aucun tag.</span>`) + `</div><div id="addTag_${c.id}"></div>`);
+  // Thème — un seul, choisi dans la liste fermée (plus de saisie libre)
+  h += card("Thème",
+    themeSelect(c.theme_id, `mutate({op:'set_theme',chantier_id:'${c.id}',theme_id:this.value||null})`) +
+    `<div class="muted small" style="margin-top:6px">Maille transverse : ce chantier, ses actions et ses notes ` +
+    `se retrouvent ensemble dans <span class="add" onclick="setView('themes')">Thèmes</span>.</div>`);
 
   // Blocage
   h += card("Point bloquant", `<textarea placeholder="Qu'est-ce qui bloque ?" ` +
@@ -2025,10 +2103,15 @@ function renderPage(){
   // Courbe d'avancement
   h += card("Avancement dans le temps", progressCurve(c, S));
 
-  // Historique
-  h += card(`Historique <span class="add" onclick="showAddNote('${c.id}')">+ note</span>`,
-    `<div id="addNote_${c.id}"></div>` + (c.histo.length
-      ? c.histo.map(e => `<div class="hist"><span class="d">${fmt(e.d)}</span>${esc(e.t)}</div>`).join("")
+  // Historique = les notes rattachées à ce chantier (même magasin que le bloc-notes,
+  // donc une seule écriture, pas deux endroits où consigner la même chose).
+  const hns = notesOf(c.id);
+  h += card(`Historique <span class="add" onclick="showAddNote('${c.id}')">+ note</span>` +
+            ` <span class="add" onclick="setView('notes')">bloc-notes</span>`,
+    `<div id="addNote_${c.id}"></div>` + (hns.length
+      ? hns.map(n => `<div class="hist"><span class="d">${fmt(n.date)}${n.heure ? " " + n.heure : ""}</span>` +
+          (n.titre ? `<b>${esc(n.titre)}</b> — ` : "") + esc(n.corps) +
+          `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer cette note ?'))mutate({op:'note_remove',id:'${n.id}'})">×</span></div>`).join("")
       : `<div class="empty">Aucune note.</div>`));
 
   h += `</div></div>`;
@@ -2693,15 +2776,7 @@ function addPartie(id){
   else if(v) mutate({op: "add_partie", chantier_id: id, nom: v, role});
 }
 
-function showAddTag(id){
-  $("addTag_" + id).innerHTML =
-    `<div class="miniform"><input id="tgv" placeholder="Tag (ex. Power BI)">` +
-    `<div class="actions"><button class="btn sm" onclick="hide('addTag_${id}')">Annuler</button>` +
-    `<button class="btn sm primary" onclick="addTag('${id}')">Ajouter</button></div></div>`;
-  $("tgv").focus();
-  $("tgv").addEventListener("keydown", e => { if(e.key === "Enter") addTag(id); });
-}
-function addTag(id){ const v = $("tgv").value.trim(); if(v) mutate({op: "add_tag", chantier_id: id, tag: v}); }
+// (le tag libre a été remplacé par le thème : liste fermée, choisie dans un <select>)
 
 // ---- Personnes : l'annuaire (STORE.contacts) est la source de vérité --------
 // Rôles standard suggérés (PMP/PRINCE2) — le champ reste libre (datalist).
@@ -3070,46 +3145,6 @@ function addRisque(cid){
 }
 
 // ======================================================================== //
-//  Routines / rappels — checklist récurrente unifiée (hors chantier)
-// ======================================================================== //
-const RAPPELS = () => (STORE.rappels || []);
-const RFREQ = {jour: "Chaque jour", semaine: "Chaque semaine", mois: "Chaque mois", ponctuel: "Ponctuel"};
-const JSEM = ["lun", "mar", "mer", "jeu", "ven", "sam", "dim"];   // 0 = lundi
-const weekdayIdx = ds => (dparse(ds).getUTCDay() + 6) % 7;        // 0=lundi .. 6=dimanche
-
-function rappelFait(r, d){   // coché pour l'itération courante (jour / semaine ISO / mois)
-  const ticks = r.ticks || [];
-  if(r.freq === "ponctuel") return ticks.length > 0;
-  // hebdo à jours précis (lun+mer+ven) : on coche au jour, pas à la semaine
-  if(r.freq === "semaine")  return (r.jours && r.jours.length) ? ticks.includes(d) : ticks.some(t => weekStart(t) === weekStart(d));
-  if(r.freq === "mois")     return ticks.some(t => t.slice(0, 7) === d.slice(0, 7));
-  return ticks.includes(d);   // jour
-}
-function rappelDue(r, d){   // doit-il apparaître à la date d ?
-  if(!r.actif) return false;
-  if(r.freq === "jour") return true;
-  if(r.freq === "semaine"){
-    if(r.jours && r.jours.length) return r.jours.includes(weekdayIdx(d));
-    return !rappelFait(r, d);                       // sans jour précis : dû tant que pas fait cette semaine
-  }
-  if(r.freq === "mois"){
-    if(r.jour_mois) return Number(d.slice(8, 10)) === r.jour_mois || (!rappelFait(r, d) && Number(d.slice(8, 10)) > r.jour_mois);
-    return !rappelFait(r, d);
-  }
-  return !rappelFait(r, d) && (!r.date || d >= r.date);   // ponctuel : dû dès l'échéance, jusqu'à fait
-}
-const rappelsDus    = d => RAPPELS().filter(r => rappelDue(r, d));
-const rappelsAFaire = d => rappelsDus(d).filter(r => !rappelFait(r, d));
-function rappelMeta(r){
-  const m = [RFREQ[r.freq] || r.freq];
-  if(r.freq === "semaine" && r.jours && r.jours.length) m.push(r.jours.slice().sort().map(j => JSEM[j]).join(", "));
-  if(r.freq === "mois" && r.jour_mois) m.push("le " + r.jour_mois);
-  if(r.freq === "ponctuel" && r.date) m.push("échéance " + fmt(r.date));
-  if(r.heure) m.push(r.heure);
-  return m.join(" · ");
-}
-
-// ======================================================================== //
 //  Suivi du temps (chrono) — sessions horodatées + récap "Ma journée"
 // ======================================================================== //
 let DAY_OPEN = false;   // état déplié/replié de la section "Ma journée" (mémorisé entre rendus)
@@ -3141,7 +3176,6 @@ function sessMin(s){
 }
 function fmtDur(min){ min = Math.round(min); const h = Math.floor(min / 60), m = min % 60; return h ? `${h} h${m ? " " + String(m).padStart(2, "0") : ""}` : `${m} min`; }
 const activeForTache  = tid => { const a = activeSession(); return a && a.tache_id  === tid ? a : null; };
-const activeForRappel = rid => { const a = activeSession(); return a && a.rappel_id === rid ? a : null; };
 const tacheMin = tid => TIMELOG().filter(s => s.tache_id === tid).reduce((a, s) => a + sessMin(s), 0);
 const chantierMin = cid => TIMELOG().filter(s => s.chantier_id === cid).reduce((a, s) => a + sessMin(s), 0);
 const recetteMin = cid => TIMELOG().filter(s => s.kind === "recette" && (!cid || s.chantier_id === cid)).reduce((a, s) => a + sessMin(s), 0);
@@ -3157,7 +3191,8 @@ function lastEndedSession(){
 function resumeSessOp(s){
   return {op: "clock_start", kind: s.kind, label: s.label,
           chantier_id: s.chantier_id, tache_id: s.tache_id,
-          rappel_id: s.rappel_id, iteration_id: s.iteration_id};
+          action_id: s.action_id, iteration_id: s.iteration_id,
+          theme_id: s.theme_id};
 }
 function resumeLast(){ const s = lastEndedSession(); if(s) mutate(resumeSessOp(s)); }
 function resumeSess(id){ const s = TIMELOG().find(x => x.id === id); if(s) mutate(resumeSessOp(s)); }
@@ -3231,13 +3266,8 @@ function actToggle(){   // interrupteur segmenté Temps / Argent
 const fmtIdx = v => v == null ? "—" : v.toFixed(2);
 const fmtPctw = v => v == null ? "—" : Math.round(v * 100) + " %";
 const idxCls = v => v == null ? "" : v >= 1 ? "good" : v >= 0.9 ? "warn" : "bad";   // ≥1 bon · ≥.9 vigilance · <.9 mauvais
-const KIND_ICON = {tache: "🗂", rappel: "🔁", recette: "🧪", libre: "•"};
+const KIND_ICON = {tache: "🗂", action: "🔁", recette: "🧪", libre: "•"};
 
-async function rappelStop(rid){           // terminer une routine : arrête le chrono + coche le jour
-  await mutate({op: "clock_stop"});
-  const r = (STORE.rappels || []).find(x => x.id === rid);
-  if(r && !rappelFait(r, TODAY)) await mutate({op: "toggle_rappel", id: rid, date: TODAY});
-}
 function tlSyncTaches(){   // peuple la liste des tâches selon le chantier choisi (jalons exclus : pas de temps)
   const sel = $("tl_tache"); if(!sel) return;
   const c = $("tl_chantier").value ? chById($("tl_chantier").value) : null;
@@ -3255,8 +3285,11 @@ function addManualSession(){
   if(!label && tid){ const t = chById(cid).taches.find(x => x.id === tid); if(t) label = t.label; }   // tâche choisie sans libellé : reprend son nom
   if(!label){ $("tl_label").focus(); return; }
   if(!debut || !fin){ alert("Indique l'heure de début ET de fin (plage terminée)."); return; }
+  const thSel = document.querySelector(".tl_theme_sel");   // themeSelect() pose une classe, pas un id
+  const th = thSel ? thSel.value : "";
   mutate({op: "clock_add", label, debut, fin,
-          kind: tid ? "tache" : "libre", chantier_id: cid || null, tache_id: tid || null});
+          kind: tid ? "tache" : "libre", chantier_id: cid || null, tache_id: tid || null,
+          theme_id: th || null});
 }
 
 function maJourneeSection(){
@@ -3282,7 +3315,9 @@ function maJourneeSection(){
           : `<input type="time" class="dl-t" value="${s.fin}" title="Fin" onchange="mutate({op:'clock_edit',id:'${s.id}',fin:this.value})">`) +
         `<span class="dl-dur" title="${lunchOverlap(s.debut, s.fin || nowHM(), s.date) ? "Pause déjeuner déduite (" + fmtDur(lunchOverlap(s.debut, s.fin || nowHM(), s.date)) + ")" : ""}">${fmtDur(sessMin(s))}${lunchOverlap(s.debut, s.fin || nowHM(), s.date) ? ` <span class="dl-pause">⏸ déj.</span>` : ""}</span>` +
         `<input class="dl-lib" value="${esc(s.label)}" onblur="if(this.value.trim()&&this.value!=='${jqs(s.label)}')mutate({op:'clock_edit',id:'${s.id}',label:this.value.trim()})">` +
-        (s.chantier_id && chById(s.chantier_id) ? `<span class="dl-asg" title="Temps compté pour ce chantier${s.tache_id ? " / cette tâche" : ""}">🗂 ${esc(chById(s.chantier_id).titre)}</span>` : "") +
+        (s.chantier_id && chById(s.chantier_id)
+          ? `<span class="dl-asg" title="Temps compté pour ce chantier${s.tache_id ? " / cette tâche" : ""}">🗂 ${esc(chById(s.chantier_id).titre)}</span>`
+          : themeSelect(s.theme_id, `mutate({op:'clock_edit',id:'${s.id}',theme_id:this.value||null})`, "dl-th")) +
         (running ? "" : `<button class="dl-resume" title="Reprendre cette activité (relance le chrono)" onclick="resumeSess('${s.id}')">▶</button>`) +
         `<span class="del" title="Supprimer cette plage" onclick="if(confirm('Supprimer cette plage ?'))mutate({op:'clock_delete',id:'${s.id}'})">×</span>` +
         `</div>`;
@@ -3297,112 +3332,773 @@ function maJourneeSection(){
     `<select id="tl_chantier" title="Rattacher à un chantier (son temps y sera compté)" onchange="tlSyncTaches()"><option value="">— sans chantier —</option>` +
       LIVE().map(c => `<option value="${c.id}">${esc(c.titre)}</option>`).join("") + `</select>` +
     `<select id="tl_tache" title="Rattacher à une tâche précise (sinon : chantier seul)" style="display:none"></select>` +
+    themeSelect("", "", "tl_theme_sel") +
     `<button class="btn sm primary" onclick="addManualSession()">Ajouter</button>` +
     `</div>`;
   h += `</div></details>`;
   return h;
 }
 
-function routinesSection(){
-  const dus = rappelsDus(TODAY);
-  let h = `<div class="ch-h">Mes routines &amp; rappels — ${fmt(TODAY)}</div>`;
-  if(!dus.length){
-    h += `<div class="ok-note">Aucune routine ni rappel pour aujourd'hui. Ajoute-en une ci-dessous.</div>`;
-  } else {
-    h += `<div class="rt-list">`;
-    dus.forEach(r => {
-      const fait = rappelFait(r, TODAY);
-      const late = r.freq === "ponctuel" && r.date && isLate(r.date) && !fait;
-      const act = activeForRappel(r.id);
-      const mins = sessionsOn(TODAY).filter(s => s.rappel_id === r.id).reduce((a, s) => a + sessMin(s), 0);
-      // contrôle chrono : Démarrer → Terminer ; total du jour affiché si > 0
-      let ctrl;
-      if(act) ctrl = `<button class="tstart stop" title="Terminer (arrête le chrono)" onclick="rappelStop('${r.id}')">⏹ Terminer</button>` +
-                     `<span class="tstate inprog" title="Depuis ${act.debut}">⏱ ${act.debut}</span>`;
-      else if(fait) ctrl = `<button class="tstart" title="Relancer le chrono" onclick="mutate({op:'clock_start',kind:'rappel',rappel_id:'${r.id}'})">▶</button>`;
-      else ctrl = `<button class="tstart" title="Démarrer (lance le chrono)" onclick="mutate({op:'clock_start',kind:'rappel',rappel_id:'${r.id}'})">▶ Démarrer</button>`;
-      const durTxt = mins ? ` <span class="rt-dur">${fmtDur(mins)}</span>` : "";
-      h += `<div class="rt-row${fait ? " done" : ""}">` +
-        `<span class="box ${fait ? "ok" : ""}" title="Marquer fait / non fait (sans chrono)" ` +
-          `onclick="mutate({op:'toggle_rappel',id:'${r.id}',date:'${TODAY}'})"></span>` +
-        `<div class="rt-body"><div class="rt-lib">${esc(r.label)}` +
-          (late ? ` <span class="bdg b-late">⏰ en retard</span>` : ``) + durTxt + `</div>` +
-          `<div class="rt-meta">${esc(rappelMeta(r))}${r.chantier_id && chById(r.chantier_id) ? " · 🗂 " + esc(chById(r.chantier_id).titre) : ""}</div>` +
-          (r.note ? `<div class="rt-note">${esc(r.note)}</div>` : ``) + `</div>` +
-        ctrl +
-        `<span class="del" title="Supprimer cette routine" onclick="if(confirm('Supprimer « ${jqs(r.label)} » ?'))mutate({op:'remove_rappel',id:'${r.id}'})">×</span>` +
-        `</div>`;
-    });
-    h += `</div>`;
+// ======================================================================== //
+//  Actions — tâches libres ET routines dans UNE seule liste.
+//  Une routine est une action avec une `recurrence` ; une tâche libre en est
+//  une sans. Un seul endroit où regarder ce qu'il y a à faire.
+//
+//  Le point clé : une routine ratée ne disparaît plus. Elle engendre des
+//  OCCURRENCES statuées (fait / sauté / raté) — donc un historique honnête et
+//  un taux de tenue, au lieu d'une case qui s'évapore le lendemain.
+// ======================================================================== //
+const ACTIONS = () => (STORE.actions || []);
+const acById = id => ACTIONS().find(a => a.id === id) || null;
+const AFREQ = {jour: "Chaque jour", semaine: "Chaque semaine", mois: "Chaque mois"};
+const JSEM = ["lun", "mar", "mer", "jeu", "ven", "sam", "dim"];   // 0 = lundi
+const weekdayIdx = ds => (dparse(ds).getUTCDay() + 6) % 7;        // 0=lundi .. 6=dimanche
+const OCC_LBL = {fait: "fait", saute: "sauté", rate: "raté"};
+
+function lastDayOfMonth(ds){
+  const y = +ds.slice(0, 4), m = +ds.slice(5, 7);
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();       // jour 0 du mois suivant = dernier du mois
+}
+const occOf = (a, d) => (a.occurrences || []).find(o => o.date === d) || null;
+const occStat = (a, d) => { const o = occOf(a, d); return o ? o.statut : null; };
+
+// Une occurrence est-elle ATTENDUE ce jour-là ? (indépendant de son statut)
+function occAttendue(a, d){
+  const r = a.recurrence;
+  if(!r) return false;
+  if(r.freq === "jour") return true;
+  if(r.freq === "semaine"){
+    if(r.jours && r.jours.length) return r.jours.includes(weekdayIdx(d));
+    return weekdayIdx(d) === 0;                          // sans jour précis : rendez-vous le lundi
   }
-  // formulaire d'ajout (compact, tous les champs visibles ; on lit ceux utiles selon la fréquence)
-  h += `<div class="rt-add">` +
-    `<input id="rp_label" placeholder="Nouvelle routine / rappel (ex. Relever les mails, Bilan hebdo…)" ` +
-      `onkeydown="if(event.key==='Enter')addRappel()">` +
-    `<select id="rp_freq" onchange="rpFreqUI()">` +
-      Object.entries(RFREQ).map(([k, v]) => `<option value="${k}">${v}</option>`).join("") + `</select>` +
-    `<span id="rp_jours" class="rp-days" style="display:none">` +
-      JSEM.map((j, i) => `<label><input type="checkbox" class="rp-day" value="${i}">${j}</label>`).join("") + `</span>` +
-    `<span id="rp_moiswrap" style="display:none">le <input id="rp_jourmois" type="number" min="1" max="28" class="rp-num" placeholder="j"></span>` +
-    `<span id="rp_datewrap" style="display:none"><input id="rp_date" type="date" title="Échéance"></span>` +
-    `<input id="rp_heure" type="time" class="rp-time" title="Heure (optionnel, pour la notif bureau)">` +
-    `<select id="rp_chantier" title="Rattacher à un chantier (le temps chronométré y sera compté)"><option value="">— sans chantier —</option>` +
-      LIVE().map(c => `<option value="${c.id}">${esc(c.titre)}</option>`).join("") + `</select>` +
-    `<input id="rp_desc" class="rp-desc" placeholder="description (optionnel)" onkeydown="if(event.key==='Enter')addRappel()">` +
-    `<button class="btn sm primary" onclick="addRappel()">Ajouter</button>` +
+  if(r.freq === "mois"){
+    const jour = +d.slice(8, 10);
+    if(r.jour_mois === "fin") return jour === lastDayOfMonth(d);
+    return jour === (r.jour_mois || 1);
+  }
+  return false;
+}
+// Occurrences attendues entre deux dates (bornes incluses), plafonnées.
+function occAttendues(a, debut, fin){
+  const out = [];
+  let d = debut, guard = 0;
+  while(d <= fin && guard++ < 800){
+    if(occAttendue(a, d)) out.push(d);
+    d = addDays(d, 1);
+  }
+  return out;
+}
+// Occurrences passées encore SANS statut : ni faites, ni sautées, ni actées ratées.
+// C'est la dette réelle d'une routine — ce que l'ancien système effaçait en silence.
+function occEnSouffrance(a, jusqua){
+  if(!a.recurrence || !a.actif) return [];
+  const depuis = a.occurrences && a.occurrences.length
+    ? a.occurrences[0].date : (a.cree_le || addDays(jusqua, -60));
+  const borne = depuis < addDays(jusqua, -180) ? addDays(jusqua, -180) : depuis;   // 6 mois de recul max
+  return occAttendues(a, borne, addDays(jusqua, -1)).filter(d => !occStat(a, d));
+}
+// Début d'observation d'une routine : jamais avant sa création, sinon on lui
+// reprocherait des semaines où elle n'existait pas (et tout afficherait 0 %).
+function acDepuis(a, jours){
+  const fenetre = addDays(TODAY, -(jours || 56));
+  const naissance = a.cree_le || fenetre;
+  return naissance > fenetre ? naissance : fenetre;
+}
+// Taux de tenue : la seule question qu'on se pose sur une routine. Les occurrences
+// sautées volontairement sortent du dénominateur — sauter n'est pas rater.
+function tenue(a, jours){
+  if(!a.recurrence) return null;
+  const dus = occAttendues(a, acDepuis(a, jours), TODAY).filter(d => occStat(a, d) !== "saute");
+  const faits = dus.filter(d => occStat(a, d) === "fait").length;
+  return {faits, total: dus.length, pct: dus.length ? Math.round(100 * faits / dus.length) : null};
+}
+// Série en cours (chaîne de Seinfeld) : occurrences tenues d'affilée en remontant.
+function serie(a){
+  if(!a.recurrence) return 0;
+  const dus = occAttendues(a, acDepuis(a, 365), TODAY).reverse();
+  let n = 0;
+  for(const d of dus){
+    const st = occStat(a, d);
+    if(st === "saute") continue;                         // sauté volontairement : ne casse pas la série
+    if(st === "fait"){ n++; continue; }
+    if(d === TODAY) continue;                            // aujourd'hui pas encore fait : la série tient
+    break;
+  }
+  return n;
+}
+
+// --- État "à faire" d'une action à une date --------------------------------
+const acFaite = (a, d) => a.recurrence ? occStat(a, d) === "fait" : !!a.done;
+function acDue(a, d){                                    // doit-elle apparaître dans la liste du jour ?
+  if(!a.actif) return false;
+  if(a.recurrence) return occAttendue(a, d);
+  if(a.done) return false;
+  // Une action SANS échéance n'est pas « due » : elle attend dans son seau et se
+  // revoit à la revue hebdo. Sinon elle réclamerait l'attention tous les jours,
+  // la liste du jour deviendrait ingérable et on cesserait de la regarder.
+  return !!a.echeance && a.echeance <= d;
+}
+const acRetard = a => !a.recurrence && !a.done && a.echeance && isLate(a.echeance);
+const acMeta = a => {
+  const m = [];
+  if(a.recurrence){
+    m.push(AFREQ[a.recurrence.freq] || a.recurrence.freq);
+    if(a.recurrence.freq === "semaine" && a.recurrence.jours.length)
+      m.push(a.recurrence.jours.map(j => JSEM[j]).join(", "));
+    if(a.recurrence.freq === "mois")
+      m.push(a.recurrence.jour_mois === "fin" ? "dernier jour du mois" : "le " + (a.recurrence.jour_mois || 1));
+  } else if(a.echeance) m.push("échéance " + fmt(a.echeance));
+  else m.push("sans échéance");
+  if(a.heure) m.push(a.heure);
+  if(a.estimation_min) m.push(fmtDur(a.estimation_min));
+  return m.join(" · ");
+};
+const acMin = aid => TIMELOG().filter(s => s.action_id === aid).reduce((a, s) => a + sessMin(s), 0);
+const activeForAction = aid => { const a = activeSession(); return a && a.action_id === aid ? a : null; };
+
+// Priorité × urgence (Eisenhower) : ce qui est prioritaire ET dû aujourd'hui
+// passe devant. Sert au tri, pas à une matrice décorative en quatre cases.
+const PRIO_RANG = {h: 0, m: 1, b: 2};
+function acUrgence(a){
+  if(acRetard(a)) return 0;
+  if(a.echeance === TODAY) return 1;
+  if(a.echeance && a.echeance <= addDays(TODAY, 7)) return 2;
+  if(!a.echeance) return 4;
+  return 3;
+}
+function acSort(list){
+  return list.slice().sort((x, y) => {
+    const u = acUrgence(x) - acUrgence(y); if(u) return u;
+    const p = PRIO_RANG[x.prio] - PRIO_RANG[y.prio]; if(p) return p;
+    return (x.ordre || 0) - (y.ordre || 0);
+  });
+}
+
+// --- Regroupement de la vue Actions ----------------------------------------
+// Les seaux sont temporels : c'est ainsi qu'on décide quoi faire, pas par projet.
+function acBuckets(){
+  const ouvertes = ACTIONS().filter(a => a.actif && !a.recurrence && !a.done);
+  const sem = addDays(TODAY, 7);
+  return [
+    {k: "retard",  titre: "En retard",       cls: "bad",  items: acSort(ouvertes.filter(a => acRetard(a)))},
+    {k: "jour",    titre: "Aujourd'hui",     cls: "now",  items: acSort(ouvertes.filter(a => a.echeance === TODAY))},
+    {k: "semaine", titre: "Cette semaine",   cls: "",     items: acSort(ouvertes.filter(a => a.echeance && a.echeance > TODAY && a.echeance <= sem))},
+    {k: "plus",    titre: "Plus tard",       cls: "",     items: acSort(ouvertes.filter(a => a.echeance && a.echeance > sem))},
+    {k: "sansdate",titre: "Sans échéance",   cls: "soft", items: acSort(ouvertes.filter(a => !a.echeance))},
+  ];
+}
+const acRoutines = () => ACTIONS().filter(a => a.recurrence);
+const acDuJour = () => ACTIONS().filter(a => acDue(a, TODAY) && !acFaite(a, TODAY));
+
+// ======================================================================== //
+//  Vue Actions
+// ======================================================================== //
+let ACT_F = {theme: "", chantier: "", q: "", faites: false};
+let ACT_TAB = "todo";                        // todo | routines | faites
+function acSetTab(t){ ACT_TAB = t; renderActions(); }
+function acFiltre(k, v){ ACT_F[k] = v; renderActions(); }
+function acFiltreClear(){ ACT_F = {theme: "", chantier: "", q: "", faites: false}; renderActions(); }
+function acMatch(a){
+  if(ACT_F.theme && a.theme_id !== ACT_F.theme) return false;
+  if(ACT_F.chantier && a.chantier_id !== ACT_F.chantier) return false;
+  if(ACT_F.q && !(a.label + " " + (a.desc || "")).toLowerCase().includes(ACT_F.q.toLowerCase())) return false;
+  return true;
+}
+
+function renderActions(){
+  const dus = acDuJour().filter(acMatch);
+  const dette = acRoutines().filter(a => acMatch(a))
+    .map(a => ({a, occ: occEnSouffrance(a, TODAY)})).filter(x => x.occ.length);
+  let h = "";
+
+  // --- Bandeau : capture immédiate. C'est la fonction la plus utilisée de la vue.
+  h += acCaptureBar();
+
+  // --- Filtres transverses
+  h += `<div class="ac-filters">` +
+    `<input class="ac-q" placeholder="Filtrer…" value="${esc(ACT_F.q)}" oninput="acFiltre('q',this.value)">` +
+    `<span class="th-filter">` +
+      `<button class="th-fb ${ACT_F.theme ? "" : "on"}" onclick="acFiltre('theme','')">Tous</button>` +
+      THEMES_ON().map(t => `<button class="th-fb ${ACT_F.theme === t.id ? "on" : ""}" style="--th:${t.couleur}" ` +
+        `onclick="acFiltre('theme','${t.id}')" title="${esc(t.nom)}">${t.icone} ${esc(t.nom)}</button>`).join("") +
+    `</span>` +
+    ((ACT_F.q || ACT_F.theme || ACT_F.chantier) ? `<button class="btn sm" onclick="acFiltreClear()">Effacer</button>` : "") +
     `</div>`;
-  // gestionnaire repliable : TOUTES les routines (même désactivées) — activer/éditer/supprimer
-  const all = RAPPELS();
-  if(all.length){
-    h += `<details class="rt-manage"><summary>Gérer mes routines (${all.length})</summary><div class="rt-mlist">`;
-    all.forEach(r => {
-      const rch = r.chantier_id ? chById(r.chantier_id) : null;
-      const rchTaches = rch ? rch.taches.filter(t => !t.is_milestone) : [];
-      h += `<div class="rt-mrow${r.actif ? "" : " off"}">` +
-        `<div class="rt-mhead">` +
-          `<label class="rt-toggle" title="${r.actif ? "Active — décocher pour mettre en pause" : "En pause — cocher pour réactiver"}">` +
-            `<input type="checkbox" ${r.actif ? "checked" : ""} onchange="mutate({op:'update_rappel',id:'${r.id}',actif:this.checked})"></label>` +
-          `<input class="rt-mlib" value="${esc(r.label)}" ` +
-            `onblur="if(this.value.trim()&&this.value!=='${jqs(r.label)}')mutate({op:'update_rappel',id:'${r.id}',label:this.value.trim()})">` +
-          `<select class="rt-mfreq" onchange="mutate({op:'update_rappel',id:'${r.id}',freq:this.value})">` +
-            Object.entries(RFREQ).map(([k, v]) => `<option value="${k}" ${r.freq === k ? "selected" : ""}>${v}</option>`).join("") + `</select>` +
-          `<select class="rt-mch" title="Chantier rattaché (le temps chronométré y sera compté)" onchange="mutate({op:'update_rappel',id:'${r.id}',chantier_id:this.value||null,tache_id:null})">` +
-            `<option value="">— sans chantier —</option>` +
-            LIVE().map(c => `<option value="${c.id}" ${r.chantier_id === c.id ? "selected" : ""}>${esc(c.titre)}</option>`).join("") + `</select>` +
-          (rchTaches.length
-            ? `<select class="rt-mta" title="Tâche précise du chantier (sinon : chantier seul)" onchange="mutate({op:'update_rappel',id:'${r.id}',tache_id:this.value||null})"><option value="">— chantier seul —</option>` +
-                rchTaches.map(t => `<option value="${t.id}" ${r.tache_id === t.id ? "selected" : ""}>${esc(t.label)}</option>`).join("") + `</select>`
-            : "") +
-          `<span class="rt-mmeta">${esc(rappelMeta(r))}</span>` +
-          `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer « ${jqs(r.label)} » ?'))mutate({op:'remove_rappel',id:'${r.id}'})">×</span>` +
-        `</div>` +
-        `<input class="rt-mdesc" value="${esc(r.note || "")}" placeholder="+ description / notes…" ` +
-          `onblur="if(this.value!==this.defaultValue)mutate({op:'update_rappel',id:'${r.id}',note:this.value})">` +
+
+  // --- Onglets
+  const nTodo = acBuckets().reduce((n, b) => n + b.items.filter(acMatch).length, 0);
+  h += `<div class="ac-tabs">` +
+    `<button class="${ACT_TAB === "todo" ? "on" : ""}" onclick="acSetTab('todo')">À faire <b>${nTodo}</b></button>` +
+    `<button class="${ACT_TAB === "routines" ? "on" : ""}" onclick="acSetTab('routines')">Routines <b>${acRoutines().length}</b></button>` +
+    `<button class="${ACT_TAB === "faites" ? "on" : ""}" onclick="acSetTab('faites')">Faites</button>` +
+    `</div>`;
+
+  if(ACT_TAB === "todo"){
+    // Le jour d'abord : routines dues + actions à échéance du jour, chronométrables.
+    h += `<div class="ch-h">Aujourd'hui — ${fmt(TODAY)}</div>`;
+    h += dus.length
+      ? `<div class="ac-list">` + acSort(dus).map(a => acRow(a, TODAY)).join("") + `</div>`
+      : `<div class="ok-note">Rien de dû aujourd'hui. Tout est à jour.</div>`;
+    h += acCapaciteNote(dus);
+
+    // La dette de routines : ce qui a été raté et qu'on doit acter.
+    if(dette.length) h += acDetteBloc(dette);
+
+    // Puis le reste, par horizon.
+    acBuckets().forEach(b => {
+      const items = b.items.filter(acMatch);
+      if(!items.length) return;
+      if(b.k === "jour") return;                        // déjà couvert par « Aujourd'hui »
+      h += `<div class="ch-h ${b.cls}">${b.titre} <span class="muted">(${items.length})</span></div>`;
+      h += `<div class="ac-list">` + items.map(a => acRow(a, TODAY)).join("") + `</div>`;
+    });
+  }
+
+  if(ACT_TAB === "routines") h += acRoutinesTab();
+  if(ACT_TAB === "faites")   h += acFaitesTab();
+
+  $("actions").innerHTML = h;
+  const q = $("ac_q_keep");
+  if(q) q.focus();
+}
+
+// --- Capture : un champ, une ligne, zéro friction --------------------------
+// La saisie accepte des raccourcis : #thème, @chantier, !h/!m/!b, une date, 15m.
+function acCaptureBar(){
+  return `<div class="ac-capture">` +
+    `<input id="ac_new" placeholder="Ajouter une action… (ex. Relancer Karim export FAFE #ERP !h vendredi 15m)" ` +
+      `onkeydown="if(event.key==='Enter')acQuickAdd()">` +
+    `<button class="btn primary" onclick="acQuickAdd()">Ajouter</button>` +
+    `<button class="btn" onclick="acShowFull()" title="Formulaire complet : routine, chantier, estimation…">Détaillé…</button>` +
+    `<div class="ac-hint">` +
+      `<code>#thème</code> classe · <code>!h</code> priorité · <code>demain</code>, <code>vendredi</code>, <code>12/08</code> échéance · <code>20m</code> estimation` +
+    `</div>` +
+    `<div id="ac_full"></div>` +
+    `</div>`;
+}
+
+// Analyse de la saisie rapide. Tout est optionnel ; ce qui n'est pas reconnu
+// reste dans le libellé — on ne perd jamais ce que l'utilisateur a tapé.
+function acParse(txt){
+  const out = {label: txt, theme_id: null, prio: "m", echeance: null, estimation_min: 0, chantier_id: null};
+  let s = " " + txt + " ";
+  // #thème (correspondance sur le début du nom, insensible à la casse/accents)
+  const norm = x => x.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  s = s.replace(/\s#([^\s#@!]+)/g, (m, tag) => {
+    const t = THEMES_ON().find(t => norm(t.nom).startsWith(norm(tag)));
+    if(t){ out.theme_id = t.id; return " "; }
+    return m;
+  });
+  // @chantier
+  s = s.replace(/\s@([^\s#@!]+)/g, (m, q) => {
+    const c = LIVE().find(c => norm(c.titre).includes(norm(q)));
+    if(c){ out.chantier_id = c.id; return " "; }
+    return m;
+  });
+  // !h / !m / !b
+  s = s.replace(/\s!([hmb])\b/i, (m, p) => { out.prio = p.toLowerCase(); return " "; });
+  // estimation : 20m / 2h / 1h30
+  s = s.replace(/\s(\d+)h(\d{1,2})?\b/i, (m, hh, mm) => { out.estimation_min = +hh * 60 + (+mm || 0); return " "; });
+  if(!out.estimation_min) s = s.replace(/\s(\d+)\s?m(in)?\b/i, (m, mi) => { out.estimation_min = +mi; return " "; });
+  // dates : aujourd'hui / demain / jour de semaine / JJ-MM / JJ/MM
+  const jours = {lundi: 0, mardi: 1, mercredi: 2, jeudi: 3, vendredi: 4, samedi: 5, dimanche: 6};
+  s = s.replace(/\s(aujourd'?hui|demain|apr[eè]s-demain)\b/i, (m, w) => {
+    const k = norm(w);
+    out.echeance = addDays(TODAY, k.startsWith("aujourd") ? 0 : k.startsWith("demain") ? 1 : 2);
+    return " ";
+  });
+  if(!out.echeance) s = s.replace(/\s(lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\b/i, (m, w) => {
+    const cible = jours[norm(w)], cur = weekdayIdx(TODAY);
+    out.echeance = addDays(TODAY, ((cible - cur) + 7) % 7 || 7);   // la PROCHAINE occurrence
+    return " ";
+  });
+  if(!out.echeance) s = s.replace(/\s(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?\b/, (m, dd, mm, yy) => {
+    const y = yy ? (yy.length === 2 ? "20" + yy : yy) : TODAY.slice(0, 4);
+    const iso = `${y}-${String(+mm).padStart(2, "0")}-${String(+dd).padStart(2, "0")}`;
+    // une date sans année déjà passée vise l'an prochain
+    out.echeance = (!yy && iso < TODAY) ? `${+y + 1}-${iso.slice(5)}` : iso;
+    return " ";
+  });
+  out.label = s.replace(/\s+/g, " ").trim();
+  return out;
+}
+function acQuickAdd(){
+  const el = $("ac_new"), txt = (el.value || "").trim();
+  if(!txt){ el.focus(); return; }
+  const p = acParse(txt);
+  if(!p.label){ alert("Il ne reste rien comme libellé une fois les raccourcis retirés."); return; }
+  el.value = "";
+  mutate({op: "action_add", ...p});
+}
+// Formulaire complet : routine, chantier, estimation — pour ce que la ligne rapide ne couvre pas.
+function acShowFull(){
+  const box = $("ac_full");
+  if(!box) return;
+  if(box.innerHTML){ box.innerHTML = ""; return; }
+  box.innerHTML = `<div class="ac-form">` +
+    `<input id="acf_label" placeholder="Libellé de l'action / de la routine">` +
+    `<textarea id="acf_desc" placeholder="Description (optionnel)"></textarea>` +
+    `<div class="ac-frow">` +
+      `<label>Type <select id="acf_type" onchange="acFormUI()">` +
+        `<option value="once">Action ponctuelle</option><option value="rec">Routine récurrente</option></select></label>` +
+      `<label>Priorité <select id="acf_prio"><option value="h">Haute</option>` +
+        `<option value="m" selected>Moyenne</option><option value="b">Basse</option></select></label>` +
+      `<label>Thème ${themeSelect("", "", "acf_theme_sel")}</label>` +
+      `<label>Chantier <select id="acf_ch"><option value="">— sans chantier —</option>` +
+        LIVE().map(c => `<option value="${c.id}">${esc(c.titre)}</option>`).join("") + `</select></label>` +
+    `</div>` +
+    `<div class="ac-frow" id="acf_once">` +
+      `<label>Échéance <input id="acf_ech" type="date"></label>` +
+      `<label>Estimation (min) <input id="acf_est" type="number" min="0" step="5" class="rp-num"></label>` +
+      `<label>Heure <input id="acf_heure" type="time"></label>` +
+    `</div>` +
+    `<div class="ac-frow" id="acf_rec" style="display:none">` +
+      `<label>Fréquence <select id="acf_freq" onchange="acFormUI()">` +
+        Object.entries(AFREQ).map(([k, v]) => `<option value="${k}">${v}</option>`).join("") + `</select></label>` +
+      `<span id="acf_jours" class="rp-days" style="display:none">` +
+        JSEM.map((j, i) => `<label><input type="checkbox" class="acf-day" value="${i}">${j}</label>`).join("") + `</span>` +
+      `<label id="acf_jmwrap" style="display:none">Jour du mois <select id="acf_jm">` +
+        Array.from({length: 31}, (_, i) => `<option value="${i + 1}">le ${i + 1}</option>`).join("") +
+        `<option value="fin">dernier jour du mois</option></select></label>` +
+      `<label>Heure <input id="acf_heure2" type="time"></label>` +
+    `</div>` +
+    `<div class="ac-frow"><button class="btn primary" onclick="acAddFull()">Créer</button>` +
+      `<button class="btn" onclick="acShowFull()">Annuler</button></div>` +
+    `</div>`;
+  // le <select> de thème produit par themeSelect() n'a pas d'id : on le lui pose
+  const sel = box.querySelector(".acf_theme_sel");
+  if(sel){ sel.id = "acf_theme"; sel.removeAttribute("onchange"); }
+  $("acf_label").focus();
+}
+function acFormUI(){
+  const rec = $("acf_type").value === "rec";
+  $("acf_once").style.display = rec ? "none" : "flex";
+  $("acf_rec").style.display  = rec ? "flex" : "none";
+  if(rec){
+    const f = $("acf_freq").value;
+    $("acf_jours").style.display  = f === "semaine" ? "inline-flex" : "none";
+    $("acf_jmwrap").style.display = f === "mois" ? "block" : "none";
+  }
+}
+function acAddFull(){
+  const label = $("acf_label").value.trim();
+  if(!label){ $("acf_label").focus(); return; }
+  const rec = $("acf_type").value === "rec";
+  const op = {op: "action_add", label, desc: $("acf_desc").value.trim(),
+              prio: $("acf_prio").value, theme_id: $("acf_theme").value || null,
+              chantier_id: $("acf_ch").value || null};
+  if(rec){
+    const jm = $("acf_jm").value;
+    op.recurrence = {freq: $("acf_freq").value,
+                     jours: [...document.querySelectorAll(".acf-day:checked")].map(x => +x.value),
+                     jour_mois: jm === "fin" ? "fin" : +jm};
+    op.heure = $("acf_heure2").value || null;
+  } else {
+    op.echeance = $("acf_ech").value || null;
+    op.estimation_min = +$("acf_est").value || 0;
+    op.heure = $("acf_heure").value || null;
+  }
+  mutate(op);
+}
+
+// --- Une ligne d'action ----------------------------------------------------
+function acRow(a, d){
+  const fait = acFaite(a, d);
+  const rec = !!a.recurrence;
+  const sess = activeForAction(a.id);
+  const mins = acMin(a.id);
+  const ch = a.chantier_id ? chById(a.chantier_id) : null;
+  const st = rec ? occStat(a, d) : null;
+  const deuxMin = a.estimation_min && a.estimation_min <= 2 && !fait;
+
+  let ctrl;
+  if(sess) ctrl = `<button class="tstart stop" title="Terminer (arrête le chrono et coche)" onclick="acStop('${a.id}')">⏹ Terminer</button>` +
+                  `<span class="tstate inprog" title="Depuis ${sess.debut}">⏱ ${sess.debut}</span>`;
+  else ctrl = `<button class="tstart" title="Démarrer le chrono sur cette action" onclick="acStart('${a.id}')">${fait ? "▶" : "▶ Démarrer"}</button>`;
+
+  const st_serie = rec ? serie(a) : 0;
+  return `<div class="ac-row${fait ? " done" : ""}${st === "saute" ? " skipped" : ""}${acRetard(a) ? " late" : ""}">` +
+    `<span class="box ${fait ? "ok" : ""}" title="${fait ? "Décocher" : "Marquer fait"}" ` +
+      `onclick="mutate({op:'action_done',id:'${a.id}',date:'${d}'})"></span>` +
+    `<div class="ac-body">` +
+      `<div class="ac-lib">${themeDot(a.theme_id)}<span class="ac-txt">${esc(a.label)}</span>` +
+        `<span class="prio p-${a.prio}" title="Priorité">${a.prio === "h" ? "haute" : a.prio === "b" ? "basse" : "moy."}</span>` +
+        (rec ? `<span class="bdg b-rec" title="Routine récurrente">🔁</span>` : ``) +
+        (acRetard(a) ? ` <span class="bdg b-late">⏰ en retard</span>` : ``) +
+        (deuxMin ? ` <span class="bdg b-2min" title="Moins de 2 minutes : à faire maintenant plutôt qu'à replanifier">⚡ 2 min</span>` : ``) +
+        (st === "saute" ? ` <span class="bdg b-skip">sauté</span>` : ``) +
+        (st_serie >= 3 ? ` <span class="bdg b-streak" title="${st_serie} occurrences tenues d'affilée">🔥 ${st_serie}</span>` : ``) +
+        (mins ? ` <span class="ac-dur">${fmtDur(mins)}</span>` : ``) +
+      `</div>` +
+      `<div class="ac-meta">${esc(acMeta(a))}` +
+        (ch ? ` · <span class="ac-ch" onclick="openChantier('${ch.id}')">🗂 ${esc(ch.titre)}</span>` : ``) +
+      `</div>` +
+      (a.desc ? `<div class="ac-desc">${esc(a.desc)}</div>` : ``) +
+    `</div>` +
+    ctrl +
+    (rec
+      ? `<button class="ac-skip" title="Sauter cette occurrence (volontairement — ne compte pas comme ratée)" onclick="mutate({op:'action_skip',id:'${a.id}',date:'${d}'})">⤳</button>`
+      : `<button class="ac-skip" title="Reporter à demain" onclick="mutate({op:'action_defer',id:'${a.id}',jours:1})">→1j</button>`) +
+    `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer « ${jqs(a.label)} » ?'))mutate({op:'action_remove',id:'${a.id}'})">×</span>` +
+    `</div>`;
+}
+function acStart(aid){
+  const a = acById(aid); if(!a) return;
+  mutate({op: "clock_start", kind: "action", label: a.label, action_id: aid,
+          chantier_id: a.chantier_id || null, tache_id: a.tache_id || null,
+          theme_id: a.theme_id || null});
+}
+async function acStop(aid){          // terminer : arrête le chrono ET coche
+  await mutate({op: "clock_stop"});
+  const a = acById(aid);
+  if(a && !acFaite(a, TODAY)) await mutate({op: "action_done", id: aid, date: TODAY});
+}
+
+// --- Capacité du jour : la limite déjà réglée sert aussi aux actions --------
+function acCapaciteNote(dus){
+  const cap = +SETTINGS.capacite_jour || 0;
+  if(!cap || dus.length <= cap) return "";
+  return `<div class="ac-warn">⚠ ${dus.length} actions dues aujourd'hui pour une capacité réglée à <b>${cap}</b>. ` +
+         `Reporte ou saute ce qui peut attendre — une liste qu'on ne finit jamais cesse d'être un plan.</div>`;
+}
+
+// --- Dette de routines : ce que l'ancien système effaçait -------------------
+function acDetteBloc(dette){
+  const n = dette.reduce((s, x) => s + x.occ.length, 0);
+  let h = `<div class="ch-h bad">Routines non tenues <span class="muted">(${n} occurrences en souffrance)</span></div>`;
+  h += `<div class="muted small" style="margin-bottom:8px">Ces échéances sont passées sans être cochées. ` +
+       `Acte-les — <b>rattrapé</b> si tu l'as fait après coup, <b>sauté</b> si tu as décidé de ne pas le faire, ` +
+       `<b>raté</b> sinon. Un raté reste dans l'historique et pèse sur le taux de tenue.</div>`;
+  h += `<div class="ac-list">`;
+  dette.forEach(({a, occ}) => {
+    occ.slice(-8).forEach(d => {
+      h += `<div class="ac-row dette">` +
+        `<span class="ac-dette-d">${fmt(d)}</span>` +
+        `<div class="ac-body"><div class="ac-lib">${themeDot(a.theme_id)}<span class="ac-txt">${esc(a.label)}</span></div>` +
+          `<div class="ac-meta">${esc(acMeta(a))}</div></div>` +
+        `<button class="btn sm" title="Je l'ai fait ce jour-là" onclick="mutate({op:'action_done',id:'${a.id}',date:'${d}'})">✓ Rattrapé</button>` +
+        `<button class="btn sm" title="Décidé volontairement de ne pas le faire" onclick="mutate({op:'action_skip',id:'${a.id}',date:'${d}'})">⤳ Sauté</button>` +
+        `<button class="btn sm bad" title="Acte le raté : reste dans l'historique et pèse sur le taux de tenue" onclick="mutate({op:'action_miss',id:'${a.id}',date:'${d}'})">✕ Raté</button>` +
         `</div>`;
     });
-    h += `</div></details>`;
-  }
+    if(occ.length > 8) h += `<div class="muted small">… et ${occ.length - 8} occurrences plus anciennes de « ${esc(a.label)} ».</div>`;
+  });
+  return h + `</div>`;
+}
+
+// --- Onglet Routines : le taux de tenue, seule métrique qui compte ----------
+function acRoutinesTab(){
+  const rs = acRoutines().filter(acMatch);
+  if(!rs.length) return `<div class="empty">Aucune routine. Crée-en une avec « Détaillé… » → Routine récurrente.</div>`;
+  let h = `<div class="ch-h">Tenue des routines <span class="muted">— 8 dernières semaines</span></div>`;
+  h += `<div class="rt-mlist">`;
+  rs.forEach(a => {
+    const t = tenue(a, 56), s = serie(a);
+    const cls = t.pct == null ? "" : t.pct >= 80 ? "good" : t.pct >= 50 ? "warn" : "bad";
+    const ch = a.chantier_id ? chById(a.chantier_id) : null;
+    h += `<div class="rt-mrow${a.actif ? "" : " off"}">` +
+      `<div class="rt-mhead">` +
+        `<label class="rt-toggle" title="${a.actif ? "Active — décocher pour mettre en sommeil" : "En sommeil — cocher pour réactiver"}">` +
+          `<input type="checkbox" ${a.actif ? "checked" : ""} onchange="mutate({op:'action_update',id:'${a.id}',actif:this.checked})"></label>` +
+        `<input class="rt-mlib" value="${esc(a.label)}" ` +
+          `onblur="if(this.value.trim()&&this.value!=='${jqs(a.label)}')mutate({op:'action_update',id:'${a.id}',label:this.value.trim()})">` +
+        themeSelect(a.theme_id, `mutate({op:'action_update',id:'${a.id}',theme_id:this.value||null})`) +
+        `<select class="rt-mch" title="Chantier rattaché (le temps chronométré y sera compté)" ` +
+          `onchange="mutate({op:'action_update',id:'${a.id}',chantier_id:this.value||null,tache_id:null})">` +
+          `<option value="">— sans chantier —</option>` +
+          LIVE().map(c => `<option value="${c.id}" ${a.chantier_id === c.id ? "selected" : ""}>${esc(c.titre)}</option>`).join("") + `</select>` +
+        `<span class="rt-mmeta">${esc(acMeta(a))}</span>` +
+        `<span class="tenue ${cls}" title="Occurrences tenues sur celles attendues (les sautées volontairement sont exclues)">` +
+          (t.pct == null ? "—" : `${t.pct} % · ${t.faits}/${t.total}`) + `</span>` +
+        (s >= 3 ? `<span class="bdg b-streak" title="${s} d'affilée">🔥 ${s}</span>` : ``) +
+        `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer « ${jqs(a.label)} » ?'))mutate({op:'action_remove',id:'${a.id}'})">×</span>` +
+      `</div>` +
+      acSparkline(a) +
+      `<input class="rt-mdesc" value="${esc(a.desc || "")}" placeholder="+ description / notes…" ` +
+        `onblur="if(this.value!==this.defaultValue)mutate({op:'action_update',id:'${a.id}',desc:this.value})">` +
+      `</div>`;
+  });
+  return h + `</div>`;
+}
+// Frise des 8 dernières semaines : une pastille par occurrence attendue.
+function acSparkline(a){
+  const dates = occAttendues(a, acDepuis(a, 56), TODAY).slice(-40);
+  if(!dates.length) return "";
+  return `<div class="ac-spark">` + dates.map(d => {
+    const st = occStat(a, d);
+    const cls = st === "fait" ? "ok" : st === "saute" ? "skip" : st === "rate" ? "miss"
+              : (d < TODAY ? "open" : "todo");
+    const lbl = st ? OCC_LBL[st] : (d < TODAY ? "non acté" : "à venir");
+    return `<i class="sp ${cls}" title="${fmt(d)} — ${lbl}"></i>`;
+  }).join("") + `</div>`;
+}
+
+// --- Onglet Faites : la trace de ce qui a été abattu ------------------------
+function acFaitesTab(){
+  const faites = ACTIONS().filter(a => !a.recurrence && a.done && acMatch(a))
+    .sort((x, y) => (y.done_date || "").localeCompare(x.done_date || ""));
+  const occ = [];
+  acRoutines().filter(acMatch).forEach(a => (a.occurrences || [])
+    .filter(o => o.statut === "fait").forEach(o => occ.push({a, d: o.date})));
+  occ.sort((x, y) => y.d.localeCompare(x.d));
+  const parJour = {};
+  faites.forEach(a => (parJour[a.done_date || "?"] = parJour[a.done_date || "?"] || []).push({label: a.label, theme_id: a.theme_id}));
+  occ.slice(0, 120).forEach(({a, d}) => (parJour[d] = parJour[d] || []).push({label: a.label, theme_id: a.theme_id, rec: true}));
+  const jours = Object.keys(parJour).sort().reverse().slice(0, 30);
+  if(!jours.length) return `<div class="empty">Rien de terminé pour l'instant.</div>`;
+  let h = `<div class="ch-h">Ce qui a été fait <span class="muted">— 30 derniers jours d'activité</span></div>`;
+  jours.forEach(d => {
+    h += `<div class="ac-day"><div class="ac-day-h">${fmt(d)} <span class="muted">· ${parJour[d].length}</span></div>`;
+    h += parJour[d].map(x => `<div class="ac-done-row">${themeDot(x.theme_id)}${x.rec ? "🔁 " : "✓ "}${esc(x.label)}</div>`).join("");
+    h += `</div>`;
+  });
   return h;
 }
-// affiche/masque les champs selon la fréquence choisie
-function rpFreqUI(){
-  const f = $("rp_freq").value;
-  $("rp_jours").style.display    = f === "semaine"  ? "inline-flex" : "none";
-  $("rp_moiswrap").style.display = f === "mois"     ? "inline" : "none";
-  $("rp_datewrap").style.display = f === "ponctuel" ? "inline" : "none";
+
+// --- Bloc « à faire aujourd'hui » réutilisé dans la vue Planning ------------
+function actionsDuJourSection(){
+  const dus = acDuJour();
+  let h = `<div class="ch-h">Mes actions du jour — ${fmt(TODAY)} ` +
+          `<span class="add" onclick="setView('actions')">tout voir</span></div>`;
+  h += dus.length
+    ? `<div class="ac-list">` + acSort(dus).map(a => acRow(a, TODAY)).join("") + `</div>`
+    : `<div class="ok-note">Aucune action ni routine due aujourd'hui.</div>`;
+  const dette = acRoutines().map(a => occEnSouffrance(a, TODAY).length).reduce((s, n) => s + n, 0);
+  if(dette) h += `<div class="ac-warn">⏰ ${dette} occurrence${dette > 1 ? "s" : ""} de routine non actée${dette > 1 ? "s" : ""}. ` +
+                 `<span class="add" onclick="setView('actions')">Régler ça</span></div>`;
+  return h;
 }
-function addRappel(){
-  const label = $("rp_label").value.trim();
-  if(!label){ $("rp_label").focus(); return; }
-  const freq = $("rp_freq").value;
-  const jours = [...document.querySelectorAll("#rp_jours .rp-day:checked")].map(x => Number(x.value));
-  const jm = $("rp_jourmois").value ? Number($("rp_jourmois").value) : null;
-  const date = $("rp_date").value || null;
-  const heure = $("rp_heure").value || null;
-  const note = $("rp_desc").value.trim();
-  const chantier_id = ($("rp_chantier") && $("rp_chantier").value) || null;
-  if(freq === "ponctuel" && !date){ alert("Un rappel ponctuel nécessite une date d'échéance."); return; }
-  mutate({op: "add_rappel", label, freq, jours, jour_mois: jm, date, heure, note, chantier_id});
+
+// ======================================================================== //
+//  Bloc-notes — journal horodaté.
+//  Le besoin : « j'ai écrit quoi et quand ». Donc pas un wiki, mais un
+//  journal en append : la date ET l'heure sont posées d'office à la saisie,
+//  et une réécriture laisse sa propre trace (maj_le).
+// ======================================================================== //
+const NOTES = () => (STORE.notes || []);
+const ntById = id => NOTES().find(n => n.id === id) || null;
+const NT_TYPE = {note: {lbl: "Note", ic: "📝"}, reunion: {lbl: "Réunion", ic: "👥"},
+                 decision: {lbl: "Décision", ic: "⚖"}, idee: {lbl: "Idée", ic: "💡"}};
+const notesOf = cid => NOTES().filter(n => n.chantier_id === cid)
+  .sort((a, b) => (b.date + (b.heure || "")).localeCompare(a.date + (a.heure || "")));
+
+let NT_F = {theme: "", chantier: "", type: "", q: ""};
+let NT_EDIT = null;                       // id de la note en cours d'édition
+function ntFiltre(k, v){ NT_F[k] = v; renderNotes(); }
+function ntFiltreClear(){ NT_F = {theme: "", chantier: "", type: "", q: ""}; renderNotes(); }
+function ntEdit(id){ NT_EDIT = (NT_EDIT === id) ? null : id; renderNotes(); }
+function ntMatch(n){
+  if(NT_F.theme && n.theme_id !== NT_F.theme) return false;
+  if(NT_F.chantier && n.chantier_id !== NT_F.chantier) return false;
+  if(NT_F.type && n.type !== NT_F.type) return false;
+  if(NT_F.q){
+    const q = NT_F.q.toLowerCase();
+    if(!((n.titre || "") + " " + (n.corps || "")).toLowerCase().includes(q)) return false;
+  }
+  return true;
+}
+
+function renderNotes(){
+  const all = NOTES().filter(ntMatch)
+    .sort((a, b) => (b.date + (b.heure || "")).localeCompare(a.date + (a.heure || "")));
+  const pin = all.filter(n => n.epingle);
+  let h = "";
+
+  // --- Capture : le champ est en haut, toujours au même endroit, focalisable au clavier (n).
+  h += `<div class="nt-capture">` +
+    `<div class="nt-crow">` +
+      `<select id="nt_type" title="Type de note">` +
+        Object.entries(NT_TYPE).map(([k, v]) => `<option value="${k}">${v.ic} ${v.lbl}</option>`).join("") + `</select>` +
+      `<input id="nt_titre" placeholder="Titre (optionnel)">` +
+      themeSelect("", "", "nt_theme_sel") +
+      `<select id="nt_ch" title="Rattacher à un chantier — la note devient son historique">` +
+        `<option value="">— sans chantier —</option>` +
+        LIVE().map(c => `<option value="${c.id}">${esc(c.titre)}</option>`).join("") + `</select>` +
+    `</div>` +
+    `<textarea id="nt_corps" placeholder="Écris ici. La date et l'heure sont enregistrées automatiquement — c'est tout l'intérêt par rapport au papier. (Ctrl+Entrée pour enregistrer)" ` +
+      `onkeydown="if(event.key==='Enter'&&(event.ctrlKey||event.metaKey))ntAdd()"></textarea>` +
+    `<div class="nt-crow"><button class="btn primary" onclick="ntAdd()">Enregistrer</button>` +
+      `<span class="muted small">Horodatée au ${fmt(TODAY)} à l'heure de saisie.</span></div>` +
+    `</div>`;
+
+  // --- Filtres
+  h += `<div class="ac-filters">` +
+    `<input class="ac-q" placeholder="Rechercher dans les notes…" value="${esc(NT_F.q)}" oninput="ntFiltre('q',this.value)">` +
+    `<span class="th-filter">` +
+      `<button class="th-fb ${NT_F.theme ? "" : "on"}" onclick="ntFiltre('theme','')">Tous</button>` +
+      THEMES_ON().map(t => `<button class="th-fb ${NT_F.theme === t.id ? "on" : ""}" style="--th:${t.couleur}" ` +
+        `onclick="ntFiltre('theme','${t.id}')">${t.icone} ${esc(t.nom)}</button>`).join("") +
+    `</span>` +
+    `<select onchange="ntFiltre('type',this.value)"><option value="">Tous types</option>` +
+      Object.entries(NT_TYPE).map(([k, v]) => `<option value="${k}" ${NT_F.type === k ? "selected" : ""}>${v.ic} ${v.lbl}</option>`).join("") + `</select>` +
+    ((NT_F.q || NT_F.theme || NT_F.type || NT_F.chantier) ? `<button class="btn sm" onclick="ntFiltreClear()">Effacer</button>` : "") +
+    `</div>`;
+
+  if(!NOTES().length){
+    h += `<div class="empty">Aucune note. Écris la première ci-dessus — elle sera horodatée, ` +
+         `classée par thème, et retrouvable à la recherche.</div>`;
+    $("notes").innerHTML = h; return;
+  }
+  if(!all.length){
+    h += `<div class="empty">Aucune note ne correspond au filtre.</div>`;
+    $("notes").innerHTML = h; return;
+  }
+
+  if(pin.length){
+    h += `<div class="ch-h">📌 Épinglées</div><div class="nt-list">` + pin.map(ntCard).join("") + `</div>`;
+  }
+  // Journal : regroupé par jour, du plus récent au plus ancien.
+  const parJour = {};
+  all.filter(n => !n.epingle).forEach(n => (parJour[n.date] = parJour[n.date] || []).push(n));
+  const jours = Object.keys(parJour).sort().reverse();
+  h += `<div class="ch-h">Journal <span class="muted">(${all.length} note${all.length > 1 ? "s" : ""})</span></div>`;
+  jours.forEach(d => {
+    h += `<div class="nt-day"><div class="nt-day-h">${fmt(d)}` +
+         (d === TODAY ? ` <span class="bdg b-2min">aujourd'hui</span>` : ``) +
+         ` <span class="muted">· ${parJour[d].length}</span></div>`;
+    h += `<div class="nt-list">` + parJour[d].map(ntCard).join("") + `</div></div>`;
+  });
+  $("notes").innerHTML = h;
+}
+
+function ntCard(n){
+  const t = NT_TYPE[n.type] || NT_TYPE.note;
+  const ch = n.chantier_id ? chById(n.chantier_id) : null;
+  if(NT_EDIT === n.id){
+    return `<div class="nt-card editing">` +
+      `<div class="nt-crow">` +
+        `<select onchange="mutate({op:'note_update',id:'${n.id}',type:this.value})">` +
+          Object.entries(NT_TYPE).map(([k, v]) => `<option value="${k}" ${n.type === k ? "selected" : ""}>${v.ic} ${v.lbl}</option>`).join("") + `</select>` +
+        `<input value="${esc(n.titre)}" placeholder="Titre" onblur="mutate({op:'note_update',id:'${n.id}',titre:this.value})">` +
+        themeSelect(n.theme_id, `mutate({op:'note_update',id:'${n.id}',theme_id:this.value||null})`) +
+        `<select onchange="mutate({op:'note_update',id:'${n.id}',chantier_id:this.value||null})">` +
+          `<option value="">— sans chantier —</option>` +
+          LIVE().map(c => `<option value="${c.id}" ${n.chantier_id === c.id ? "selected" : ""}>${esc(c.titre)}</option>`).join("") + `</select>` +
+        `<input type="date" value="${n.date}" title="Date de la note" onchange="mutate({op:'note_update',id:'${n.id}',date:this.value})">` +
+      `</div>` +
+      `<textarea onblur="if(this.value.trim())mutate({op:'note_update',id:'${n.id}',corps:this.value})">${esc(n.corps)}</textarea>` +
+      `<div class="nt-crow"><button class="btn sm primary" onclick="ntEdit('${n.id}')">Fermer</button></div>` +
+      `</div>`;
+  }
+  return `<div class="nt-card">` +
+    `<div class="nt-head">` +
+      `<span class="nt-ic" title="${t.lbl}">${t.ic}</span>` +
+      `<span class="nt-h">${n.heure ? n.heure : ""}</span>` +
+      (n.titre ? `<b class="nt-titre">${esc(n.titre)}</b>` : ``) +
+      themeChip(n.theme_id) +
+      (ch ? `<span class="ac-ch" onclick="openChantier('${ch.id}')">🗂 ${esc(ch.titre)}</span>` : ``) +
+      `<span class="grow"></span>` +
+      (n.maj_le ? `<span class="muted small" title="Note réécrite le ${fmt(n.maj_le)}">modifiée ${fmt(n.maj_le)}</span>` : ``) +
+      `<button class="nt-b" title="${n.epingle ? "Désépingler" : "Épingler en haut"}" onclick="mutate({op:'note_pin',id:'${n.id}'})">${n.epingle ? "📌" : "📍"}</button>` +
+      `<button class="nt-b" title="Transformer en action" onclick="ntToAction('${n.id}')">➜ action</button>` +
+      `<button class="nt-b" title="Modifier" onclick="ntEdit('${n.id}')">✎</button>` +
+      `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer cette note ?'))mutate({op:'note_remove',id:'${n.id}'})">×</span>` +
+    `</div>` +
+    `<div class="nt-corps">${esc(n.corps).replace(/\n/g, "<br>")}</div>` +
+    `</div>`;
+}
+
+function ntAdd(){
+  const corps = $("nt_corps").value.trim(), titre = $("nt_titre").value.trim();
+  if(!corps && !titre){ $("nt_corps").focus(); return; }
+  const sel = document.querySelector(".nt_theme_sel");
+  mutate({op: "note_add", corps, titre, type: $("nt_type").value,
+          theme_id: (sel && sel.value) || null,
+          chantier_id: $("nt_ch").value || null});
+}
+// Note -> action : le flux compte-rendu de réunion -> décisions à suivre.
+function ntToAction(id){
+  const n = ntById(id); if(!n) return;
+  const suggestion = (n.titre || (n.corps || "").split("\n")[0] || "").slice(0, 90);
+  const label = prompt("Libellé de l'action à créer depuis cette note :", suggestion);
+  if(label && label.trim()) mutate({op: "note_to_action", id, label: label.trim()});
+}
+
+// ======================================================================== //
+//  Vue Thèmes — la liste fermée, et ce qu'elle donne à voir en transverse.
+//  10 au maximum : la contrainte est la fonctionnalité. Elle force l'arbitrage
+//  et c'est ce qui garde le classement utile.
+// ======================================================================== //
+function renderThemes(){
+  const ths = THEMES();
+  const actifs = THEMES_ON();
+  let h = `<div class="ch-h">Thèmes <span class="muted">— ${actifs.length}/${THEMES_MAX} actifs</span></div>`;
+  h += `<div class="muted small" style="margin-bottom:10px">` +
+    `Liste <b>fermée</b> : un thème se choisit dans un menu, jamais en saisie libre — c'est ce qui évite ` +
+    `les doublons et les fautes de frappe. Un élément porte <b>un seul</b> thème, ` +
+    `donc la répartition du temps fait 100 %.</div>`;
+
+  // Répartition transverse : c'est le vrai intérêt du thème.
+  const stats = {};
+  const bump = (id, k, n) => { const s = stats[id || ""] = stats[id || ""] || {ch: 0, ac: 0, nt: 0, min: 0}; s[k] += (n || 1); };
+  STORE.chantiers.forEach(c => bump(c.theme_id, "ch"));
+  ACTIONS().forEach(a => bump(a.theme_id, "ac"));
+  NOTES().forEach(n => bump(n.theme_id, "nt"));
+  TIMELOG().forEach(s => { const t = themeOfSession(s); bump(t ? t.id : "", "min", sessMin(s)); });
+  const totMin = Object.values(stats).reduce((a, s) => a + s.min, 0) || 1;
+
+  h += `<div class="th-list">`;
+  ths.forEach((t, i) => {
+    const s = stats[t.id] || {ch: 0, ac: 0, nt: 0, min: 0};
+    const part = Math.round(100 * s.min / totMin);
+    h += `<div class="th-row${t.archive ? " off" : ""}" style="--th:${t.couleur}">` +
+      `<span class="th-grip">` +
+        `<button class="th-mv" title="Monter" onclick="mutate({op:'theme_move',id:'${t.id}',sens:'haut'})" ${i === 0 ? "disabled" : ""}>▲</button>` +
+        `<button class="th-mv" title="Descendre" onclick="mutate({op:'theme_move',id:'${t.id}',sens:'bas'})" ${i === ths.length - 1 ? "disabled" : ""}>▼</button>` +
+      `</span>` +
+      `<input class="th-ic" value="${esc(t.icone)}" maxlength="4" title="Icône" ` +
+        `onblur="if(this.value!==this.defaultValue)mutate({op:'theme_update',id:'${t.id}',icone:this.value})">` +
+      `<input class="th-nom" value="${esc(t.nom)}" ` +
+        `onblur="if(this.value.trim()&&this.value!==this.defaultValue)mutate({op:'theme_update',id:'${t.id}',nom:this.value.trim()})">` +
+      `<input class="th-col" type="color" value="${t.couleur}" title="Couleur" ` +
+        `onchange="mutate({op:'theme_update',id:'${t.id}',couleur:this.value})">` +
+      `<span class="th-stats">` +
+        `<b>${s.ch}</b> chantiers · <b>${s.ac}</b> actions · <b>${s.nt}</b> notes` +
+        (s.min ? ` · <b>${fmtDur(s.min)}</b> (${part} %)` : ` · <span class="muted">aucun temps</span>`) +
+      `</span>` +
+      `<label class="rt-toggle" title="${t.archive ? "Archivé — cocher pour réactiver" : "Actif — décocher pour archiver"}">` +
+        `<input type="checkbox" ${t.archive ? "" : "checked"} onchange="mutate({op:'theme_update',id:'${t.id}',archive:!this.checked})"></label>` +
+      `<span class="del" title="Supprimer ce thème (les éléments repassent sans thème, rien n'est effacé)" ` +
+        `onclick="if(confirm('Supprimer « ${jqs(t.nom)} » ?\\n\\nLes ${s.ch} chantiers, ${s.ac} actions et ${s.nt} notes concernés repasseront « sans thème ». Rien n\\'est supprimé.'))mutate({op:'theme_remove',id:'${t.id}'})">×</span>` +
+      `</div>`;
+  });
+  h += `</div>`;
+
+  // Sans thème : ce qui reste à classer.
+  const sans = stats[""] || {ch: 0, ac: 0, nt: 0, min: 0};
+  if(sans.ch || sans.ac || sans.nt){
+    h += `<div class="th-row none"><span class="th-nom">○ Sans thème</span>` +
+      `<span class="th-stats"><b>${sans.ch}</b> chantiers · <b>${sans.ac}</b> actions · <b>${sans.nt}</b> notes` +
+      (sans.min ? ` · <b>${fmtDur(sans.min)}</b>` : ``) + `</span></div>`;
+  }
+
+  // Création — refusée au-delà de 10, volontairement.
+  if(actifs.length < THEMES_MAX){
+    h += `<div class="th-add">` +
+      `<input id="th_ic" class="th-ic" placeholder="🏷" maxlength="4" title="Icône">` +
+      `<input id="th_nom" placeholder="Nom du nouveau thème" onkeydown="if(event.key==='Enter')themeAdd()">` +
+      `<button class="btn sm primary" onclick="themeAdd()">Créer</button>` +
+      `<span class="muted small">${THEMES_MAX - actifs.length} place${THEMES_MAX - actifs.length > 1 ? "s" : ""} restante${THEMES_MAX - actifs.length > 1 ? "s" : ""}</span>` +
+      `</div>`;
+  } else {
+    h += `<div class="ac-warn">Les ${THEMES_MAX} thèmes sont pris. Pour en créer un autre, archive-en un d'abord — ` +
+         `c'est cette limite qui empêche la liste de redevenir un fourre-tout.</div>`;
+  }
+
+  // Chantiers par thème : réaffectation en un clic après la migration.
+  h += `<div class="ch-h">Affectation des chantiers</div>`;
+  h += `<div class="th-assign">`;
+  sortColumn(LIVE(), "echeance").forEach(c => {
+    h += `<div class="th-arow">${themeDot(c.theme_id)}<span class="th-atit" onclick="openChantier('${c.id}')">${esc(c.titre)}</span>` +
+      themeSelect(c.theme_id, `mutate({op:'set_theme',chantier_id:'${c.id}',theme_id:this.value||null})`) + `</div>`;
+  });
+  h += `</div>`;
+  $("themes").innerHTML = h;
+}
+function themeAdd(){
+  const nom = $("th_nom").value.trim();
+  if(!nom){ $("th_nom").focus(); return; }
+  mutate({op: "theme_add", nom, icone: $("th_ic").value.trim() || "•"});
 }
 
 // ======================================================================== //
@@ -3498,7 +4194,7 @@ function portfolioGantt(){
 
 function renderPlanning(){
   const items = planningTasks();
-  let h = routinesSection();
+  let h = actionsDuJourSection();
   h += `<div class="ch-h">À faire aujourd'hui — ${fmt(TODAY)} · ${items.length} tâche(s)</div>`;
   if(!items.length){
     h += `<div class="ok-note">Rien d'actif aujourd'hui — aucune tâche en cours ni en retard.</div>`;
@@ -3564,8 +4260,8 @@ function weekStart(ds){   // lundi de la semaine de `ds` (YYYY-MM-DD)
 //  Toutes les durées passent par sessMin() : pause déjeuner déduite, journée
 //  bornée à l'heure de fin réglée (mêmes règles que « Ma journée »).
 // ======================================================================== //
-const KIND_LABEL = {tache: "Tâches", recette: "Recette", libre: "Libre / divers", rappel: "Routines"};
-const KIND_COLOR = {tache: "var(--blue)", recette: "var(--violet)", libre: "var(--gray)", rappel: "var(--amber)"};
+const KIND_LABEL = {tache: "Tâches", recette: "Recette", libre: "Libre / divers", action: "Actions & routines"};
+const KIND_COLOR = {tache: "var(--blue)", recette: "var(--violet)", libre: "var(--gray)", action: "var(--amber)"};
 const DOW_NAMES = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"];
 
 function timeStats(){
@@ -3622,7 +4318,7 @@ function timeInsights(){
   h += `</div>`;
 
   // — Grands graphes : type / semaine / chantiers —
-  const kindOrder = ["tache", "rappel", "recette", "libre"];   // ordre = bleu et violet non adjacents (lisible en daltonisme)
+  const kindOrder = ["tache", "action", "recette", "libre"];   // ordre = bleu et violet non adjacents (lisible en daltonisme)
   const kindRows = kindOrder.filter(k => st.byKind[k] > 0)
     .map(k => ({label: KIND_LABEL[k] || k, value: Math.round(st.byKind[k]), color: KIND_COLOR[k] || "var(--gray)"}));
   const weekRows = Object.keys(st.byWeek).sort()
@@ -3647,6 +4343,32 @@ function timeInsights(){
   h += chartBox("Par jour de la semaine", hbar(dowRows, {labelW: 82, barW: 150}));
   h += chartBox("Quand tu travailles (heure de début)", vbar(hourRows, {barW: 22, gap: 6, color: "var(--blue)"}));
   h += `</div>`;
+
+  // — Répartition par THÈME —
+  // C'est la vue qui manquait : le temps hors chantier n'est plus un unique bloc
+  // gris « Libre / divers », il se ventile sur les 10 thèmes. Chaque plage compte
+  // une seule fois (mono-thème), donc le total fait bien 100 %.
+  const byTheme = {};
+  st.tl.forEach(s => {
+    const t = themeOfSession(s);
+    const k = t ? t.id : "";
+    byTheme[k] = (byTheme[k] || 0) + sessMin(s);
+  });
+  const thRows = Object.entries(byTheme).sort((a, b) => b[1] - a[1]).map(([id, m]) => {
+    const t = id ? thById(id) : null;
+    return {label: t ? `${t.icone} ${t.nom}` : "○ sans thème", value: Math.round(m),
+            disp: V(m), color: t ? t.couleur : "var(--gray)"};
+  });
+  if(thRows.length){
+    h += `<div class="dash-row">` +
+      chartBox(money ? "Valeur par thème" : "Répartition par thème",
+               donutChart(thRows, {fmt: V, center: {big: V(st.total), small: "total"}})) +
+      chartBox("Temps par thème", hbar(thRows, {labelW: 190, barW: 190})) + `</div>`;
+    const sansTh = byTheme[""] || 0;
+    if(sansTh > st.total * 0.15)
+      h += `<div class="ac-warn">${Math.round(100 * sansTh / st.total)} % du temps chronométré n'est rattaché à aucun thème. ` +
+           `Classe les plages concernées dans « Ma journée » — sinon cette répartition ne dit rien.</div>`;
+  }
   return h;
 }
 
@@ -3655,7 +4377,7 @@ function weeklyActivity(){
   const ensure = k => (wk[k] = wk[k] || {taches: 0, jalons: 0, notes: 0, retours: 0, relances: 0, actions: 0, events: []});
   LIVE().forEach(c => {
     (c.taches || []).forEach(t => { if(t.done && t.done_date){ const w = ensure(weekStart(t.done_date)); w.taches++; if(t.is_milestone) w.jalons++; } });
-    (c.histo || []).forEach(e => { if(e.d) ensure(weekStart(e.d)).notes++; });
+    notesOf(c.id).forEach(n => { if(n.date) ensure(weekStart(n.date)).notes++; });
     (c.livrables || []).forEach(l => { if(l.derniere) ensure(weekStart(l.derniere)).relances++; });
     (c.iterations || []).forEach(it => (it.retours || []).forEach(r => { if(r.date) ensure(weekStart(r.date)).retours++; }));
   });
@@ -3947,7 +4669,7 @@ function renderRapport(){
       `<span class="rap-chips"><span class="chip">⏱ ${fmtDur(tot)}</span><span class="chip">${hc.length} action${hc.length > 1 ? "s" : ""}</span></span></div>` +
       `<div class="cardx-b"><div class="rap-facts">` +
       hc.map(x => `<div class="rap-fact"><span class="rap-fact-d">${fmtDur(x.temps_min)}</span>` +
-        `<span><b>${esc(x.label)}</b>${x.kind === "rappel" ? ` <span class="muted">· routine</span>` : ""}` +
+        `<span><b>${esc(x.label)}</b>${x.kind === "action" ? ` <span class="muted">· action</span>` : ""}` +
         ` <span class="muted">(${(x.jours || []).map(fmtShort).join(", ")})</span></span></div>`).join("") +
       `</div></div></div>`;
   }
@@ -4043,11 +4765,11 @@ function rapTempsHTML(r){
 }
 // Donut « répartition du temps par type » (conic-gradient, imprimable) :
 // tâches planifiées / routines / recette / libre (réunions, RDV ajoutés à la main).
-const RAP_KIND_LBL = {tache: "Tâches des chantiers", rappel: "Routines", recette: "Recette / tests", libre: "Libre (réunions, RDV…)"};
-const RAP_KIND_COL = {tache: "#2563eb", rappel: "#d97706", recette: "#7c3aed", libre: "#94a3b8"};
+const RAP_KIND_LBL = {tache: "Tâches des chantiers", action: "Actions & routines", recette: "Recette / tests", libre: "Libre (réunions, RDV…)"};
+const RAP_KIND_COL = {tache: "#2563eb", action: "#d97706", recette: "#7c3aed", libre: "#94a3b8"};
 function rapDonutHTML(r){
   const st = r.stats || {}, kinds = st.temps_kinds || {}, total = st.temps_min || 0;
-  const rows = ["tache", "rappel", "recette", "libre"].map(k => ({k, m: kinds[k] || 0})).filter(x => x.m > 0);
+  const rows = ["tache", "action", "recette", "libre"].map(k => ({k, m: kinds[k] || 0})).filter(x => x.m > 0);
   if(!total || !rows.length) return "";
   rows.sort((a, b) => b.m - a.m);
   let acc = 0;
@@ -4228,7 +4950,7 @@ function rapportDocHTML(r){
     `<h3 class="sec">Bilan par chantier</h3>` + (pts || `<div class="txt">Aucune activité détectée cette semaine.</div>`) +
     ((r.hors_chantier || []).length
       ? `<div class="pt"><h2><span class="ptitle">Hors chantier — réunions, rendez-vous, divers</span></h2><ul class="faits">` +
-        r.hors_chantier.map(x => `<li><span class="fk">${x.kind === "rappel" ? "Routine" : "Libre"}</span>${esc(x.label)}` +
+        r.hors_chantier.map(x => `<li><span class="fk">${x.kind === "action" ? "Action" : "Libre"}</span>${esc(x.label)}` +
           ` <span class="d">${fmtDur(x.temps_min)} · ${(x.jours || []).map(fmtShort).join(", ")}</span></li>`).join("") + `</ul></div>`
       : "") +
     (avH ? `<h3 class="sec">Programmé pour la suite</h3>${avH}` : "") +
