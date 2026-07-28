@@ -19,15 +19,18 @@
   <div class="nav">
     <button class="on" data-v="board" onclick="setView('board')">Tableau</button>
     <button data-v="planning" onclick="setView('planning')">Planning</button>
+    <button data-v="actions" onclick="setView('actions')" title="Tâches libres et routines — raccourci : a">Actions</button>
+    <button data-v="notes" onclick="setView('notes')" title="Bloc-notes horodaté — raccourci : n">Bloc-notes</button>
     <button data-v="cahiers" onclick="setView('cahiers')">Cahiers des charges</button>
     <div class="menu" id="navPilotage">
-      <button data-group="dash,activite,charge,risques,rapport" onclick="toggleMenu(event,'navPilotage')">Pilotage ▾</button>
+      <button data-group="dash,activite,charge,risques,rapport,themes" onclick="toggleMenu(event,'navPilotage')">Pilotage ▾</button>
       <div class="menu-list">
         <a onclick="setView('dash')">Tableau de bord</a>
         <a onclick="setView('activite')">Activité</a>
         <a onclick="setView('rapport')">Rapport hebdo</a>
         <a onclick="setView('charge')">Charge</a>
         <a onclick="setView('risques')">Risques</a>
+        <a onclick="setView('themes')">Thèmes</a>
       </div>
     </div>
     <div class="menu" id="navPeople">
@@ -67,6 +70,9 @@
 <div class="layout">
   <div class="work">
     <div class="board" id="board"></div>
+    <div class="actions-v" id="actions" style="display:none"></div>
+    <div class="notes-v" id="notes" style="display:none"></div>
+    <div class="themes-v" id="themes" style="display:none"></div>
     <div class="planning" id="planning" style="display:none"></div>
     <div class="dash" id="dash" style="display:none"></div>
     <div class="activite" id="activite" style="display:none"></div>

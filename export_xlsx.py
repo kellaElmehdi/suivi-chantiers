@@ -121,8 +121,10 @@ def _weekly_synthese(store: dict) -> dict:
                     m[w]["taches"] += 1
                     if t.get("is_milestone"):
                         m[w]["jalons"] += 1
-        for e in ch.get("histo", []):
-            w = _iso_week_str(e.get("d", ""))
+        for n in store.get("notes", []):        # l'historique d'un chantier = ses notes
+            if n.get("chantier_id") != ch.get("id"):
+                continue
+            w = _iso_week_str(n.get("date", ""))
             if w:
                 m[w]["notes"] += 1
         for l in ch.get("livrables", []):
@@ -286,14 +288,15 @@ def build() -> bytes:
     # --- Chantiers ---
     ws = wb.active
     ws.title = "Chantiers"
-    cols = ["Titre", "Objectif", "Debut", "Echeance", "Priorite", "Statut", "Tags",
+    cols = ["Titre", "Objectif", "Debut", "Echeance", "Priorite", "Statut", "Theme",
             "Avancement %", "Point bloquant"]
     ws.append(cols)
+    th_nom = {t["id"]: t.get("nom", "") for t in store.get("themes", [])}
     for ch in sorted(store["chantiers"], key=lambda c: c.get("ordre", 0)):
         _append(ws, [ch["titre"], ch.get("objectif") or "", ch.get("date_debut") or "",
                    ch.get("echeance") or "", PRIO_LBL.get(ch["prio"], ch["prio"]),
                    "Bloque" if _blocked(ch) else STATUT_LBL.get(ch["statut"], ch["statut"]),
-                   "; ".join(ch.get("tags", [])), _pct(ch), ch.get("blocage") or ""])
+                   th_nom.get(ch.get("theme_id"), ""), _pct(ch), ch.get("blocage") or ""])
         r = ws.max_row
         if ch["statut"] != "done" and _is_late(ch.get("echeance")):
             ws.cell(row=r, column=4).font = st["late_font"]
@@ -458,7 +461,7 @@ def build() -> bytes:
 
     # --- Temps (timelog agrege par chantier et par type, valorise au taux horaire) ---
     from collections import defaultdict
-    KIND_LBL = {"tache": "Tache", "rappel": "Routine", "recette": "Recette", "libre": "Libre"}
+    KIND_LBL = {"tache": "Tache", "action": "Action / routine", "recette": "Recette", "libre": "Libre"}
     ws10 = wb.create_sheet("Temps")
     cols10 = ["Chantier", "Type", "Sessions", "Temps (h)", "Cout (EUR)"]
     ws10.append(cols10)
@@ -478,6 +481,64 @@ def build() -> bytes:
     _widths(ws10, [28, 14, 10, 10, 12])
     _header(ws10, len(cols10), st)
 
+    # -- Actions : taches libres et routines, avec le taux de tenue ----------
+    ws11 = wb.create_sheet("Actions")
+    cols11 = ["Libelle", "Type", "Theme", "Chantier", "Priorite", "Echeance",
+              "Etat", "Recurrence", "Tenue (%)", "Fait / du", "Temps (h)"]
+    ws11.append(cols11)
+    th_nom = {t["id"]: t.get("nom", "") for t in store.get("themes", [])}
+    tl_min = defaultdict(int)
+    for s in store.get("timelog", []):
+        if s.get("action_id"):
+            tl_min[s["action_id"]] += _sess_min(store, s)
+    for a in store.get("actions", []):
+        rec = a.get("recurrence")
+        occ = a.get("occurrences", [])
+        faits = sum(1 for o in occ if o.get("statut") == "fait")
+        # denominateur : les occurrences enregistrees hors sautees volontairement
+        base = sum(1 for o in occ if o.get("statut") in ("fait", "rate"))
+        if rec:
+            freq = {"jour": "Chaque jour", "semaine": "Chaque semaine", "mois": "Chaque mois"}.get(rec["freq"], rec["freq"])
+            if rec["freq"] == "semaine" and rec.get("jours"):
+                freq += " (" + ", ".join(["lun", "mar", "mer", "jeu", "ven", "sam", "dim"][j] for j in rec["jours"]) + ")"
+            if rec["freq"] == "mois":
+                freq += " (dernier jour)" if rec.get("jour_mois") == "fin" else f" (le {rec.get('jour_mois') or 1})"
+            etat = "Active" if a.get("actif") else "En sommeil"
+        else:
+            freq, etat = "", ("Faite" if a.get("done") else "A faire")
+        _append(ws11, [a.get("label", ""), "Routine" if rec else "Action",
+                       th_nom.get(a.get("theme_id"), ""),
+                       ch_titre.get(a.get("chantier_id"), ""),
+                       PRIO_LBL.get(a.get("prio"), a.get("prio", "")),
+                       a.get("echeance") or "", etat, freq,
+                       (round(100 * faits / base) if base else ""),
+                       (f"{faits}/{base}" if base else ""),
+                       round(tl_min.get(a["id"], 0) / 60, 2)])
+        for col in range(1, len(cols11) + 1):
+            ws11.cell(row=ws11.max_row, column=col).border = st["border"]
+    _widths(ws11, [38, 10, 22, 26, 10, 12, 12, 24, 10, 11, 10])
+    _header(ws11, len(cols11), st)
+
+    # -- Notes : le journal horodate, exportable tel quel --------------------
+    ws12 = wb.create_sheet("Notes")
+    cols12 = ["Date", "Heure", "Type", "Titre", "Theme", "Chantier", "Contenu", "Modifiee le"]
+    ws12.append(cols12)
+    nt_lbl = {"note": "Note", "reunion": "Reunion", "decision": "Decision", "idee": "Idee"}
+    for n in sorted(store.get("notes", []),
+                    key=lambda x: (x.get("date") or "", x.get("heure") or ""), reverse=True):
+        _append(ws12, [n.get("date") or "", n.get("heure") or "",
+                       nt_lbl.get(n.get("type"), n.get("type", "")),
+                       n.get("titre") or "", th_nom.get(n.get("theme_id"), ""),
+                       ch_titre.get(n.get("chantier_id"), ""),
+                       n.get("corps") or "", n.get("maj_le") or ""])
+        for col in range(1, len(cols12) + 1):
+            c12 = ws12.cell(row=ws12.max_row, column=col)
+            c12.border = st["border"]
+            if col == 7:
+                c12.alignment = Align(wrap_text=True, vertical="top")
+    _widths(ws12, [11, 8, 11, 26, 22, 26, 70, 12])
+    _header(ws12, len(cols12), st)
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -493,9 +554,9 @@ def build_template() -> bytes:
 
     ws = wb.active
     ws.title = "Chantiers"
-    ws.append(["Titre", "Objectif", "Debut", "Echeance", "Priorite", "Statut", "Tags"])
+    ws.append(["Titre", "Objectif", "Debut", "Echeance", "Priorite", "Statut", "Theme"])
     ws.append(["Nouveau site web", "Refondre le site vitrine", "2026-06-10", "2026-07-15",
-               "Haute", "En cours", "Web; Comm"])
+               "Haute", "En cours", "SI, Infra & Collaboration"])
     _widths(ws, [28, 40, 12, 12, 10, 10, 20]); _header(ws, 7, st)
 
     ws2 = wb.create_sheet("Taches")
@@ -584,7 +645,7 @@ def parse_import(data: bytes) -> dict:
         k = _norm(titre)
         if k not in seen:
             seen[k] = {"key": k, "titre": str(titre).strip(), "objectif": "", "debut": None,
-                       "echeance": None, "prio": "m", "statut": "todo", "tags": []}
+                       "echeance": None, "prio": "m", "statut": "todo", "theme": ""}
             chantiers.append(seen[k])
             taches[k] = []
             livrables[k] = []
@@ -600,9 +661,9 @@ def parse_import(data: bytes) -> dict:
         c["echeance"] = _to_date(_cell(d, "echeance", "echeance prevue"))
         c["prio"] = PRIO_IN.get(_norm(_cell(d, "priorite", "priorite")), "m")
         c["statut"] = STATUT_IN.get(_norm(_cell(d, "statut")), "todo")
-        tags = _cell(d, "tags")
-        if tags:
-            c["tags"] = [t.strip() for t in str(tags).replace(",", ";").split(";") if t.strip()]
+        # Le theme est choisi dans la liste FERMEE : un libelle inconnu est ignore
+        # (l'import ne doit pas pouvoir recreer un fourre-tout de tags libres).
+        c["theme"] = str(_cell(d, "theme", "thème", "tags") or "").strip()
 
     for d in _rows(_sheet(wb, "Taches", "Tache")):
         titre = _cell(d, "chantier")
@@ -649,8 +710,11 @@ def import_into(store: dict, data: bytes):
                                    "echeance": c["echeance"], "date_debut": c["debut"]})
         ch = store["chantiers"][-1]
         n_ch += 1
-        for tag in c["tags"]:
-            store_mod.apply_op(store, {"op": "add_tag", "chantier_id": ch["id"], "tag": tag})
+        if c.get("theme"):   # rapproche du theme existant ; sinon le chantier reste sans theme
+            tid = next((t["id"] for t in store.get("themes", [])
+                        if _norm(t.get("nom", "")) == _norm(c["theme"])), None)
+            if tid:
+                store_mod.apply_op(store, {"op": "set_theme", "chantier_id": ch["id"], "theme_id": tid})
         # taches (1re passe : creation, on garde label -> id)
         label_to_id = {}
         for t in parsed["taches"].get(c["key"], []):

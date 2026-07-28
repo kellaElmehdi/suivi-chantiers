@@ -31,6 +31,25 @@ aucune ressaisie.
 - Diagramme de Gantt planifié contre réalisé, avec référence figée (baseline)
 - Charge et capacité, avec suggestions de lissage
 
+**Organiser**
+- **Thèmes** : une liste **fermée de 10 au maximum**, choisie dans un menu et
+  jamais en saisie libre. C'est la maille transverse : chantiers, actions, notes
+  et temps passé se rangent dans les mêmes cases, donc « combien de temps sur ce
+  sujet, tous chantiers confondus » devient une question à laquelle l'outil
+  répond. La limite est volontaire — c'est elle qui empêche la liste de redevenir
+  un nuage d'étiquettes inutilisable.
+- **Actions** : les tâches libres et les routines vivent dans **une seule liste**,
+  parce qu'une routine n'est qu'une action avec une règle de répétition. Capture
+  en une ligne (`Relancer Karim #ERP !h vendredi 15m`), regroupement par horizon
+  (en retard / aujourd'hui / cette semaine / plus tard / sans échéance),
+  chronomètre sur chaque action.
+- **Routines à occurrences** : une occurrence ratée ne disparaît pas. Elle reste
+  à acter — *rattrapée*, *sautée volontairement* ou *ratée* — et alimente un taux
+  de tenue réel. Sauter n'est pas rater, et la distinction est conservée.
+- **Bloc-notes** : un journal horodaté à la saisie (date **et** heure), classé par
+  thème, rattachable à un chantier — où il devient son historique. Une note se
+  transforme en action en un clic : c'est le flux compte-rendu → décisions.
+
 **Suivre**
 - Livrables attendus des autres : qui doit quoi, pour quand, avec relances
 - Registre de risques coté 5×5 (probabilité × gravité), catalogue de risques
@@ -38,7 +57,13 @@ aucune ressaisie.
 - Recette par itérations : retours, priorités, statuts
 - Cahier des charges par chantier : document rédigeable, indices de révision,
   cycle de validation
-- Chronomètre intégré et récapitulatif « Ma journée »
+- Chronomètre intégré et récapitulatif « Ma journée ». Le temps hors chantier se
+  ventile par thème au lieu de tomber dans un unique bloc « divers ».
+
+**Raccourcis clavier** — la capture doit coûter moins qu'un post-it :
+`a` nouvelle action · `n` nouvelle note · `c` nouveau chantier · `t` tableau ·
+`p` planning · `d` tableau de bord · `s` arrêter le chrono · `/` ou `Ctrl+K`
+rechercher (chantiers, personnes, risques, actions et notes).
 
 **Rendre compte**
 - Tableau de bord : indicateurs, valeur acquise (EVM : SPI, CPI, EAC, VAC)

@@ -4,12 +4,23 @@ Une seule fonction `apply_op` mute le store ; elle est utilisee par l'edition
 de l'interface (UI -> /api/mutate), ce qui centralise la validation.
 
 Modele :
+- theme : maille TRANSVERSE, liste FERMEE de 10 au maximum. Un theme classe tout
+  ce qui n'est pas un chantier (actions, notes, temps libre) et se choisit dans
+  une liste : pas de saisie libre, donc pas de doublons ni de fautes de frappe.
 - chantier : titre, statut, prio, echeance, date_debut (debut planning), objectif,
-  blocage, tags[], parties[], taches[], livrables[], histo[].
+  blocage, theme_id, parties[], taches[], livrables[].
 - tache : id, label, done, done_date, duree (jours), preds[] (ids de taches du
   meme chantier), is_milestone (jalon = duree 0). Le planning (dates, chemin
   critique, marges) est CALCULE cote interface a partir de duree+preds (CPM).
 - livrable : ce que l'utilisateur attend d'une personne (statut, date, relances...).
+- action : TOUT ce qui est "a faire" hors planning de chantier. Une routine est
+  une action avec une `recurrence` ; une tache libre est une action sans. Les
+  deux vivent dans la meme liste, donc un seul endroit ou regarder.
+  L'historique est fait d'OCCURRENCES statuees (fait / saute / rate) et non de
+  simples cases cochees : une occurrence ratee laisse une trace et alimente le
+  taux de tenue, au lieu de disparaitre silencieusement.
+- note : journal horodate (date + heure de saisie). Remplace `histo` : une note
+  rattachee a un chantier EST son entree d'historique.
 """
 
 from __future__ import annotations
@@ -28,7 +39,35 @@ LIV_STATUTS = {"attente", "recu", "partiel", "annule"}
 RETOUR_STATUTS = {"a_traiter", "en_cours", "fait", "rejete"}
 RISQUE_STATUTS = {"ouvert", "maitrise", "avere", "clos"}   # cote / maitrise / avere / clos
 CDC_STATUTS = {"brouillon", "en_validation", "valide", "obsolete"}   # cycle de vie d'un cahier des charges
-RAPPEL_FREQS = {"jour", "semaine", "mois", "ponctuel"}              # recurrence d'une routine/rappel
+RAPPEL_FREQS = {"jour", "semaine", "mois", "ponctuel"}              # legacy : recurrence des anciennes routines
+ACTION_FREQS = {"jour", "semaine", "mois"}          # une action recurrente = routine ("ponctuel" = action sans recurrence)
+OCC_STATUTS = {"fait", "saute", "rate"}             # occurrence d'une routine : tenue / sautee volontairement / ratee
+NOTE_TYPES = {"note", "reunion", "decision", "idee"}
+THEMES_MAX = 10                                     # liste FERMEE : la contrainte est la fonctionnalite
+
+# Palette des themes : teintes distinctes, lisibles en clair comme en sombre.
+THEME_COULEURS = ["#2563eb", "#0d9488", "#d97706", "#7c3aed", "#dc2626",
+                  "#0891b2", "#65a30d", "#db2777", "#4f46e5", "#78716c"]
+
+# Themes de depart, deduits du portefeuille reel. `motifs` sert UNE SEULE FOIS, a
+# la migration : les anciens tags libres et les titres de chantiers y sont
+# confrontes pour pre-affecter chaque chantier. Ensuite les tags disparaissent.
+THEMES_DEFAUT = [
+    ("Atelier & Production", "🏭", ["mes ", "komugi", "atelier", "of numerique", "outillage",
+                                    "usinage", "maintenance", "mainsim", "production", "immersion"]),
+    ("BI & Reporting",       "📊", ["power bi", "powerbi", "bi", "dashboard", "kpi", "indicateur",
+                                    "analytique", "pilotage", "reporting", "power querry", "power query"]),
+    ("Achats & Fournisseurs", "🛒", ["achat", "fournisseur", "appro", "commande", "bomcreator", "lancement"]),
+    ("SI, Infra & Collaboration", "🛡", ["sharepoint", "portail", "zeendoc", "documentaire", "cyber",
+                                         "infra", "securetech", "collaboration", "communication", "partage"]),
+    ("Methodes & CAO",       "📐", ["cao", "methode", "nomenclature", "plan", "indice", "cad", "visiativ"]),
+    ("ERP & Donnees",        "🗄", ["erp", "silog", "gp9000", "sage", "compta", "data", "donnee",
+                                    "client", "dedoublonnage", "export"]),
+    ("Qualite",              "✅", ["qualite", "non-conformite", "non conformite", "nc", "soudage", "audit"]),
+    ("IA",                   "🤖", ["ia", "intelligence artificielle", "fabera"]),
+    ("RH & Formation",       "🎓", ["rh", "formation", "factorial", "recrutement"]),
+    ("Commerce & Client",    "🤝", ["crm", "commerce", "commercial", "devis", "vente"]),
+]
 
 
 def _uid(prefix: str) -> str:
@@ -263,7 +302,8 @@ def _clock_start(store: dict, kind: str, label: str, **refs) -> dict:
     sess = {"id": _uid("tl_"), "date": now.date().isoformat(),
             "debut": now.strftime("%H:%M"), "fin": None, "kind": kind, "label": label,
             "chantier_id": refs.get("chantier_id"), "tache_id": refs.get("tache_id"),
-            "rappel_id": refs.get("rappel_id"), "iteration_id": refs.get("iteration_id")}
+            "action_id": refs.get("action_id"), "iteration_id": refs.get("iteration_id"),
+            "theme_id": refs.get("theme_id")}
     log = store.setdefault("timelog", [])
     log.append(sess)
     if len(log) > 5000:
@@ -403,7 +443,8 @@ def _absence_overlap(store: dict, debut: str, fin: str, typ: str, contact_id,
 # ligne horodatée — le message lisible est déjà produit par _apply_op.
 # --------------------------------------------------------------------------- #
 JOURNAL_SKIP = {"set_settings", "cdc_section_update", "cdc_section_move",
-                "add_rappel", "update_rappel", "toggle_rappel", "remove_rappel",
+                "action_update", "action_reorder", "note_update", "note_pin",
+                "theme_update", "theme_move",
                 "clock_start", "clock_stop", "clock_edit", "clock_delete", "clock_add",
                 "update_subtask", "apply_template",
                 "rapport_update", "rapport_point_update",       # rédaction du rapport hebdo :
@@ -555,9 +596,9 @@ def _rapport_facts(store: dict, debut: str, fin: str) -> dict:
             if t.get("done") and dd and debut <= dd <= fin:
                 _pt(cid)["taches"].append({"label": t.get("label", ""), "date": dd,
                                            "jalon": bool(t.get("is_milestone"))})
-        for e in c.get("histo", []):    # notes posées au fil de la semaine -> remontent seules
-            if e.get("d") and debut <= e["d"] <= fin:
-                _pt(cid)["notes"].append({"d": e["d"], "t": e.get("t", "")})
+        for n in _chantier_notes(store, cid):   # notes posées au fil de la semaine -> remontent seules
+            if n.get("date") and debut <= n["date"] <= fin:
+                _pt(cid)["notes"].append({"d": n["date"], "t": n.get("corps", "")})
         for l in c.get("livrables", []):
             if l.get("derniere") and debut <= l["derniere"] <= fin:
                 _pt(cid)["relances"] += 1
@@ -574,8 +615,11 @@ def _rapport_facts(store: dict, debut: str, fin: str) -> dict:
             if j.get("chantier_id") in by_id:
                 _pt(j["chantier_id"])["actions"] += 1
     temps_total = 0
-    temps_kinds: dict[str, int] = {}   # tache / rappel / recette / libre (réunions, RDV…)
-    hors: dict[str, dict] = {}         # actions sans chantier : réunions, RDV, routines…
+    temps_kinds: dict[str, int] = {}   # tache / action / recette / libre (réunions, RDV…)
+    temps_themes: dict[str, int] = {}  # ventilation transverse : où part le temps, chantier ou pas
+    hors: dict[str, dict] = {}         # travail sans chantier : réunions, RDV, routines…
+    ch_theme = {c.get("id"): c.get("theme_id") for c in store.get("chantiers", [])}
+    act_theme = {a.get("id"): a.get("theme_id") for a in store.get("actions", [])}
     for s in store.get("timelog", []):
         sd = s.get("date")
         if sd and debut <= sd <= fin:
@@ -583,15 +627,41 @@ def _rapport_facts(store: dict, debut: str, fin: str) -> dict:
             temps_total += m
             k = s.get("kind") or "libre"
             temps_kinds[k] = temps_kinds.get(k, 0) + m
+            # le thème de la plage : le sien, sinon celui de son chantier, sinon celui de son action
+            th = s.get("theme_id") or ch_theme.get(s.get("chantier_id")) or act_theme.get(s.get("action_id"))
+            temps_themes[th or "_sans"] = temps_themes.get(th or "_sans", 0) + m
             if s.get("chantier_id") in by_id:
                 _pt(s["chantier_id"])["temps_min"] += m
             else:   # hors chantier : agrégé par libellé pour figurer au bilan
-                lbl = (s.get("label") or "").strip() or ("Routine" if k == "rappel" else "Divers")
+                lbl = (s.get("label") or "").strip() or ("Routine" if k == "action" else "Divers")
                 hx = hors.setdefault(lbl, {"label": lbl, "kind": k, "temps_min": 0, "jours": []})
                 hx["temps_min"] += m
                 if sd not in hx["jours"]:
                     hx["jours"].append(sd)
     hors_chantier = sorted(hors.values(), key=lambda x: -x["temps_min"])[:12]
+    # Actions hors chantier faites dans la semaine + tenue des routines : la part
+    # du travail que le planning des chantiers ne voit pas.
+    actions_faites, routines_tenue = [], []
+    for a in store.get("actions", []):
+        if a.get("recurrence"):
+            dus = [o for o in a.get("occurrences", []) if debut <= (o.get("date") or "") <= fin]
+            faits = [o for o in dus if o.get("statut") == "fait"]
+            rates = [o for o in dus if o.get("statut") == "rate"]
+            if dus:
+                routines_tenue.append({"label": a.get("label", ""), "theme_id": a.get("theme_id"),
+                                       "faits": len(faits), "rates": len(rates), "total": len(dus)})
+        elif a.get("done") and a.get("done_date") and debut <= a["done_date"] <= fin:
+            actions_faites.append({"label": a.get("label", ""), "date": a["done_date"],
+                                   "theme_id": a.get("theme_id"), "chantier_id": a.get("chantier_id")})
+    actions_faites.sort(key=lambda x: x["date"])
+    routines_tenue.sort(key=lambda x: (x["faits"] / x["total"]) if x["total"] else 0)
+    # Notes de la semaine sans chantier : matière brute pour la synthèse et le REX.
+    notes_libres = [{"date": n.get("date"), "heure": n.get("heure"), "type": n.get("type"),
+                     "titre": n.get("titre", ""), "corps": n.get("corps", ""),
+                     "theme_id": n.get("theme_id")}
+                    for n in store.get("notes", [])
+                    if not n.get("chantier_id") and debut <= (n.get("date") or "") <= fin]
+    notes_libres.sort(key=lambda n: (n["date"] or "", n["heure"] or ""))
     # Un point n'existe que s'il a de la MATIÈRE (tâche finie, note, temps,
     # relance, retour). De simples éditions de fiche (journal seul) ne créent
     # pas de carte « aucun fait détecté » — l'ajout manuel reste possible.
@@ -663,8 +733,12 @@ def _rapport_facts(store: dict, debut: str, fin: str) -> dict:
              "termines": len(termines), "retards": len(retards),
              "taches": sum(len(p["taches"]) for p in pts.values()),
              "jalons": sum(1 for p in pts.values() for t in p["taches"] if t["jalon"]),
-             "notes": sum(len(p["notes"]) for p in pts.values()),
-             "temps_min": temps_total, "temps_kinds": temps_kinds, "actions": actions}
+             "notes": sum(len(p["notes"]) for p in pts.values()) + len(notes_libres),
+             "temps_min": temps_total, "temps_kinds": temps_kinds,
+             "temps_themes": temps_themes, "actions": actions,
+             "actions_faites": len(actions_faites),
+             "routines_ok": sum(x["faits"] for x in routines_tenue),
+             "routines_dues": sum(x["total"] for x in routines_tenue)}
 
     # -- Programmé pour la suite : semaine suivante + horizon ---------------- #
     horizon = _shift_iso(fin, RAPPORT_HORIZON)
@@ -719,15 +793,21 @@ def _rapport_facts(store: dict, debut: str, fin: str) -> dict:
                 av["risques"].append({"chantier_id": cid, "chantier": titre,
                                       "libelle": rk.get("libelle", ""),
                                       "date": rk["echeance_revue"]})
-    for rp in store.get("rappels", []):
-        if rp.get("actif") and rp.get("freq") == "ponctuel" and rp.get("date") \
-           and not rp.get("ticks") and rp["date"] <= horizon:
-            av["rappels"].append({"label": rp.get("label", ""), "date": rp["date"]})
+    for a in store.get("actions", []):   # actions ponctuelles à échéance dans l'horizon
+        if a.get("actif") and not a.get("recurrence") and not a.get("done") \
+           and a.get("echeance") and a["echeance"] <= horizon:
+            av["rappels"].append({"label": a.get("label", ""), "date": a["echeance"],
+                                  "theme_id": a.get("theme_id"),
+                                  "late": a["echeance"] < today()})
     for k in ("echeances", "livrables", "risques", "rappels"):
         av[k].sort(key=lambda x: x.get("date") or "")
     return {"points": pts, "stats": stats, "avenir": av,
             "termines": termines, "retards": retards, "gantt": gantt,
             "hors_chantier": hors_chantier,
+            "actions_faites": actions_faites, "routines_tenue": routines_tenue,
+            "notes_libres": notes_libres,
+            "themes": [{"id": t["id"], "nom": t["nom"], "couleur": t["couleur"],
+                        "icone": t.get("icone", "•")} for t in _themes(store)],
             "titres": {cid: by_id[cid].get("titre", "") for cid in pts}}
 
 
@@ -736,6 +816,204 @@ def _rapport(store: dict, rid: str) -> dict:
     if r is None:
         raise ValueError(f"Rapport introuvable: {rid}")
     return r
+
+
+# --------------------------------------------------------------------------- #
+# Themes — liste fermee (10 max), maille transverse
+# --------------------------------------------------------------------------- #
+def _themes(store: dict) -> list:
+    return store.setdefault("themes", [])
+
+
+def _theme(store: dict, tid: str) -> dict:
+    t = next((x for x in _themes(store) if x.get("id") == tid), None)
+    if t is None:
+        raise ValueError(f"Theme introuvable: {tid}")
+    return t
+
+
+def _theme_actifs(store: dict) -> list:
+    return [t for t in _themes(store) if not t.get("archive")]
+
+
+def _theme_id_valide(store: dict, tid):
+    """Un theme_id inconnu (ou archive supprime) retombe sur None plutot que d'echouer."""
+    if not tid:
+        return None
+    return tid if any(t.get("id") == tid for t in _themes(store)) else None
+
+
+def _theme_libre(store: dict) -> str:
+    """Prochaine couleur non utilisee, pour que deux themes ne se ressemblent pas."""
+    pris = {t.get("couleur") for t in _themes(store)}
+    for c in THEME_COULEURS:
+        if c not in pris:
+            return c
+    return THEME_COULEURS[len(_themes(store)) % len(THEME_COULEURS)]
+
+
+def _devine_theme(store: dict, textes: list) -> str | None:
+    """Pre-affectation a la migration : confronte les anciens tags + le titre aux motifs."""
+    blob = " ".join(str(t or "").lower() for t in textes)
+    # sans accents, pour que "Qualite" attrape "Qualité" et "donnees" attrape "données"
+    for a, b in (("é", "e"), ("è", "e"), ("ê", "e"), ("à", "a"), ("â", "a"),
+                 ("î", "i"), ("ï", "i"), ("ô", "o"), ("û", "u"), ("ù", "u"), ("ç", "c")):
+        blob = blob.replace(a, b)
+    best, best_score = None, 0
+    for th in _themes(store):
+        score = sum(len(m) for m in th.get("motifs", []) if m in blob)
+        if score > best_score:
+            best, best_score = th.get("id"), score
+    return best
+
+
+def _migrate_themes(store: dict) -> None:
+    """Cree la liste fermee, pre-affecte les chantiers depuis leurs tags, puis jette les tags.
+
+    Les 36 tags libres d'origine (dont 30 uniques, et un « Power Querry ») ne servaient
+    a rien comme axe de filtrage ; ils servent ici une derniere fois a deviner le theme.
+    """
+    if store.get("themes") is not None:
+        return                                    # deja migre
+    store["themes"] = [
+        {"id": _uid("th_"), "nom": nom, "icone": icone,
+         "couleur": THEME_COULEURS[i % len(THEME_COULEURS)],
+         "ordre": i, "archive": False, "motifs": motifs}
+        for i, (nom, icone, motifs) in enumerate(THEMES_DEFAUT)
+    ]
+    for c in store.get("chantiers", []):
+        if not c.get("theme_id"):
+            c["theme_id"] = _devine_theme(store, list(c.get("tags") or []) + [c.get("titre", "")])
+        c.pop("tags", None)                       # le tag libre disparait du modele
+    for th in store["themes"]:                    # les motifs n'ont servi qu'a la migration
+        th.pop("motifs", None)
+
+
+# --------------------------------------------------------------------------- #
+# Actions — taches libres ET routines dans une seule liste
+# --------------------------------------------------------------------------- #
+def _actions(store: dict) -> list:
+    return store.setdefault("actions", [])
+
+
+def _action(store: dict, aid: str) -> dict:
+    a = next((x for x in _actions(store) if x.get("id") == aid), None)
+    if a is None:
+        raise ValueError(f"Action introuvable: {aid}")
+    return a
+
+
+def _norm_recurrence(rec):
+    """None = action ponctuelle. Sinon {freq, jours[], jour_mois} valide."""
+    if not rec:
+        return None
+    freq = rec.get("freq") or "jour"
+    if freq not in ACTION_FREQS:
+        raise ValueError(f"Frequence invalide: {freq}")
+    jours = sorted({int(x) for x in (rec.get("jours") or [])
+                    if str(x).isdigit() and 0 <= int(x) <= 6})
+    jm = rec.get("jour_mois")
+    if jm == "fin":                               # dernier jour du mois : ce que "le 28" ne savait pas dire
+        jour_mois = "fin"
+    elif jm:
+        jour_mois = min(31, max(1, int(jm)))
+    else:
+        jour_mois = None
+    return {"freq": freq, "jours": jours if freq == "semaine" else [],
+            "jour_mois": jour_mois if freq == "mois" else None}
+
+
+def _occ(a: dict, d: str) -> dict | None:
+    return next((o for o in a.get("occurrences", []) if o.get("date") == d), None)
+
+
+def _occ_set(store: dict, a: dict, d: str, statut: str | None) -> None:
+    """Pose (ou retire) le statut d'une occurrence. statut=None -> l'occurrence disparait."""
+    occ = a.setdefault("occurrences", [])
+    cur = _occ(a, d)
+    if statut is None:
+        if cur:
+            occ.remove(cur)
+        return
+    if cur:
+        cur["statut"] = statut
+        cur["fait_le"] = _hm()
+    else:
+        occ.append({"date": d, "statut": statut, "fait_le": _hm()})
+    occ.sort(key=lambda o: o.get("date") or "")
+    if len(occ) > 500:                            # borne l'historique
+        del occ[:len(occ) - 500]
+
+
+def _migrate_actions(store: dict) -> None:
+    """Les routines (`rappels`) deviennent des actions ; leurs `ticks` deviennent des occurrences.
+
+    Un ancien rappel « ponctuel » n'etait pas une routine mais une tache a faire une
+    fois : il devient une action SANS recurrence, avec son echeance.
+    """
+    if store.get("actions") is not None:
+        return
+    store["actions"] = []
+    for r in store.get("rappels", []) or []:
+        freq = r.get("freq") or "jour"
+        ponctuel = freq == "ponctuel"
+        ticks = sorted(set(r.get("ticks") or []))
+        a = {
+            # on GARDE l'id d'origine : les plages de chrono le referencent (rappel_id -> action_id)
+            "id": r.get("id") or _uid("ac_"), "label": r.get("label") or "", "desc": r.get("note") or "",
+            "theme_id": None, "chantier_id": r.get("chantier_id") or None,
+            "tache_id": r.get("tache_id") or None, "contact_id": None,
+            "prio": "m", "echeance": (r.get("date") or None) if ponctuel else None,
+            "heure": r.get("heure") or None, "estimation_min": 0,
+            "recurrence": None if ponctuel else _norm_recurrence(
+                {"freq": freq, "jours": r.get("jours"), "jour_mois": r.get("jour_mois")}),
+            "occurrences": [] if ponctuel else [
+                {"date": d, "statut": "fait", "fait_le": None} for d in ticks],
+            "done": bool(ponctuel and ticks), "done_date": (ticks[-1] if (ponctuel and ticks) else None),
+            "actif": bool(r.get("actif", True)), "cree_le": ticks[0] if ticks else today(),
+            "ordre": len(store["actions"]),
+        }
+        store["actions"].append(a)
+    store.pop("rappels", None)                    # plus de silo separe
+
+
+# --------------------------------------------------------------------------- #
+# Notes — journal horodate (remplace `histo`)
+# --------------------------------------------------------------------------- #
+def _notes(store: dict) -> list:
+    return store.setdefault("notes", [])
+
+
+def _note(store: dict, nid: str) -> dict:
+    n = next((x for x in _notes(store) if x.get("id") == nid), None)
+    if n is None:
+        raise ValueError(f"Note introuvable: {nid}")
+    return n
+
+
+def _migrate_notes(store: dict) -> None:
+    """Les entrees `histo` des chantiers deviennent des notes rattachees a leur chantier."""
+    if store.get("notes") is not None:
+        return
+    store["notes"] = []
+    for c in store.get("chantiers", []):
+        for e in (c.get("histo") or []):
+            store["notes"].append({
+                "id": _uid("nt_"), "date": e.get("d") or today(), "heure": "",
+                "type": "note", "titre": "", "corps": e.get("t") or "",
+                "theme_id": c.get("theme_id"), "chantier_id": c.get("id"),
+                "contact_ids": [], "epingle": False,
+                "cree_le": e.get("d") or today(), "maj_le": None,
+            })
+        c.pop("histo", None)
+    store["notes"].sort(key=lambda n: (n.get("date") or "", n.get("heure") or ""), reverse=True)
+
+
+def _chantier_notes(store: dict, cid: str) -> list:
+    """Historique d'un chantier = ses notes, les plus recentes d'abord."""
+    ns = [n for n in _notes(store) if n.get("chantier_id") == cid]
+    ns.sort(key=lambda n: (n.get("date") or "", n.get("heure") or ""), reverse=True)
+    return ns
 
 
 # --------------------------------------------------------------------------- #
@@ -959,30 +1237,81 @@ def _normalize(store: dict) -> dict:
     s.setdefault("pause_fin", "13:00")
     s.setdefault("vendredi_fin", "13:30") # vendredi : journee plus courte, sans pause, pas d'apres-midi
     jd, jf = s["jour_debut"], s["jour_fin"]
-    for r in store.setdefault("rappels", []):   # routines/rappels (hors chantier) : checklist recurrente unifiee
-        r.setdefault("id", _uid("rp_"))
-        r.setdefault("label", "")
-        r.setdefault("freq", "jour")        # jour | semaine | mois | ponctuel
-        r.setdefault("jours", [])           # hebdo : jours de semaine 0=lundi..6=dimanche (vide = 1x/semaine glissante)
-        r.setdefault("jour_mois", None)     # mensuel : jour du mois 1..28
-        r.setdefault("date", None)          # ponctuel : echeance ISO
-        r.setdefault("heure", None)         # "HH:MM" pour declencher la notif bureau
-        r.setdefault("actif", True)
-        r.setdefault("ticks", [])           # dates cochees (recurrent) ; ponctuel : non-vide => fait
-        r.setdefault("note", "")
-        r.setdefault("chantier_id", None)   # rattachement optionnel : le temps chrono du rappel est compte sur ce chantier
-        r.setdefault("tache_id", None)      # tache precise du chantier (optionnel)
+    # --- migrations : themes (depuis les tags), actions (depuis les rappels), notes (depuis histo)
+    _migrate_themes(store)
+    _migrate_actions(store)
+    _migrate_notes(store)
+    for i, th in enumerate(store.setdefault("themes", [])):
+        th.setdefault("id", _uid("th_"))
+        th.setdefault("nom", "Theme")
+        th.setdefault("icone", "•")
+        th.setdefault("couleur", THEME_COULEURS[i % len(THEME_COULEURS)])
+        th.setdefault("ordre", i)
+        th.setdefault("archive", False)
+    store["themes"].sort(key=lambda t: t.get("ordre", 0))
+    for a in store.setdefault("actions", []):   # taches libres ET routines : une seule liste
+        a.setdefault("id", _uid("ac_"))
+        a.setdefault("label", "")
+        a.setdefault("desc", "")
+        a["theme_id"] = _theme_id_valide(store, a.get("theme_id"))
+        a.setdefault("chantier_id", None)       # rattachement optionnel : le temps chrono y est compte
+        a.setdefault("tache_id", None)
+        a.setdefault("contact_id", None)
+        a.setdefault("prio", "m")
+        a.setdefault("echeance", None)          # ponctuelle : date d'echeance
+        a.setdefault("heure", None)             # "HH:MM" pour la notif bureau
+        a.setdefault("estimation_min", 0)       # minutes estimees (0 = non estimee) — sert la regle des 2 minutes
+        a.setdefault("recurrence", None)        # None = tache libre ; sinon = routine
+        a.setdefault("occurrences", [])         # [{date, statut: fait|saute|rate, fait_le}]
+        a.setdefault("done", False)             # ponctuelle uniquement
+        a.setdefault("done_date", None)
+        a.setdefault("actif", True)             # routine en sommeil sans la supprimer
+        a.setdefault("cree_le", today())
+        a.setdefault("ordre", 0)
+        if a["prio"] not in PRIOS:
+            a["prio"] = "m"
+        try:
+            a["recurrence"] = _norm_recurrence(a.get("recurrence"))
+        except ValueError:
+            a["recurrence"] = None
+        if a["recurrence"]:                     # une routine n'est jamais "done" : elle a des occurrences
+            a["done"], a["done_date"] = False, None
+        a["occurrences"] = [o for o in a["occurrences"]
+                            if o.get("date") and o.get("statut") in OCC_STATUTS]
+    for n in store.setdefault("notes", []):     # journal horodate
+        n.setdefault("id", _uid("nt_"))
+        n.setdefault("date", today())
+        n.setdefault("heure", "")
+        n.setdefault("type", "note")            # note | reunion | decision | idee
+        n.setdefault("titre", "")
+        n.setdefault("corps", "")
+        n["theme_id"] = _theme_id_valide(store, n.get("theme_id"))
+        n.setdefault("chantier_id", None)
+        n.setdefault("contact_ids", [])
+        n.setdefault("epingle", False)
+        n.setdefault("cree_le", n["date"])
+        n.setdefault("maj_le", None)
+        if n["type"] not in NOTE_TYPES:
+            n["type"] = "note"
     for s in store.setdefault("timelog", []):   # sessions de suivi du temps (chrono)
         s.setdefault("id", _uid("tl_"))
         s.setdefault("date", today())
         s.setdefault("debut", "00:00")
         s.setdefault("fin", None)
-        s.setdefault("kind", "libre")           # tache | rappel | recette | libre
+        s.setdefault("kind", "libre")           # tache | action | recette | libre
         s.setdefault("label", "")
         s.setdefault("chantier_id", None)
         s.setdefault("tache_id", None)
         s.setdefault("iteration_id", None)      # recette : itération chronométrée (optionnel)
-        s.setdefault("rappel_id", None)
+        s.setdefault("action_id", None)         # plage chronometree sur une action (ex-rappel_id)
+        s["theme_id"] = _theme_id_valide(store, s.get("theme_id"))   # ventile le temps "libre" par theme
+        rid = s.pop("rappel_id", None)          # l'action a garde l'id du rappel : le lien tient
+        if rid and not s["action_id"]:
+            s["action_id"] = rid
+        if s["action_id"] and not any(x.get("id") == s["action_id"] for x in store["actions"]):
+            s["action_id"] = None               # action supprimee : la plage reste, sans rattachement
+        if s["kind"] == "rappel":
+            s["kind"] = "action" if s["action_id"] else "libre"
         de = _day_end(store, s["date"])   # fin de journée selon le jour (vendredi plus court)
         # auto-réparation : un chrono oublié un jour passé est fermé à la fin de journée
         if s["fin"] is None and s["date"] < today():
@@ -1059,10 +1388,11 @@ def _normalize(store: dict) -> dict:
         c.setdefault("objectif", "")
         c.setdefault("budget", None)         # BAC (budget a l'achevement, €) pour l'EVM ; None = non defini
         c.setdefault("blocage", "")
-        c.setdefault("tags", [])
+        c["theme_id"] = _theme_id_valide(store, c.get("theme_id"))   # mono-theme (remplace les tags libres)
+        c.pop("tags", None)
+        c.pop("histo", None)                 # l'historique du chantier = ses notes (store["notes"])
         c.setdefault("parties", [])
         c.setdefault("livrables", [])
-        c.setdefault("histo", [])
         c.setdefault("baseline", None)
         c.setdefault("baseline_edits", 0)
         c.setdefault("hold", False)          # mise en pause volontaire (sort des compteurs)
@@ -1278,8 +1608,9 @@ def _apply_op(store: dict, op: dict) -> str:
             "echeance": op.get("echeance") or None,
             "date_debut": op.get("date_debut") or today(),
             "objectif": (op.get("objectif") or "").strip(),
-            "blocage": "", "tags": [], "parties": [], "taches": taches,
-            "livrables": [], "histo": [], "iterations": [], "ordre": len(store["chantiers"]),
+            "blocage": "", "theme_id": _theme_id_valide(store, op.get("theme_id")),
+            "parties": [], "taches": taches,
+            "livrables": [], "iterations": [], "ordre": len(store["chantiers"]),
         }
         store["chantiers"].append(ch)
         return f"Chantier cree : « {titre} »"
@@ -1298,8 +1629,8 @@ def _apply_op(store: dict, op: dict) -> str:
             ch = {
                 "id": _uid("ch_"), "titre": titre, "statut": cc.get("statut") or "todo", "prio": prio,
                 "echeance": cc.get("echeance") or None, "date_debut": cc.get("date_debut") or today(),
-                "objectif": (cc.get("objectif") or "").strip(), "blocage": "", "tags": [], "parties": [],
-                "taches": [], "livrables": [], "histo": [], "iterations": [], "risques": [], "cdc": None,
+                "objectif": (cc.get("objectif") or "").strip(), "blocage": "", "theme_id": None, "parties": [],
+                "taches": [], "livrables": [], "iterations": [], "risques": [], "cdc": None,
                 "ordre": len(store["chantiers"]),
             }
             store["chantiers"].append(ch)
@@ -1670,12 +2001,17 @@ def _apply_op(store: dict, op: dict) -> str:
         ch["livrables"] = [x for x in ch["livrables"] if x["id"] != op["livrable_id"]]
         return f"Livrable supprime : {lv['quoi']}"
 
-    if name == "add_note":
+    if name == "add_note":   # note d'historique d'un chantier = note rattachee a ce chantier
         ch = _chantier(store, op["chantier_id"])
         texte = (op.get("texte") or "").strip()
         if not texte:
             raise ValueError("Texte de note requis.")
-        ch["histo"].insert(0, {"d": op.get("date") or today(), "t": texte})
+        _notes(store).insert(0, {
+            "id": _uid("nt_"), "date": op.get("date") or today(), "heure": _hm(),
+            "type": "note", "titre": "", "corps": texte,
+            "theme_id": ch.get("theme_id"), "chantier_id": ch["id"],
+            "contact_ids": [], "epingle": False, "cree_le": today(), "maj_le": None,
+        })
         return f"Note ajoutee a « {ch['titre']} »"
 
     if name == "add_partie":
@@ -1698,17 +2034,86 @@ def _apply_op(store: dict, op: dict) -> str:
         ch["parties"] = [p for p in ch["parties"] if p["id"] != op["partie_id"]]
         return "Partie prenante retiree"
 
-    if name == "add_tag":
+    # ---- Themes (liste fermee, 10 max) ------------------------------------ #
+    if name == "set_theme":   # affecte le theme d'un chantier (mono-theme, remplace les tags)
         ch = _chantier(store, op["chantier_id"])
-        tag = (op.get("tag") or "").strip()
-        if tag and tag not in ch["tags"]:
-            ch["tags"].append(tag)
-        return f"Tag ajoute : {tag}"
+        tid = op.get("theme_id") or None
+        if tid:
+            _theme(store, tid)                    # valide l'existence
+        ch["theme_id"] = tid
+        return (f"Theme de « {ch['titre']} » : {_theme(store, tid)['nom']}" if tid
+                else f"Theme retire de « {ch['titre']} »")
 
-    if name == "remove_tag":
-        ch = _chantier(store, op["chantier_id"])
-        ch["tags"] = [t for t in ch["tags"] if t != op.get("tag")]
-        return "Tag retire"
+    if name == "theme_add":
+        nom = (op.get("nom") or "").strip()
+        if not nom:
+            raise ValueError("Nom du theme requis.")
+        actifs = _theme_actifs(store)
+        if len(actifs) >= THEMES_MAX:
+            raise ValueError(
+                f"Limite de {THEMES_MAX} themes atteinte. Archive un theme existant avant "
+                f"d'en creer un nouveau — c'est cette contrainte qui garde la liste utile.")
+        if any(t["nom"].strip().lower() == nom.lower() for t in _themes(store)):
+            raise ValueError(f"Le theme « {nom} » existe deja.")
+        th = {"id": _uid("th_"), "nom": nom, "icone": (op.get("icone") or "•")[:4],
+              "couleur": op.get("couleur") or _theme_libre(store),
+              "ordre": len(_themes(store)), "archive": False}
+        _themes(store).append(th)
+        return f"Theme cree : {nom}"
+
+    if name == "theme_update":
+        th = _theme(store, op["id"])
+        if "nom" in op and op["nom"] is not None:
+            nom = str(op["nom"]).strip()
+            if nom and any(t["nom"].strip().lower() == nom.lower() and t["id"] != th["id"]
+                           for t in _themes(store)):
+                raise ValueError(f"Le theme « {nom} » existe deja.")
+            th["nom"] = nom or th["nom"]
+        if "icone" in op and op["icone"] is not None:
+            th["icone"] = str(op["icone"])[:4] or "•"
+        if "couleur" in op and op["couleur"]:
+            th["couleur"] = str(op["couleur"])
+        if "archive" in op:
+            if not op["archive"] and len(_theme_actifs(store)) >= THEMES_MAX and th.get("archive"):
+                raise ValueError(f"Limite de {THEMES_MAX} themes actifs atteinte.")
+            th["archive"] = bool(op["archive"])
+        return f"Theme mis a jour : {th['nom']}"
+
+    if name == "theme_move":   # reordonne (l'ordre pilote l'affichage partout)
+        th = _themes(store)
+        i = next((k for k, x in enumerate(th) if x["id"] == op["id"]), None)
+        if i is None:
+            raise ValueError(f"Theme introuvable: {op['id']}")
+        j = max(0, min(len(th) - 1, i + (1 if op.get("sens") == "bas" else -1)))
+        th[i], th[j] = th[j], th[i]
+        for k, x in enumerate(th):
+            x["ordre"] = k
+        return "Themes reordonnes"
+
+    if name == "theme_remove":
+        th = _theme(store, op["id"])
+        tid = th["id"]
+        n_ch = sum(1 for c in store["chantiers"] if c.get("theme_id") == tid)
+        n_ac = sum(1 for a in _actions(store) if a.get("theme_id") == tid)
+        n_nt = sum(1 for n in _notes(store) if n.get("theme_id") == tid)
+        # Rien n'est supprime en cascade : les elements repassent simplement "sans theme".
+        for c in store["chantiers"]:
+            if c.get("theme_id") == tid:
+                c["theme_id"] = None
+        for a in _actions(store):
+            if a.get("theme_id") == tid:
+                a["theme_id"] = None
+        for n in _notes(store):
+            if n.get("theme_id") == tid:
+                n["theme_id"] = None
+        for s in store.setdefault("timelog", []):
+            if s.get("theme_id") == tid:
+                s["theme_id"] = None
+        store["themes"] = [x for x in _themes(store) if x["id"] != tid]
+        for k, x in enumerate(store["themes"]):
+            x["ordre"] = k
+        detail = f" ({n_ch} chantiers, {n_ac} actions, {n_nt} notes sans theme)" if (n_ch or n_ac or n_nt) else ""
+        return f"Theme supprime : {th['nom']}{detail}"
 
     if name == "add_contact":
         nom = (op.get("nom") or "").strip()
@@ -2044,74 +2449,221 @@ def _apply_op(store: dict, op: dict) -> str:
                                  "auteur": auteur, "objet": objet, "snapshot": None})
         return f"Révision {nxt} émise — « {ch['titre']} » (validation réinitialisée)"
 
-    # ---- Routines / rappels (hors chantier) ------------------------------ #
-    if name == "add_rappel":
+    # ---- Actions : taches libres ET routines dans une seule liste --------- #
+    if name == "action_add":
         label = (op.get("label") or "").strip()
         if not label:
-            raise ValueError("Libellé de la routine requis.")
-        freq = op.get("freq") or "jour"
-        if freq not in RAPPEL_FREQS:
-            raise ValueError(f"Fréquence invalide: {freq}")
-        if freq == "ponctuel" and not op.get("date"):
-            raise ValueError("Un rappel ponctuel nécessite une date.")
-        jours = [int(x) for x in (op.get("jours") or []) if str(x).isdigit() and 0 <= int(x) <= 6]
-        jm = op.get("jour_mois")
-        store.setdefault("rappels", []).append({
-            "id": _uid("rp_"), "label": label, "freq": freq, "jours": jours,
-            "jour_mois": (min(28, max(1, int(jm))) if jm else None),
-            "date": op.get("date") or None, "heure": op.get("heure") or None,
-            "actif": True, "ticks": [], "note": (op.get("note") or "").strip(),
-            "chantier_id": op.get("chantier_id") or None, "tache_id": op.get("tache_id") or None,
-        })
-        return f"Routine ajoutée : {label}"
+            raise ValueError("Libelle de l'action requis.")
+        rec = _norm_recurrence(op.get("recurrence"))
+        prio = op.get("prio") or "m"
+        if prio not in PRIOS:
+            raise ValueError(f"Priorite invalide: {prio}")
+        cid = op.get("chantier_id") or None
+        if cid:
+            _chantier(store, cid)
+        a = {
+            "id": _uid("ac_"), "label": label, "desc": (op.get("desc") or "").strip(),
+            "theme_id": _theme_id_valide(store, op.get("theme_id")),
+            "chantier_id": cid, "tache_id": op.get("tache_id") or None,
+            "contact_id": op.get("contact_id") or None,
+            "prio": prio, "echeance": (op.get("echeance") or None) if not rec else None,
+            "heure": op.get("heure") or None,
+            "estimation_min": max(0, int(op.get("estimation_min") or 0)),
+            "recurrence": rec, "occurrences": [],
+            "done": False, "done_date": None, "actif": True,
+            "cree_le": today(), "ordre": len(_actions(store)),
+        }
+        _actions(store).append(a)
+        return ("Routine creee : " if rec else "Action creee : ") + label
 
-    if name == "update_rappel":
-        r = _sub(store.setdefault("rappels", []), op["id"], "Rappel")
+    if name == "action_update":
+        a = _action(store, op["id"])
         if "label" in op and op["label"] is not None:
-            r["label"] = str(op["label"]).strip() or r["label"]
-        if op.get("freq"):
-            if op["freq"] not in RAPPEL_FREQS:
-                raise ValueError(f"Fréquence invalide: {op['freq']}")
-            r["freq"] = op["freq"]
-        if "jours" in op:
-            r["jours"] = [int(x) for x in (op.get("jours") or []) if str(x).isdigit() and 0 <= int(x) <= 6]
-        if "jour_mois" in op:
-            jm = op.get("jour_mois")
-            r["jour_mois"] = (min(28, max(1, int(jm))) if jm else None)
-        if "date" in op:
-            r["date"] = op["date"] or None
-        if "heure" in op:
-            r["heure"] = op["heure"] or None
-        if "actif" in op:
-            r["actif"] = bool(op["actif"])
-        if "note" in op and op["note"] is not None:
-            r["note"] = str(op["note"]).strip()
+            a["label"] = str(op["label"]).strip() or a["label"]
+        if "desc" in op and op["desc"] is not None:
+            a["desc"] = str(op["desc"]).strip()
+        if "theme_id" in op:
+            a["theme_id"] = _theme_id_valide(store, op["theme_id"])
+        if "prio" in op and op["prio"]:
+            if op["prio"] not in PRIOS:
+                raise ValueError(f"Priorite invalide: {op['prio']}")
+            a["prio"] = op["prio"]
         if "chantier_id" in op:
-            r["chantier_id"] = op["chantier_id"] or None
-            if not r["chantier_id"]:
-                r["tache_id"] = None            # sans chantier rattaché, pas de tâche
+            a["chantier_id"] = op["chantier_id"] or None
+            if a["chantier_id"]:
+                _chantier(store, a["chantier_id"])
+            else:
+                a["tache_id"] = None          # sans chantier rattache, pas de tache
         if "tache_id" in op:
-            r["tache_id"] = op["tache_id"] or None
-        if r["freq"] == "ponctuel" and not r.get("date"):   # un ponctuel sans date serait "dû" en permanence
-            raise ValueError("Un rappel ponctuel nécessite une date d'échéance.")
-        return f"Routine mise à jour : {r['label']}"
+            a["tache_id"] = op["tache_id"] or None
+        if "contact_id" in op:
+            a["contact_id"] = op["contact_id"] or None
+        if "heure" in op:
+            a["heure"] = op["heure"] or None
+        if "estimation_min" in op:
+            a["estimation_min"] = max(0, int(op.get("estimation_min") or 0))
+        if "actif" in op:
+            a["actif"] = bool(op["actif"])
+        if "recurrence" in op:
+            a["recurrence"] = _norm_recurrence(op["recurrence"])
+            if a["recurrence"]:               # devient une routine : plus d'echeance ni de "done"
+                a["echeance"], a["done"], a["done_date"] = None, False, None
+        if "echeance" in op and not a["recurrence"]:
+            a["echeance"] = op["echeance"] or None
+        return f"Action mise a jour : {a['label']}"
 
-    if name == "toggle_rappel":
-        r = _sub(store.setdefault("rappels", []), op["id"], "Rappel")
+    if name == "action_done":
+        # Routine -> pose l'occurrence du jour ; action ponctuelle -> bascule "fait".
+        # Recliquer annule (l'occurrence disparait, le "fait" repasse a faire).
+        a = _action(store, op["id"])
         d = op.get("date") or today()
-        ticks = r.setdefault("ticks", [])
-        if d in ticks:
-            ticks.remove(d)
-            return f"Routine décochée : {r['label']}"
-        ticks.append(d)
-        if len(ticks) > 400:           # borne l'historique des cases cochées
-            del ticks[:len(ticks) - 400]
-        return f"Routine faite : {r['label']}"
+        if a.get("recurrence"):
+            cur = _occ(a, d)
+            if cur and cur.get("statut") == "fait":
+                _occ_set(store, a, d, None)
+                return f"Routine decochee : {a['label']}"
+            _occ_set(store, a, d, "fait")
+            return f"Routine faite : {a['label']}"
+        if a.get("done"):
+            a["done"], a["done_date"] = False, None
+            return f"Action rouverte : {a['label']}"
+        a["done"], a["done_date"] = True, d
+        return f"Action faite : {a['label']}"
 
-    if name == "remove_rappel":
-        r = _sub(store.setdefault("rappels", []), op["id"], "Rappel")
-        store["rappels"] = [x for x in store["rappels"] if x["id"] != op["id"]]
-        return f"Routine supprimée : {r['label']}"
+    if name == "action_skip":
+        # Sauter VOLONTAIREMENT une occurrence : ce n'est pas un oubli, et le
+        # taux de tenue ne doit pas le compter comme un rate.
+        a = _action(store, op["id"])
+        if not a.get("recurrence"):
+            raise ValueError("Seule une routine peut etre sautee.")
+        d = op.get("date") or today()
+        cur = _occ(a, d)
+        if cur and cur.get("statut") == "saute":
+            _occ_set(store, a, d, None)
+            return f"Occurrence retablie : {a['label']}"
+        _occ_set(store, a, d, "saute")
+        return f"Occurrence sautee : {a['label']}"
+
+    if name == "action_miss":
+        # Acte le RATE d'une occurrence passee : elle cesse d'encombrer la liste
+        # du jour mais reste dans l'historique et pese sur le taux de tenue.
+        a = _action(store, op["id"])
+        if not a.get("recurrence"):
+            raise ValueError("Seule une routine peut etre ratee.")
+        d = op.get("date") or today()
+        if d >= today():
+            raise ValueError("Une occurrence ne peut etre ratee qu'une fois la date passee.")
+        _occ_set(store, a, d, "rate")
+        return f"Occurrence ratee : {a['label']}"
+
+    if name == "action_defer":   # reporter une action ponctuelle de N jours
+        a = _action(store, op["id"])
+        if a.get("recurrence"):
+            raise ValueError("Une routine ne se reporte pas : saute l'occurrence.")
+        jours = int(op.get("jours") or 1)
+        base = a.get("echeance") or today()
+        a["echeance"] = _shift_iso(base, jours)
+        return f"Action reportee au {a['echeance']} : {a['label']}"
+
+    if name == "action_reorder":
+        acts = _actions(store)
+        i = next((k for k, x in enumerate(acts) if x["id"] == op["id"]), None)
+        if i is None:
+            raise ValueError(f"Action introuvable: {op['id']}")
+        j = max(0, min(len(acts) - 1, i + (1 if op.get("sens") == "bas" else -1)))
+        acts[i], acts[j] = acts[j], acts[i]
+        for k, x in enumerate(acts):
+            x["ordre"] = k
+        return "Actions reordonnees"
+
+    if name == "action_remove":
+        a = _action(store, op["id"])
+        store["actions"] = [x for x in _actions(store) if x["id"] != op["id"]]
+        for s in store.setdefault("timelog", []):   # les plages chronometrees restent, sans rattachement
+            if s.get("action_id") == op["id"]:
+                s["action_id"] = None
+                s["kind"] = "libre"
+        return ("Routine supprimee : " if a.get("recurrence") else "Action supprimee : ") + a["label"]
+
+    # ---- Notes : journal horodate ---------------------------------------- #
+    if name == "note_add":
+        corps = (op.get("corps") or "").strip()
+        titre = (op.get("titre") or "").strip()
+        if not corps and not titre:
+            raise ValueError("Une note vide n'a rien a tracer.")
+        typ = op.get("type") or "note"
+        if typ not in NOTE_TYPES:
+            raise ValueError(f"Type de note invalide: {typ}")
+        cid = op.get("chantier_id") or None
+        if cid:
+            _chantier(store, cid)
+        n = {
+            "id": _uid("nt_"), "date": op.get("date") or today(),
+            "heure": op.get("heure") or _hm(),      # l'heure est posee d'office : c'est tout l'interet
+            "type": typ, "titre": titre, "corps": corps,
+            "theme_id": _theme_id_valide(store, op.get("theme_id")),
+            "chantier_id": cid,
+            "contact_ids": [c for c in (op.get("contact_ids") or []) if c],
+            "epingle": False, "cree_le": today(), "maj_le": None,
+        }
+        _notes(store).insert(0, n)
+        return "Note enregistree" + (f" : {titre}" if titre else "")
+
+    if name == "note_update":
+        n = _note(store, op["id"])
+        for k in ("titre", "corps"):
+            if k in op and op[k] is not None:
+                n[k] = str(op[k]).strip()
+        if "type" in op and op["type"]:
+            if op["type"] not in NOTE_TYPES:
+                raise ValueError(f"Type de note invalide: {op['type']}")
+            n["type"] = op["type"]
+        if "theme_id" in op:
+            n["theme_id"] = _theme_id_valide(store, op["theme_id"])
+        if "chantier_id" in op:
+            n["chantier_id"] = op["chantier_id"] or None
+            if n["chantier_id"]:
+                _chantier(store, n["chantier_id"])
+        if "contact_ids" in op:
+            n["contact_ids"] = [c for c in (op.get("contact_ids") or []) if c]
+        if "date" in op and op["date"]:
+            n["date"] = op["date"]
+        if "heure" in op:
+            n["heure"] = op["heure"] or ""
+        if not n["corps"].strip() and not n["titre"].strip():
+            raise ValueError("Une note vide n'a rien a tracer.")
+        n["maj_le"] = today()                       # trace la reecriture : "quoi et quand" reste vrai
+        return "Note mise a jour"
+
+    if name == "note_pin":
+        n = _note(store, op["id"])
+        n["epingle"] = (not n.get("epingle")) if "epingle" not in op else bool(op["epingle"])
+        return "Note epinglee" if n["epingle"] else "Note desepinglee"
+
+    if name == "note_remove":
+        n = _note(store, op["id"])
+        store["notes"] = [x for x in _notes(store) if x["id"] != op["id"]]
+        return "Note supprimee"
+
+    if name == "note_to_action":
+        # Transforme une ligne d'une note en action : le flux compte-rendu -> decisions.
+        n = _note(store, op["id"])
+        label = (op.get("label") or n.get("titre") or "").strip()
+        if not label:
+            raise ValueError("Indique le libelle de l'action a creer.")
+        a = {
+            "id": _uid("ac_"), "label": label, "desc": f"Issu de la note du {n['date']}.",
+            "theme_id": n.get("theme_id"), "chantier_id": n.get("chantier_id"),
+            "tache_id": None,
+            "contact_id": (n.get("contact_ids") or [None])[0],
+            "prio": op.get("prio") if op.get("prio") in PRIOS else "m",
+            "echeance": op.get("echeance") or None, "heure": None,
+            "estimation_min": 0, "recurrence": None, "occurrences": [],
+            "done": False, "done_date": None, "actif": True,
+            "cree_le": today(), "ordre": len(_actions(store)), "note_id": n["id"],
+        }
+        _actions(store).append(a)
+        return f"Action creee depuis la note : {label}"
 
     # ---- Absences (congés, RTT, fériés) ---------------------------------- #
     if name == "add_absence":
@@ -2195,17 +2747,20 @@ def _apply_op(store: dict, op: dict) -> str:
     if name == "clock_start":
         kind = op.get("kind") or "libre"
         label = (op.get("label") or "").strip()
-        refs = {k: op.get(k) for k in ("chantier_id", "tache_id", "rappel_id", "iteration_id") if op.get(k)}
+        refs = {k: op.get(k) for k in ("chantier_id", "tache_id", "action_id", "iteration_id", "theme_id")
+                if op.get(k)}
         if not label and kind == "tache" and refs.get("chantier_id") and refs.get("tache_id"):
             ch = _chantier(store, refs["chantier_id"])
             label = _sub(ch["taches"], refs["tache_id"], "Tache")["label"]
-        if kind == "rappel" and refs.get("rappel_id"):
-            rp = _sub(store.setdefault("rappels", []), refs["rappel_id"], "Rappel")
+        if refs.get("action_id"):
+            a = _action(store, refs["action_id"])
+            kind = "action"
             if not label:
-                label = rp["label"]
-            for k in ("chantier_id", "tache_id"):   # rappel rattaché : son temps est compté sur le chantier / la tâche
-                if rp.get(k) and not refs.get(k):
-                    refs[k] = rp[k]
+                label = a["label"]
+            # action rattachée : son temps est compté sur le chantier / la tâche / le thème
+            for k in ("chantier_id", "tache_id", "theme_id"):
+                if a.get(k) and not refs.get(k):
+                    refs[k] = a[k]
         if not label and kind == "recette" and refs.get("chantier_id"):
             ch = _chantier(store, refs["chantier_id"])
             label = f"Recette — {ch['titre']}"
@@ -2236,6 +2791,8 @@ def _apply_op(store: dict, op: dict) -> str:
             s["fin"] = (str(op["fin"]).strip() or None) if op["fin"] else None
         if "date" in op and op["date"]:
             s["date"] = op["date"]
+        if "theme_id" in op:      # classer une plage "libre" : elle sort du fourre-tout gris
+            s["theme_id"] = _theme_id_valide(store, op["theme_id"])
         return "Session modifiée"
 
     if name == "clock_delete":
@@ -2255,7 +2812,9 @@ def _apply_op(store: dict, op: dict) -> str:
             "id": _uid("tl_"), "date": op.get("date") or today(),
             "debut": str(op["debut"]).strip(), "fin": str(op["fin"]).strip(),
             "kind": op.get("kind") or "libre", "label": label,
-            "chantier_id": op.get("chantier_id"), "tache_id": op.get("tache_id"), "rappel_id": op.get("rappel_id"),
+            "chantier_id": op.get("chantier_id"), "tache_id": op.get("tache_id"),
+            "action_id": op.get("action_id"), "iteration_id": op.get("iteration_id"),
+            "theme_id": _theme_id_valide(store, op.get("theme_id")),
         })
         return f"Plage ajoutée : {label}"
 
