@@ -11,6 +11,10 @@ fichier JSON sur votre machine.
 Double-clic sur Suivi.bat  →  http://127.0.0.1:8765
 ```
 
+> **Côté technique** — cet outil est le seul du parc à ne dépendre d'aucune machine,
+> d'aucun partage et d'aucun compte. Le détail : [`_liens/VM.md`](_liens/VM.md).
+> Le parc complet : [`c:\projets\_commun\vm\`](../_commun/vm/).
+
 ## Pourquoi
 
 Les outils de gestion de projet demandent en général plus de saisie qu'ils ne
@@ -25,7 +29,10 @@ aucune ressaisie.
 
 **Piloter**
 - Tableau Kanban (à faire, en cours, bloqué, en recette, terminé) avec limite
-  d'en-cours (WIP) configurable
+  d'en-cours (WIP) configurable. La colonne suit le travail sans qu'on ait à la
+  poser : une recette ouverte met le chantier **en recette**, 100 % des tâches
+  faites le mettent **terminé**, et rouvrir une tâche ou un point le fait
+  repartir **en cours** (« bloqué » reste, lui, entièrement calculé)
 - Planning calculé automatiquement (CPM) : dates au plus tôt, chemin critique,
   marges, jours ouvrés, jours fériés et absences
 - Diagramme de Gantt planifié contre réalisé, avec référence figée (baseline)
@@ -54,23 +61,68 @@ aucune ressaisie.
 - Livrables attendus des autres : qui doit quoi, pour quand, avec relances
 - Registre de risques coté 5×5 (probabilité × gravité), catalogue de risques
   types inclus
-- Recette par itérations : retours, priorités, statuts
 - Cahier des charges par chantier : document rédigeable, indices de révision,
   cycle de validation
+  - **Aller-retour Word** : le bouton `Word` télécharge le cahier des charges en
+    `.docx`, on le retouche dans Word, `Réimporter Word` le relit. Le document
+    porte l'identifiant du chantier et ceux de ses sections dans ses propriétés,
+    invisibles à l'écran : le texte retombe donc au bon endroit même si un titre
+    a bougé. Une section ajoutée dans Word est créée, une section supprimée
+    disparaît.
+  - Le bouton `Imprimer / PDF` produit la **même charte** que le Word : cartouche
+    d'en-tête répété sur chaque page, page Pilotage,
+    sections formatées. Dans la boîte d'impression, laisser les marges par
+    défaut et décocher « En-têtes et pieds de page » du navigateur.
+  - Le `.docx` applique **le design system NSN Industrie**
+    ([`c:\projets\ID visuel`](../ID%20visuel/DESIGN-nsn.md)) : bandeau encre
+    RFF répété sur chaque page (marque, N° CDC, indice, `Page X / Y`),
+    titrage Bahnschrift
+    condensé en capitales, corps Segoe UI `#33555F`, données en Consolas,
+    tableaux `IDENTIFICATION` / `LISTE DES RÉVISIONS` à en-tête sur fond
+    `#E5EBEC`, filets horizontaux `#CFD8DB`, angles à 0, aucune ombre, table des
+    matières Word native. Les capitales sont posées par la propriété Word
+    `w:caps`, jamais par transformation du texte — c'est ce qui garde
+    l'aller-retour fidèle au caractère près. Si la charte évolue, la référence
+    est `ID visuel/DESIGN-nsn.md` + `maquette-rapport.html`.
+  - **Un import qui change quelque chose EST une révision** : l'indice courant
+    est figé en instantané, l'indice passe au suivant, la validation retombe, et
+    la ligne de révision dit ce qui a bougé (« Import Word — 2 modifiée(s)… »).
+    Un document réimporté sans modification ne crée rien et le dit.
+  - Si Word est en suivi de modifications, c'est **l'état final** qui est relu :
+    le texte supprimé mais non accepté n'est pas repris.
+- **Recette** : la liste des points à vérifier avant de dire « c'est livré ».
+  Délibérément pauvre — **trois états** (à vérifier, vérifié, problème) et rien
+  d'autre à tenir à jour. Un point qui coince porte son constat, qui corrige et
+  pour quand ; il n'y a pas de registre d'anomalies séparé à maintenir en double.
+  - Les points se choisissent dans une **liste type** par domaine (données,
+    reporting, interfaces, compta, application métier, atelier, accès, mise en
+    service) : on coche, on n'écrit pas. Une checklist qu'il faut rédiger ne se
+    rédige jamais.
+  - **Un point se pilote exactement comme une tâche** : `▶ Démarrer` lance le
+    chrono sur *ce* point, `⏹ Terminer` l'arrête et le marque vérifié, et le
+    temps s'affiche sur la ligne. Même contrôle, même geste, même code couleur
+    que le plan de tâches et que les actions — il n'y a qu'une chose à
+    apprendre. On sait donc ce que chaque vérification a coûté, et ce que la
+    recette a coûté en tout.
+  - Le chrono s'arrête seul quand tout est vérifié.
+  - Quand tout est vérifié, l'appli le dit et propose de passer le chantier en
+    « Terminé ». C'est la seule cérémonie de clôture.
+  - Vue **Recette** transverse : l'avancement de chaque chantier, ce qui coince
+    (avec qui corrige et pour quand), et le temps passé.
 - Chronomètre intégré et récapitulatif « Ma journée ». Le temps hors chantier se
   ventile par thème au lieu de tomber dans un unique bloc « divers ».
 
 **Raccourcis clavier** — la capture doit coûter moins qu'un post-it :
 `a` nouvelle action · `n` nouvelle note · `c` nouveau chantier · `t` tableau ·
 `p` planning · `d` tableau de bord · `s` arrêter le chrono · `/` ou `Ctrl+K`
-rechercher (chantiers, personnes, risques, actions et notes).
+rechercher (chantiers, personnes, risques, points de recette, actions et notes).
 
 **Rendre compte**
 - Tableau de bord : indicateurs, valeur acquise (EVM : SPI, CPI, EAC, VAC)
 - Journal d'activité alimenté automatiquement à chaque action
 - **Rapport hebdomadaire** : le bilan de la semaine est construit tout seul à
   partir des données déjà saisies (tâches terminées, jalons franchis, notes,
-  temps passé, relances, retours de recette), ainsi que le programme à venir.
+  temps passé, relances, points de recette), ainsi que le programme à venir.
   Il ne reste qu'à rédiger l'analyse : synthèse, avancement par chantier, retour
   d'expérience et priorités. Export PDF sobre avec Gantt du portefeuille,
   répartition du temps et bloc de visa.

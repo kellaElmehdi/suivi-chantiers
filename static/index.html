@@ -22,6 +22,7 @@
     <button data-v="actions" onclick="setView('actions')" title="Tâches libres et routines — raccourci : a">Actions</button>
     <button data-v="notes" onclick="setView('notes')" title="Bloc-notes horodaté — raccourci : n">Bloc-notes</button>
     <button data-v="cahiers" onclick="setView('cahiers')">Cahiers des charges</button>
+    <button data-v="recettes" onclick="setView('recettes')" title="Recette : les points à vérifier avant de livrer, et le temps passé">Recette</button>
     <div class="menu" id="navPilotage">
       <button data-group="dash,activite,charge,risques,rapport,themes" onclick="toggleMenu(event,'navPilotage')">Pilotage ▾</button>
       <div class="menu-list">
@@ -46,7 +47,7 @@
   <div class="menu right" id="searchMenu">
     <button class="ghost" onclick="openSearch(event)" title="Rechercher (touche / ou Ctrl+K)">🔍</button>
     <div class="menu-list search-list" id="searchList" onclick="event.stopPropagation()">
-      <input id="searchInput" class="search-inp" placeholder="Rechercher un chantier, une personne, un livrable, un risque…" oninput="renderSearch()">
+      <input id="searchInput" class="search-inp" placeholder="Rechercher un chantier, une personne, un livrable, un risque, un point de recette…" oninput="renderSearch()">
       <div id="searchResults"></div>
     </div>
   </div>
@@ -84,6 +85,7 @@
     <div class="absences" id="absences" style="display:none"></div>
     <div class="cahiers" id="cahiers" style="display:none"></div>
     <div class="cdc" id="cdc" style="display:none"></div>
+    <div class="recettes" id="recettes" style="display:none"></div>
     <div class="page" id="page" style="display:none"></div>
   </div>
 </div>

@@ -231,6 +231,99 @@ header .sub{font-size:11.5px;color:var(--faint)}
 .sugg .sg-txt{flex:1;font-size:12.5px;line-height:1.4}
 .movable{font-size:10.5px;color:var(--blue);border:1px solid var(--blue);border-radius:var(--radius-sm);padding:1px 5px}
 
+/* --- Plan de charge, vue par tâche : barres horizontales déplaçables ------
+   Une colonne = un jour ouvré (--dw, réglée par le zoom depuis app.js) ; la
+   colonne des libellés (--lw) reste collée à gauche pendant le défilement. */
+.gc{--dw:15px;--lw:210px}
+.gc-tools{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:8px;
+  font-size:11.5px;color:var(--muted)}
+.gc-hint{flex:1;min-width:260px}
+.gc-stat b{font-family:var(--font-display);font-size:14px;color:var(--ink);margin-right:2px}
+.gc-stat b.bad-t{color:var(--red)}
+.gc-zoom{display:inline-flex;align-items:center;gap:4px}
+.gc-zoom button{width:22px;height:22px;padding:0;line-height:1;border:1px solid var(--line);
+  border-radius:var(--radius-sm);background:var(--canvas);color:var(--ink);cursor:pointer;font-size:13px}
+.gc-zoom button:hover{border-color:var(--ink)}
+.gc-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:var(--radius);background:var(--canvas)}
+.gc-inner{position:relative;padding-bottom:6px;user-select:none;-webkit-user-select:none}
+.gc-stripes{position:absolute;top:0;bottom:0;right:0;z-index:0;pointer-events:none}
+.gc-st{position:absolute;top:0;bottom:0;width:var(--dw)}
+.gc-st.w{border-left:1px solid var(--line-soft)}
+.gc-st.m{border-left:1px solid var(--line)}
+.gc-st.over{background:var(--red-bg);opacity:.5}
+.gc-row{position:relative;z-index:1;display:flex;align-items:center;height:24px}
+.gc-lab{flex:0 0 var(--lw);position:sticky;left:0;z-index:4;height:100%;overflow:hidden;
+  display:flex;align-items:center;gap:5px;padding:0 8px 0 10px;font-size:11.5px;
+  background:var(--canvas);border-right:1px solid var(--line)}
+.gc-t{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+.gc-track{flex:1;position:relative;height:100%}
+.gc-pin{font-size:10px;cursor:pointer;flex-shrink:0}
+.gc-run{font-size:10px;cursor:help;flex-shrink:0}
+/* en-tête : un repère par lundi, plus marqué au changement de mois */
+.gc-head{height:20px}
+.gc-tick{position:absolute;top:3px;height:14px;font-style:normal;font-size:9px;color:var(--faint);
+  white-space:nowrap;padding-left:3px;border-left:1px solid var(--line-soft)}
+.gc-tick.m{border-left-color:var(--line);color:var(--muted)}
+/* histogramme aligné sur les mêmes colonnes — se redessine pendant le glissement */
+.gc-hist{height:44px;border-bottom:1px solid var(--line);margin-bottom:3px}
+.gc-hist .gc-lab{font-size:10px;color:var(--faint)}
+.gc-hc{position:absolute;top:0;bottom:0;width:var(--dw);display:flex;align-items:flex-end;padding:0 1px}
+.gc-hc i{display:block;width:100%;background:var(--blue);border-radius:2px 2px 0 0}
+.gc-hc.over i{background:var(--red)}
+.gc-cap{position:absolute;left:0;right:0;height:0;border-top:1px dashed var(--red);pointer-events:none}
+/* lignes de chantier */
+.gc-grp{height:26px}
+.gc-grp .gc-lab{cursor:pointer;color:var(--ink);background:var(--surface-soft)}
+.gc-grp .gc-lab b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gc-grp .gc-lab:hover b{text-decoration:underline}
+.gc-ech{font-style:normal;margin-left:auto;font-size:10px;color:var(--faint);flex-shrink:0}
+/* barres */
+.gc-bar{position:absolute;top:4px;height:16px;min-width:5px;border-radius:3px;overflow:hidden;
+  background:var(--blue);color:#fff;font-size:9.5px;line-height:16px;text-align:center;
+  cursor:default;touch-action:none;box-shadow:var(--shadow)}
+.gc-bar.crit{background:var(--ink)}
+/* Démarrée : hachurée + contour, PAS un aplat — deux bleus voisins ne se
+   distinguent pas d'un coup d'œil, la texture si (et elle dit « en cours »). */
+.gc-bar.run{background:repeating-linear-gradient(45deg,#eff6ff,#eff6ff 3px,#93c5fd 3px,#93c5fd 6px);
+  box-shadow:inset 0 0 0 1.5px var(--inprog-d);color:var(--inprog-d);font-weight:600}
+.gc-bar.pin{box-shadow:inset 3px 0 0 var(--amber)}
+.gc-bar[data-drag="1"]{cursor:grab}
+.gc-bar[data-drag="1"]:hover{filter:brightness(1.1)}
+.gc-bar.grab{cursor:grabbing;z-index:3;opacity:.92;box-shadow:var(--shadow-h)}
+.gc-bar.push{outline:1px dashed var(--amber);outline-offset:1px}
+/* verrouillée : chantier figé ou tâche démarrée — le clic mène au chantier */
+.gc-bar.lock{opacity:.45;cursor:pointer}
+.gc-bar.lock:hover{opacity:.7;filter:none}
+.gc-lock{font-size:10px;cursor:help;flex-shrink:0}
+.gc-fig{font-style:normal;font-size:9.5px;font-weight:600;color:var(--muted);flex-shrink:0;
+  border:1px solid var(--line);border-radius:var(--radius-pill);padding:0 6px;background:var(--canvas)}
+/* marge : pointillés = « place libre », à ne pas confondre avec une barre pleine */
+.gc-float{position:absolute;top:6px;height:12px;background:var(--surface-soft);
+  border:1px dashed #bfdbfe;border-left:none;border-radius:0 3px 3px 0}
+.gc-inner.dragging .gc-float{opacity:.25}
+/* liens de dépendance : fin du prédécesseur → début du successeur */
+.gc-arcs{position:absolute;top:0;z-index:3;pointer-events:none;overflow:visible}
+.gc-arc{stroke:#cbd5e1;stroke-width:1}
+.gc-arc.on{stroke:var(--amber);stroke-width:1.5}
+.legend .arc-lg{width:16px;height:0;border-top:1px solid #cbd5e1;vertical-align:middle}
+.legend .sq.runb{background:repeating-linear-gradient(45deg,#eff6ff,#eff6ff 2px,#93c5fd 2px,#93c5fd 4px);
+  border-color:var(--inprog-d)}
+.legend .sq.floatb{background:var(--surface-soft);border-style:dashed;border-color:#bfdbfe}
+/* étiquette qui suit le curseur pendant le glissement */
+.gc-tip{position:fixed;z-index:60;pointer-events:none;max-width:270px;
+  display:flex;flex-direction:column;gap:1px;padding:6px 9px;border-radius:var(--radius-sm);
+  background:var(--ink);color:#fff;font-size:11px;line-height:1.35;box-shadow:var(--shadow-h)}
+.gc-tip b{font-size:12px;font-weight:600}
+.gc-tip span{color:var(--on-dark-soft)}
+.gc-tip .ok{color:#6ee7b7} .gc-tip .warn{color:#fcd34d} .gc-tip .push{color:#fdba74}
+/* confirmation de l'écriture réelle dans le chantier */
+.gc-flash{position:fixed;right:18px;bottom:18px;z-index:70;max-width:340px;
+  display:flex;flex-direction:column;gap:2px;padding:10px 14px;border-radius:var(--radius);
+  background:var(--ink);color:#fff;font-size:12px;box-shadow:var(--shadow-h);
+  animation:gcFlashIn .18s ease-out}
+.gc-flash span{color:var(--on-dark-soft);font-size:11px}
+@keyframes gcFlashIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+
 .layout{flex:1;display:flex;min-height:0}
 .work{flex:1;overflow:auto;min-width:0;background:var(--canvas)}
 .lab{font-size:11px;font-weight:600;color:var(--muted)}
@@ -425,26 +518,12 @@ header .sub{font-size:11.5px;color:var(--faint)}
 .gate.wait{color:#92590a;background:var(--amber-bg)}
 .gate.ok{color:#047857;background:#ecfdf5}
 
-/* Recette / itérations */
+/* Recette — voir le bloc « Cahier de recette » en fin de feuille */
 .d-status.recette{color:var(--violet)}
 .lnk{color:var(--ink);cursor:pointer;text-decoration:underline}
-.iter-h{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:12.5px;padding-bottom:8px;border-bottom:1px solid var(--line-soft);margin-bottom:6px}
-.iter-h .iter-acts{margin-left:auto;display:flex;gap:12px}
-.iter-h .iter-acts a{cursor:pointer;text-decoration:underline;font-size:11.5px;color:var(--ink)}
 .iopen{color:var(--blue);font-weight:700;font-size:11px}.iclosed{color:var(--faint);font-size:11px}
-.retour{display:grid;grid-template-columns:10px 1fr;gap:9px;padding:8px 0;border-top:1px solid var(--line-soft)}
-.rdot{width:9px;height:9px;margin-top:4px;border:1px solid var(--ink);border-radius:2px}
-.rdot.a_traiter{background:var(--amber);border-color:var(--amber)}
-.rdot.en_cours{background:var(--blue);border-color:var(--blue)}
-.rdot.fait{background:var(--green);border-color:var(--green)}
-.rdot.rejete{background:var(--canvas);border-style:dashed}
-.rq{font-size:12.5px}.rq.pr-h{font-weight:700}
-.rmeta{font-size:11px;color:var(--muted);margin-top:2px}.rmeta.late{color:var(--red);font-weight:600}.rmeta b{color:var(--ink)}
-.retour .acts{margin-top:5px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.retour .acts a{font-size:11px;cursor:pointer;text-decoration:underline;color:var(--ink)}.retour .acts a.danger{color:var(--red)}
 .past{margin-top:10px;padding-top:8px;border-top:1px solid var(--line)}
 .past .fl{font-size:10px;color:var(--faint);text-transform:uppercase}
-.past-line{font-size:11.5px;color:var(--muted);padding:2px 0}
 .box{width:16px;height:16px;border:1.5px solid var(--faint);border-radius:5px;flex-shrink:0;cursor:pointer;position:relative;background:var(--canvas);transition:background .12s,border-color .12s}
 .box:hover{border-color:var(--ink)}
 .box.ok{background:var(--ink);border-color:var(--ink)}
@@ -492,6 +571,8 @@ header .sub{font-size:11.5px;color:var(--faint)}
 
 .hist{border-left:2px solid var(--line);padding:1px 0 1px 10px;margin:6px 0;font-size:12px}
 .hist .d{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-right:7px}
+/* le corps d'une note est rédigé : ses paragraphes doivent survivre à l'affichage */
+.hist-c{white-space:pre-wrap;word-break:break-word;line-height:1.5;margin-top:2px}
 
 /* formulaires */
 input,select,textarea{font:inherit;font-size:12.5px;color:var(--ink);background:var(--canvas);
@@ -1043,6 +1124,29 @@ textarea{width:100%;resize:vertical;min-height:52px}
 .rap-verrou{margin-top:10px;font-size:12.5px;color:var(--muted);background:var(--surface-soft);
   border:1px dashed var(--line);border-radius:var(--radius-sm);padding:9px 12px}
 
+/* Rapport : une NOTE n'est pas une ligne de tâche — encadré, type, titre, paragraphes.
+   Le corps est déroulant au-delà de ~8 lignes pour ne pas noyer la carte du chantier. */
+.rap-point .lab-s{margin:0 0 5px;text-transform:uppercase;letter-spacing:.4px;font-size:10px}
+.rap-notes{display:flex;flex-direction:column;gap:7px;margin-bottom:12px}
+.rap-note{border:1px solid var(--line-soft);border-left:3px solid var(--blue);
+  border-radius:var(--radius-sm);background:var(--surface-soft);padding:7px 11px}
+.rap-note-h{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.rap-note-k{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;color:var(--muted)}
+.rap-note-t{font-size:13px}
+.rap-note-d{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint);white-space:nowrap}
+.rap-note-b{font-size:12.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;
+  margin-top:4px;max-height:11em;overflow:auto}
+.rt-jauge{display:inline-block;width:54px;height:6px;border-radius:3px;background:var(--line-soft);
+  overflow:hidden;margin-left:7px;vertical-align:middle}
+.rt-jauge i{display:block;height:100%;background:var(--green)}
+/* Retrait d'une ligne calculée : discret au repos, franc au survol — ça n'efface
+   rien, donc pas de rouge permanent qui ferait croire à une suppression. */
+.rap-hc-del{margin-left:auto;padding-left:8px;cursor:pointer;color:var(--faint);
+  font-weight:700;font-size:14px;line-height:1;flex-shrink:0;opacity:.35}
+.rap-fact:hover .rap-hc-del,.rap-note:hover .rap-hc-del{opacity:1;color:var(--red)}
+.rap-hc-reset{cursor:pointer;font-size:11px;font-weight:600;color:var(--muted);text-decoration:underline}
+.rap-hc-reset:hover{color:var(--ink)}
+
 /* Rapport hebdo v3 : libellé avancement, bandeau ancien schéma */
 .rap-avlbl{font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);font-weight:700;flex-shrink:0}
 .rap-warnbanner{margin:0 0 14px;font-size:12.5px;background:var(--amber-bg);border:1px solid var(--amber);
@@ -1210,6 +1314,8 @@ textarea{width:100%;resize:vertical;min-height:52px}
 .nt-capture #nt_titre{flex:1;min-width:200px}
 .nt-capture textarea,.nt-card.editing textarea{width:100%;min-height:92px;resize:vertical;line-height:1.5}
 .nt-capture textarea:focus{border-color:var(--ink);outline:none}
+.nt-draft-st{font-size:11px;color:var(--muted);border:1px dashed var(--line);
+  border-radius:var(--radius-sm);padding:2px 8px;white-space:nowrap}
 .nt-day{margin-bottom:16px}
 .nt-day-h{font-size:12px;font-weight:700;color:var(--muted);padding:4px 0 6px;
   border-bottom:1px solid var(--line-soft);margin-bottom:8px}
@@ -1227,3 +1333,71 @@ textarea{width:100%;resize:vertical;min-height:52px}
 .nt-b:hover{border-color:var(--ink);color:var(--ink)}
 .nt-head .del{cursor:pointer;color:var(--red);font-weight:700}
 .nt-corps{font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-word}
+
+/* ==========================================================================
+   Recette — la checklist : trois etats, vert / rouge / gris. Rien d'autre.
+   ========================================================================== */
+.recettes{padding:16px 20px 40px}
+
+/* -- bandeau : avancement + temps + chrono -- */
+.rec-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12.5px;margin-bottom:8px}
+.rec-top .grow{flex:1}
+.rec-count{font-weight:700}
+.rec-count.done{color:#047857}
+.rec-pb{color:var(--red);font-weight:600}
+.rec-fini{font-size:11px;font-weight:700;color:#047857;background:#ecfdf5;
+  border:1px solid #a7f3d0;border-radius:var(--radius-pill);padding:2px 9px}
+.rec-time{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.rec-bar{display:flex;height:6px;border-radius:3px;overflow:hidden;background:var(--surface-strong);margin-bottom:10px}
+.rec-bar i{display:block;height:100%}
+.rec-bar .p-ok{background:var(--green)} .rec-bar .p-ko{background:var(--red)}
+.rec-add{display:flex;gap:14px;margin-top:10px;padding-top:8px;border-top:1px solid var(--line-soft)}
+.rec-add .lnk{font-size:11.5px}
+.rec-done-hint{margin-top:9px;font-size:12px;color:#047857;background:#ecfdf5;
+  border:1px solid #a7f3d0;border-radius:var(--radius-sm);padding:7px 10px}
+
+/* -- une ligne de point EST une ligne de tache : elle reprend .trow / .tstart /
+   .tfinish / .tprog-done / .tstate / .tlabel a l'identique. Seuls le drapeau
+   « probleme » et sa ligne de detail sont propres a la recette. -- */
+.trow.pb{background:#fff8f8;border-radius:var(--radius-sm)}
+.trow.pb .tlabel{font-weight:600}
+.trow.late .pt-flag.on{background:var(--red);color:#fff;border-color:var(--red)}
+.pt-flag{font:inherit;font-size:11px;font-weight:600;line-height:1;cursor:pointer;flex-shrink:0;
+  padding:5px 8px;border-radius:var(--radius-sm);
+  border:1px solid var(--line);background:var(--canvas);color:var(--faint)}
+.pt-flag:hover{border-color:var(--red);color:var(--red)}
+.pt-flag.on{color:#b91c1c;background:var(--red-bg);border-color:#f0b4b4}
+.pt-flag.on:hover{background:var(--green);color:#fff;border-color:var(--green)}
+.pt-pb{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:2px 0 0 24px}
+.pt-pb input{font-size:11.5px;padding:3px 6px}
+.pt-c{flex:1;min-width:150px}
+.pt-q{width:110px}
+.trow .del{cursor:pointer;color:var(--faint);font-weight:700;padding:0 2px;flex-shrink:0}
+.trow .del:hover{color:var(--red)}
+
+/* -- liste de points types : on coche, on n'ecrit pas --
+   Pas de deux-panneaux : les domaines sont des puces qui passent a la ligne,
+   la liste prend toute la largeur en dessous. Tient dans une colonne etroite
+   comme dans une pleine page, sans requete de conteneur. */
+.pt-pick-box{gap:10px}
+.pt-cats{display:flex;flex-wrap:wrap;gap:5px}
+.pt-cat{font:inherit;font-size:11.5px;font-weight:600;padding:4px 10px;cursor:pointer;
+  border:1px solid var(--line);border-radius:var(--radius-pill);
+  background:var(--canvas);color:var(--muted);white-space:nowrap}
+.pt-cat:hover{border-color:var(--ink);color:var(--ink)}
+.pt-cat.sel{background:var(--ink);color:var(--on-dark);border-color:var(--ink)}
+.pt-pick{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:5px;
+  max-height:42vh;overflow:auto;padding-top:2px}
+.pt-opt{display:flex;align-items:flex-start;gap:9px;padding:7px 10px;border:1px solid var(--line);
+  border-radius:var(--radius-sm);font-size:12.5px;line-height:1.35;cursor:pointer}
+.pt-opt:hover{border-color:var(--ink);background:var(--surface-soft)}
+.pt-opt input{margin-top:2px;flex-shrink:0}
+
+/* -- vue transverse -- */
+.rec-tbl td{vertical-align:middle}
+.mbar{display:inline-block;width:60px;height:6px;border-radius:3px;background:var(--surface-strong);
+  overflow:hidden;vertical-align:middle;margin-right:7px}
+.mbar i{display:block;height:100%;background:var(--ink)}
+.mbar.good i{background:var(--green)}
+.mbar-v{font-size:11.5px;font-variant-numeric:tabular-nums;color:var(--muted)}
+.bdg.b-anobloq{color:#b91c1c;background:var(--red-bg);border-color:#f6c4c4}

@@ -25,18 +25,31 @@ Modele :
 
 from __future__ import annotations
 
+import base64
 import json
 import os
+import re
+import unicodedata
 import uuid
 from datetime import date, datetime, timedelta
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 STORE_PATH = os.path.join(DATA_DIR, "store.json")
+FICHIERS_DIR = os.path.join(DATA_DIR, "fichiers")   # binaires des pieces jointes (voir plus bas)
 
 STATUTS = {"todo", "doing", "block", "recette", "done"}
 PRIOS = {"h", "m", "b"}
 LIV_STATUTS = {"attente", "recu", "partiel", "annule"}
-RETOUR_STATUTS = {"a_traiter", "en_cours", "fait", "rejete"}
+RETOUR_STATUTS = {"a_traiter", "en_cours", "fait", "rejete"}   # legacy : retours d'iteration, migres en points
+
+# --- Recette --------------------------------------------------------------- #
+# Une recette = UNE LISTE DE POINTS A VERIFIER. Trois etats, pas un de plus :
+# a verifier, verifie, probleme. Un probleme porte son constat, qui corrige et
+# pour quand — il n'y a pas d'objet « anomalie » separe a maintenir en double.
+# Ce qui compte a cote, c'est le TEMPS passe : il se chronometre tout seul des
+# qu'on statue un point (voir `point_set`).
+POINT_STATUTS = {"a_verifier", "ok", "probleme"}
+
 RISQUE_STATUTS = {"ouvert", "maitrise", "avere", "clos"}   # cote / maitrise / avere / clos
 CDC_STATUTS = {"brouillon", "en_validation", "valide", "obsolete"}   # cycle de vie d'un cahier des charges
 RAPPEL_FREQS = {"jour", "semaine", "mois", "ponctuel"}              # legacy : recurrence des anciennes routines
@@ -272,11 +285,19 @@ def _day_end(store: dict, date_iso: str) -> str:
 
 
 def _close_session(store: dict, s: dict) -> None:
-    # ferme la session ; on borne à la fin de journée de travail (chrono oublié) :
-    # jour antérieur -> fin de journée ; aujourd'hui -> min(maintenant, fin de journée).
-    jf = _day_end(store, s.get("date") or today())
-    now = _hm()
-    s["fin"] = jf if (s.get("date") != today() or now > jf) else now
+    """Ferme la session.
+
+    Un arret EXPLICITE enregistre l'heure reelle, meme au-dela de la fin de
+    journee reglee : on travaille parfois plus tard, et tronquer effacerait du
+    travail fait. La fin de journee n'est un filet que pour un chrono OUBLIE un
+    jour passe — et meme la, jamais avant l'heure de debut.
+    """
+    if s.get("date") != today():                    # chrono d'un jour passe : filet
+        jf = _day_end(store, s.get("date") or today())
+        s["fin"] = max(jf, s.get("debut") or jf)
+    else:
+        now = _hm()
+        s["fin"] = max(now, s.get("debut") or now)
 
 
 def _clock_close_all(store: dict) -> None:
@@ -303,7 +324,7 @@ def _clock_start(store: dict, kind: str, label: str, **refs) -> dict:
             "debut": now.strftime("%H:%M"), "fin": None, "kind": kind, "label": label,
             "chantier_id": refs.get("chantier_id"), "tache_id": refs.get("tache_id"),
             "action_id": refs.get("action_id"), "iteration_id": refs.get("iteration_id"),
-            "theme_id": refs.get("theme_id")}
+            "point_id": refs.get("point_id"), "theme_id": refs.get("theme_id")}
     log = store.setdefault("timelog", [])
     log.append(sess)
     if len(log) > 5000:
@@ -317,6 +338,8 @@ def _clock_start(store: dict, kind: str, label: str, **refs) -> dict:
 # --------------------------------------------------------------------------- #
 CDC_TEMPLATE = [
     ("Objet", "But de ce cahier des charges et du besoin couvert."),
+    ("Documents applicables et de référence",
+     "Référence, indice et emplacement de chaque document cité ou opposable."),
     ("Contexte et enjeux", ""),
     ("Périmètre", "Ce qui est inclus — et ce qui est explicitement exclu."),
     ("Besoins et exigences", ""),
@@ -340,6 +363,13 @@ def _next_indice(cur: str) -> str:
     return "A" + "".join(chars)
 
 
+def _cle_titre(titre: str) -> str:
+    """Titre reduit a l'essentiel (minuscules, sans accent ni ponctuation), pour
+    recoller une section revenue de Word meme si la casse ou un accent a bouge."""
+    t = unicodedata.normalize("NFKD", titre or "").encode("ascii", "ignore").decode()
+    return "".join(c for c in t.lower() if c.isalnum())
+
+
 def _new_cdc(ch: dict) -> dict:
     return {
         "reference": "", "titre": ch.get("titre", ""), "statut": "brouillon",
@@ -350,6 +380,35 @@ def _new_cdc(ch: dict) -> dict:
         "revisions": [{"id": _uid("rev_"), "indice": "A", "date": today(),
                        "auteur": "", "objet": "Création du document", "snapshot": None}],
     }
+
+
+# --------------------------------------------------------------------------- #
+# Recette — la liste des points a verifier avant de considerer un chantier livre.
+#
+# Volontairement pauvre : pas de campagnes, pas d'anomalies separees, pas de
+# proces-verbal. Un point porte tout ce qu'il faut savoir quand il coince
+# (constat, qui corrige, pour quand), et rien de plus.
+# --------------------------------------------------------------------------- #
+def _new_recette() -> dict:
+    return {"points": []}
+
+
+def _new_point(titre: str) -> dict:
+    return {"id": _uid("pt_"), "titre": titre, "statut": "a_verifier",
+            "constat": "", "qui": "", "echeance": None,
+            "cree_le": today(), "debut": None, "verifie_le": None}
+
+
+def _recette_stats(ch: dict) -> dict:
+    """Combien de points verifies, combien coincent."""
+    pts = (ch.get("recette") or {}).get("points", [])
+    par = {"a_verifier": 0, "ok": 0, "probleme": 0}
+    for p in pts:
+        par[p.get("statut", "a_verifier")] = par.get(p.get("statut", "a_verifier"), 0) + 1
+    return {"total": len(pts), **par,
+            "pct": round(par["ok"] / len(pts) * 100) if pts else 0,
+            # « fini » = tout verifie, rien en probleme. C'est ce qui remplace le PV.
+            "fini": bool(pts) and par["ok"] == len(pts)}
 
 
 # --------------------------------------------------------------------------- #
@@ -449,6 +508,7 @@ JOURNAL_SKIP = {"set_settings", "cdc_section_update", "cdc_section_move",
                 "update_subtask", "apply_template",
                 "rapport_update", "rapport_point_update",       # rédaction du rapport hebdo :
                 "rapport_point_add", "rapport_point_remove",    # bruit d'édition, pas une action
+                "rapport_hc_remove", "rapport_hc_reset",
                 "rapport_retard_update"}
 # (add/toggle/remove_subtask SONT journalisés : traçabilité des étapes voulue par l'utilisateur)
 JOURNAL_MAX = 3000                # garde les N dernières lignes
@@ -518,8 +578,13 @@ def _sess_min(store: dict, s: dict) -> int:
     d = s.get("date") or ""
     fin = s.get("fin")
     if not fin:
-        de = _day_end(store, d)
-        fin = de if d < today() else min(_hm(), de)
+        # un chrono en cours AUJOURD'HUI court jusqu'a maintenant, sans plafond :
+        # demarre a 18:24 et il est 18:30, cela fait 6 min, pas 23 h.
+        if d < today():
+            de = _day_end(store, d)                 # jour passe : filet, jamais avant le debut
+            fin = max(de, s.get("debut") or de)
+        else:
+            fin = _hm()
     deb = s.get("debut") or "00:00"
     m = _hm_min(fin) - _hm_min(deb)
     if m < 0:
@@ -570,7 +635,7 @@ def _rapport_auto_ctx(c: dict) -> dict:
 
 
 def _rapport_auto_vide(c: dict | None) -> dict:
-    base = {"taches": [], "notes": [], "retours": [], "relances": 0,
+    base = {"taches": [], "notes": [], "recette": [], "relances": 0,
             "temps_min": 0, "actions": 0}
     if c:
         base.update(_rapport_auto_ctx(c))
@@ -585,8 +650,8 @@ def _rapport_facts(store: dict, debut: str, fin: str) -> dict:
 
     def _pt(cid):
         if cid not in pts:
-            pts[cid] = {"taches": [], "notes": [], "retours": [], "relances": 0,
-                        "temps_min": 0, "actions": 0}
+            pts[cid] = {"taches": [], "notes": [], "recette": [],
+                        "relances": 0, "temps_min": 0, "actions": 0}
         return pts[cid]
 
     for c in store.get("chantiers", []):
@@ -598,15 +663,23 @@ def _rapport_facts(store: dict, debut: str, fin: str) -> dict:
                                            "jalon": bool(t.get("is_milestone"))})
         for n in _chantier_notes(store, cid):   # notes posées au fil de la semaine -> remontent seules
             if n.get("date") and debut <= n["date"] <= fin:
-                _pt(cid)["notes"].append({"d": n["date"], "t": n.get("corps", "")})
+                # une note n'est PAS une tâche : elle garde son type, son titre et son
+                # heure pour être restituée comme un compte rendu, pas comme une ligne faite.
+                # `id` = la note d'origine, pour pouvoir la retirer durablement du rapport.
+                _pt(cid)["notes"].append({"id": n.get("id"), "d": n["date"], "h": n.get("heure", ""),
+                                          "type": n.get("type", "note"),
+                                          "titre": n.get("titre", ""),
+                                          "t": n.get("corps", "")})
         for l in c.get("livrables", []):
             if l.get("derniere") and debut <= l["derniere"] <= fin:
                 _pt(cid)["relances"] += 1
-        for it in c.get("iterations", []):
-            for r in it.get("retours", []):
-                if r.get("date") and debut <= r["date"] <= fin:
-                    _pt(cid)["retours"].append({"quoi": r.get("quoi", ""),
-                                                "statut": r.get("statut", "")})
+        for pt in (c.get("recette") or {}).get("points", []):
+            # points verifies dans la semaine, et problemes encore ouverts
+            if pt.get("statut") == "ok" and pt.get("verifie_le")                and debut <= pt["verifie_le"] <= fin:
+                _pt(cid)["recette"].append({"quoi": pt.get("titre", ""), "statut": "ok"})
+            elif pt.get("statut") == "probleme" and pt.get("cree_le")                     and debut <= pt["cree_le"] <= fin:
+                _pt(cid)["recette"].append({"quoi": pt.get("titre", ""), "statut": "probleme",
+                                            "qui": pt.get("qui", "")})
     actions = 0
     for j in store.get("journal", []):
         jd = j.get("date")
@@ -638,7 +711,10 @@ def _rapport_facts(store: dict, debut: str, fin: str) -> dict:
                 hx["temps_min"] += m
                 if sd not in hx["jours"]:
                     hx["jours"].append(sd)
-    hors_chantier = sorted(hors.values(), key=lambda x: -x["temps_min"])[:12]
+    # Une plage a 0 min n'est pas du temps : elle encombrerait la carte « temps hors
+    # chantier » (l'action, elle, figure de toute facon dans les actions/routines).
+    hors_chantier = sorted((x for x in hors.values() if x["temps_min"] > 0),
+                           key=lambda x: -x["temps_min"])[:12]
     # Actions hors chantier faites dans la semaine + tenue des routines : la part
     # du travail que le planning des chantiers ne voit pas.
     actions_faites, routines_tenue = [], []
@@ -648,15 +724,18 @@ def _rapport_facts(store: dict, debut: str, fin: str) -> dict:
             faits = [o for o in dus if o.get("statut") == "fait"]
             rates = [o for o in dus if o.get("statut") == "rate"]
             if dus:
-                routines_tenue.append({"label": a.get("label", ""), "theme_id": a.get("theme_id"),
+                routines_tenue.append({"id": a.get("id"), "label": a.get("label", ""),
+                                       "theme_id": a.get("theme_id"),
                                        "faits": len(faits), "rates": len(rates), "total": len(dus)})
         elif a.get("done") and a.get("done_date") and debut <= a["done_date"] <= fin:
-            actions_faites.append({"label": a.get("label", ""), "date": a["done_date"],
+            actions_faites.append({"id": a.get("id"), "label": a.get("label", ""),
+                                   "date": a["done_date"],
                                    "theme_id": a.get("theme_id"), "chantier_id": a.get("chantier_id")})
     actions_faites.sort(key=lambda x: x["date"])
     routines_tenue.sort(key=lambda x: (x["faits"] / x["total"]) if x["total"] else 0)
     # Notes de la semaine sans chantier : matière brute pour la synthèse et le REX.
-    notes_libres = [{"date": n.get("date"), "heure": n.get("heure"), "type": n.get("type"),
+    notes_libres = [{"id": n.get("id"),
+                     "date": n.get("date"), "heure": n.get("heure"), "type": n.get("type"),
                      "titre": n.get("titre", ""), "corps": n.get("corps", ""),
                      "theme_id": n.get("theme_id")}
                     for n in store.get("notes", [])
@@ -666,7 +745,8 @@ def _rapport_facts(store: dict, debut: str, fin: str) -> dict:
     # relance, retour). De simples éditions de fiche (journal seul) ne créent
     # pas de carte « aucun fait détecté » — l'ajout manuel reste possible.
     pts = {cid: p for cid, p in pts.items()
-           if p["taches"] or p["notes"] or p["retours"] or p["relances"] or p["temps_min"]}
+           if p["taches"] or p["notes"] or p["recette"]
+           or p["relances"] or p["temps_min"]}
     for cid, p in pts.items():
         p.update(_rapport_auto_ctx(by_id[cid]))
         p["taches"].sort(key=lambda t: t["date"])
@@ -734,8 +814,14 @@ def _rapport_facts(store: dict, debut: str, fin: str) -> dict:
              "taches": sum(len(p["taches"]) for p in pts.values()),
              "jalons": sum(1 for p in pts.values() for t in p["taches"] if t["jalon"]),
              "notes": sum(len(p["notes"]) for p in pts.values()) + len(notes_libres),
+             "notes_ch": sum(len(p["notes"]) for p in pts.values()),
+             "notes_libres": len(notes_libres),
              "temps_min": temps_total, "temps_kinds": temps_kinds,
-             "temps_themes": temps_themes, "actions": actions,
+             # `journal` = mouvements journalises (editions de fiches). A ne pas
+             # confondre avec `actions_faites` : les ACTIONS sont des objets du modele
+             # (taches libres + routines) depuis la refonte, `actions` reste pour les
+             # rapports d'avant cette refonte.
+             "temps_themes": temps_themes, "journal": actions, "actions": actions,
              "actions_faites": len(actions_faites),
              "routines_ok": sum(x["faits"] for x in routines_tenue),
              "routines_dues": sum(x["total"] for x in routines_tenue)}
@@ -765,10 +851,11 @@ def _rapport_facts(store: dict, debut: str, fin: str) -> dict:
                     dep = (date.today() - date.fromisoformat(ech)).days
                 except ValueError:
                     dep = 0
-            ouverts = sum(1 for it in c.get("iterations", []) for x in it.get("retours", [])
-                          if x.get("statut") in ("a_traiter", "en_cours"))
+            st_rec = _recette_stats(c)
             av["recette"].append({"chantier_id": cid, "chantier": titre, "echeance": ech,
-                                  "depasse_j": dep, "retours_ouverts": ouverts})
+                                  "depasse_j": dep, "points": st_rec["total"],
+                                  "verifies": st_rec["ok"], "problemes": st_rec["probleme"],
+                                  "restants": st_rec["a_verifier"]})
         if c.get("statut") in ("doing", "recette"):
             done_ids = {t["id"] for t in c.get("taches", []) if t.get("done")}
             for t in c.get("taches", []):
@@ -809,6 +896,61 @@ def _rapport_facts(store: dict, debut: str, fin: str) -> dict:
             "themes": [{"id": t["id"], "nom": t["nom"], "couleur": t["couleur"],
                         "icone": t.get("icone", "•")} for t in _themes(store)],
             "titres": {cid: by_id[cid].get("titre", "") for cid in pts}}
+
+
+def _hc_cles(famille: str, o: dict) -> list:
+    """Cles sous lesquelles une ligne calculee peut avoir ete ecartee.
+
+    Par identifiant (ce que le client envoie des qu'il en voit un) ET par contenu
+    (les rapports etablis avant l'ajout des ids n'en portent pas). Les deux, sinon
+    une exclusion posee sur d'anciennes donnees serait perdue au premier recalcul —
+    justement celui qui ecrit les ids. Cote client : hcCle dans app.js.
+    """
+    cles = []
+    if o.get("id"):
+        cles.append(f"{famille}:{o['id']}")
+    if famille == "note":
+        cles.append(f"note#{o.get('d') or o.get('date') or ''}|{o.get('titre') or ''}")
+    else:
+        cles.append(f"{famille}#{o.get('label') or ''}")
+    return cles
+
+
+def _hc_total(r: dict) -> int:
+    """Nombre de lignes calculees encore affichees (sert a verifier qu'un retrait retire.)"""
+    return (len(r.get("notes_libres") or []) + len(r.get("actions_faites") or [])
+            + len(r.get("routines_tenue") or []) + len(r.get("hors_chantier") or [])
+            + sum(len((p.get("auto") or {}).get("notes") or []) for p in r.get("points", [])))
+
+
+def _rapport_masque(r: dict) -> None:
+    """Retire du rapport les elements ecartes a la main (`exclus_hc`).
+
+    Les faits sont recalcules a chaque « Actualiser » : sans liste d'exclusion
+    persistante, une ligne retiree reviendrait au recalcul suivant. Cle =
+    "<famille>:<id>" — note / action / routine / temps (temps = le libelle agrege).
+    Les compteurs affiches en KPI suivent le masquage, sinon le rapport se
+    contredirait (« 3 actions » au-dessus d'une liste qui n'en montre que 2).
+    """
+    ex = set(r.get("exclus_hc") or [])
+    if ex:
+        garde = lambda fam, o: not any(c in ex for c in _hc_cles(fam, o))
+        r["notes_libres"] = [n for n in r.get("notes_libres", []) if garde("note", n)]
+        r["actions_faites"] = [a for a in r.get("actions_faites", []) if garde("action", a)]
+        r["routines_tenue"] = [a for a in r.get("routines_tenue", []) if garde("routine", a)]
+        r["hors_chantier"] = [x for x in r.get("hors_chantier", []) if garde("temps", x)]
+        for p in r.get("points", []):
+            auto = p.get("auto") or {}
+            auto["notes"] = [n for n in auto.get("notes", []) if garde("note", n)]
+    st = r.get("stats")
+    if not isinstance(st, dict):
+        return
+    st["actions_faites"] = len(r.get("actions_faites", []))
+    st["routines_ok"] = sum(x.get("faits", 0) for x in r.get("routines_tenue", []))
+    st["routines_dues"] = sum(x.get("total", 0) for x in r.get("routines_tenue", []))
+    st["notes_libres"] = len(r.get("notes_libres", []))
+    st["notes_ch"] = sum(len((p.get("auto") or {}).get("notes", [])) for p in r.get("points", []))
+    st["notes"] = st["notes_ch"] + st["notes_libres"]
 
 
 def _rapport(store: dict, rid: str) -> dict:
@@ -991,6 +1133,79 @@ def _note(store: dict, nid: str) -> dict:
     return n
 
 
+# --------------------------------------------------------------------------- #
+# Pieces jointes — fiche dans le store, BINAIRE SUR DISQUE.
+#
+# Le contenu du fichier n'entre PAS dans store.json : un scan de 3 Mio y
+# ferait 4 Mio de base64, reecrits en entier a CHAQUE clic de l'appli. Le
+# store ne garde donc qu'une fiche (nom d'origine, taille, type, note de
+# rattachement) et le binaire vit dans data/fichiers/<id><ext>.
+#
+# Le nom d'origine ne sert JAMAIS a fabriquer un chemin : le fichier est
+# nomme par son id, et le nom d'origine n'est que reaffiche et renvoye au
+# telechargement. Un nom piege (« ..\..\truc », « C:\... ») est donc sans effet.
+#
+# `note_id = None` = piece deposee mais pas encore rattachee : c'est le
+# brouillon de piece jointe, affiche dans le bloc de saisie tant que la note
+# n'est pas enregistree. Le serveur fait foi — rien a garder cote navigateur.
+# --------------------------------------------------------------------------- #
+FICHIER_MAX = 10 * 1024 * 1024                  # 10 Mio par piece : au-dela ce n'est plus une note
+FICHIER_EXT_MIME = {
+    ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+    ".bmp": "image/bmp", ".svg": "image/svg+xml",
+    ".txt": "text/plain; charset=utf-8", ".csv": "text/csv; charset=utf-8",
+    ".md": "text/plain; charset=utf-8", ".log": "text/plain; charset=utf-8",
+    ".doc": "application/msword", ".xls": "application/vnd.ms-excel",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".msg": "application/vnd.ms-outlook", ".eml": "message/rfc822",
+    ".zip": "application/zip", ".7z": "application/x-7z-compressed",
+    ".dwg": "image/vnd.dwg", ".dxf": "image/vnd.dxf",
+}
+# Ouverts dans l'onglet (apercu direct). Tout le reste part en telechargement.
+# Le .svg en est volontairement exclu : c'est du XML qui peut porter du script.
+FICHIER_INLINE = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".txt", ".md", ".log"}
+
+
+def _fichiers(store: dict) -> list:
+    return store.setdefault("fichiers", [])
+
+
+def _fichier(store: dict, fid: str) -> dict:
+    f = next((x for x in _fichiers(store) if x.get("id") == fid), None)
+    if f is None:
+        raise ValueError(f"Document introuvable: {fid}")
+    return f
+
+
+def _ext_sure(nom: str) -> str:
+    """Extension d'origine ramenee a [a-z0-9], 8 caracteres. Jamais un chemin."""
+    ext = "." + re.sub(r"[^a-z0-9]", "", os.path.splitext(nom or "")[1].lower())[:8]
+    return ext if len(ext) > 1 else ""
+
+
+def _nom_sur(nom: str) -> str:
+    """Nom AFFICHE : on retire toute composante de chemin et les caracteres de controle."""
+    nom = re.sub(r"[\x00-\x1f]", "", (nom or "")).replace("\\", "/").split("/")[-1].strip()
+    return nom[:180] or "document"
+
+
+def fichier_path(f: dict) -> str:
+    """Emplacement du binaire. Construit a partir de l'id, jamais du nom."""
+    return os.path.join(FICHIERS_DIR, f["id"] + (f.get("ext") or ""))
+
+
+def _fichier_unlink(f: dict) -> None:
+    """Efface le binaire. Un echec (fichier ouvert ailleurs, droits) ne doit pas
+    empecher de retirer la fiche : le registre fait foi."""
+    try:
+        os.remove(fichier_path(f))
+    except OSError:
+        pass
+
+
 def _migrate_notes(store: dict) -> None:
     """Les entrees `histo` des chantiers deviennent des notes rattachees a leur chantier."""
     if store.get("notes") is not None:
@@ -1007,6 +1222,59 @@ def _migrate_notes(store: dict) -> None:
             })
         c.pop("histo", None)
     store["notes"].sort(key=lambda n: (n.get("date") or "", n.get("heure") or ""), reverse=True)
+
+
+def _migrate_recette(store: dict) -> None:
+    """Tout l'historique de recette devient une simple liste de POINTS A VERIFIER.
+
+    Deux sources, idempotentes l'une comme l'autre :
+    - les `retours` d'iteration (modele d'origine) : un retour non solde devient
+      un point en probleme, un retour solde un point verifie ;
+    - les `cas` / `anomalies` d'un cahier de recette detaille (modele intermediaire).
+    Une fois converties, ces listes sont videes : le passage suivant ne fait rien.
+    """
+    for c in store.get("chantiers", []):
+        rec = c.get("recette")
+        vieux = [r for it in (c.get("iterations") or []) for r in (it.get("retours") or [])]
+        cas = (rec or {}).get("cas") or []
+        anos = (rec or {}).get("anomalies") or []
+        if not (vieux or cas or anos):
+            if rec is not None:              # cahier deja converti : on jette les coquilles vides
+                for k in ("cas", "anomalies", "pv", "reference", "responsable",
+                          "environnement", "perimetre", "date_creation", "date_maj"):
+                    rec.pop(k, None)
+            continue
+        rec = rec or _new_recette()
+        c["recette"] = rec
+        pts = rec.setdefault("points", [])
+        for r in vieux:                      # retour d'iteration -> point
+            solde = r.get("statut") in ("fait", "rejete")
+            pts.append({"id": r.get("id") or _uid("pt_"), "titre": r.get("quoi", ""),
+                        "statut": "ok" if solde else "probleme", "constat": "",
+                        "qui": "" if solde else r.get("de", ""),
+                        # un point verifie n'a plus d'echeance : elle n'aurait plus de sens
+                        "echeance": None if solde else r.get("echeance"),
+                        "cree_le": r.get("date") or today(), "debut": None,
+                        "verifie_le": r.get("date") if solde else None})
+        for k in cas:                        # cas de test -> point a verifier
+            pts.append({"id": k.get("id") or _uid("pt_"), "titre": k.get("titre", ""),
+                        "statut": "a_verifier", "constat": "", "qui": "",
+                        "echeance": None, "cree_le": today(), "debut": None,
+                        "verifie_le": None})
+        for a in anos:                       # anomalie -> point (en probleme si non soldee)
+            ouverte = a.get("statut") in ("ouverte", "en_cours", "corrigee", "a_retester")
+            pts.append({"id": a.get("id") or _uid("pt_"), "titre": a.get("titre", ""),
+                        "statut": "probleme" if ouverte else "ok",
+                        "constat": a.get("description", "") if ouverte else "",
+                        "qui": a.get("assigne_a", "") if ouverte else "",
+                        "echeance": a.get("echeance") if ouverte else None,
+                        "cree_le": a.get("ouvert_le") or today(), "debut": None,
+                        "verifie_le": a.get("verifie_le")})
+        for k in ("cas", "anomalies", "pv", "reference", "responsable",
+                  "environnement", "perimetre", "date_creation", "date_maj"):
+            rec.pop(k, None)
+        for it in c.get("iterations", []):
+            it["retours"] = []
 
 
 def _chantier_notes(store: dict, cid: str) -> list:
@@ -1236,11 +1504,11 @@ def _normalize(store: dict) -> dict:
     s.setdefault("pause_debut", "12:00") # pause dejeuner : exclue du temps compte (le chrono continue)
     s.setdefault("pause_fin", "13:00")
     s.setdefault("vendredi_fin", "13:30") # vendredi : journee plus courte, sans pause, pas d'apres-midi
-    jd, jf = s["jour_debut"], s["jour_fin"]
     # --- migrations : themes (depuis les tags), actions (depuis les rappels), notes (depuis histo)
     _migrate_themes(store)
     _migrate_actions(store)
     _migrate_notes(store)
+    _migrate_recette(store)
     for i, th in enumerate(store.setdefault("themes", [])):
         th.setdefault("id", _uid("th_"))
         th.setdefault("nom", "Theme")
@@ -1293,6 +1561,17 @@ def _normalize(store: dict) -> dict:
         n.setdefault("maj_le", None)
         if n["type"] not in NOTE_TYPES:
             n["type"] = "note"
+    ids_notes = {n["id"] for n in store.get("notes", [])}
+    for f in store.setdefault("fichiers", []):  # pieces jointes : fiche seule, binaire sur disque
+        f.setdefault("id", _uid("fi_"))
+        f.setdefault("nom", "document")
+        f.setdefault("ext", _ext_sure(f["nom"]))
+        f.setdefault("taille", 0)
+        f.setdefault("mime", FICHIER_EXT_MIME.get(f.get("ext") or "", "application/octet-stream"))
+        f.setdefault("cree_le", today())
+        f.setdefault("heure", "")
+        if f.setdefault("note_id", None) and f["note_id"] not in ids_notes:
+            f["note_id"] = None                 # note disparue : la piece redevient a rattacher
     for s in store.setdefault("timelog", []):   # sessions de suivi du temps (chrono)
         s.setdefault("id", _uid("tl_"))
         s.setdefault("date", today())
@@ -1302,7 +1581,8 @@ def _normalize(store: dict) -> dict:
         s.setdefault("label", "")
         s.setdefault("chantier_id", None)
         s.setdefault("tache_id", None)
-        s.setdefault("iteration_id", None)      # recette : itération chronométrée (optionnel)
+        s.setdefault("iteration_id", None)      # legacy : ancienne itération de recette
+        s.setdefault("point_id", None)          # point de recette chronométré
         s.setdefault("action_id", None)         # plage chronometree sur une action (ex-rappel_id)
         s["theme_id"] = _theme_id_valide(store, s.get("theme_id"))   # ventile le temps "libre" par theme
         rid = s.pop("rappel_id", None)          # l'action a garde l'id du rappel : le lien tient
@@ -1312,18 +1592,16 @@ def _normalize(store: dict) -> dict:
             s["action_id"] = None               # action supprimee : la plage reste, sans rattachement
         if s["kind"] == "rappel":
             s["kind"] = "action" if s["action_id"] else "libre"
-        de = _day_end(store, s["date"])   # fin de journée selon le jour (vendredi plus court)
-        # auto-réparation : un chrono oublié un jour passé est fermé à la fin de journée
+        # Auto-reparation : un chrono oublie un jour passe est ferme a la fin de
+        # journee — mais jamais AVANT son debut (une seance de 18:24 ne peut pas
+        # finir a 17:51). Une plage deja enregistree n'est en revanche jamais
+        # tronquee : le travail reel prime sur l'heure de fin de journee reglee,
+        # sinon travailler apres 17:51 effacerait la seance a la relecture.
         if s["fin"] is None and s["date"] < today():
-            s["fin"] = de
-        # borne la plage à la journée de travail (comparaison lexicale d'heures "HH:MM" zéro-paddées)
-        if s["debut"] and s["debut"] < jd:
-            s["debut"] = jd
-        if s["fin"] is not None:
-            if s["fin"] > de:
-                s["fin"] = de
-            if s["fin"] < s["debut"]:
-                s["fin"] = s["debut"]
+            de = _day_end(store, s["date"])
+            s["fin"] = max(de, s["debut"] or de)
+        if s["fin"] is not None and s["debut"] and s["fin"] < s["debut"]:
+            s["fin"] = s["debut"]                   # garde-fou : jamais de duree negative
     for a in store.setdefault("absences", []):  # jours non travailles : conges, RTT, feries
         a.setdefault("id", _uid("ab_"))
         a.setdefault("debut", today())
@@ -1366,6 +1644,10 @@ def _normalize(store: dict) -> dict:
         rg.setdefault("negatif", "")
         rg.setdefault("actions", "")
         r.setdefault("exclus", [])               # chantiers retirés à la main (le recalcul les ignore)
+        # lignes calculées retirées à la main ; on jette les clés d'un client qui
+        # n'avait pas d'identifiant sous la main : elles ne masquaient rien.
+        r["exclus_hc"] = [c for c in (r.get("exclus_hc") or [])
+                          if isinstance(c, str) and not c.endswith((":undefined", ":None", ":null", ":"))]
         r.setdefault("stats", {})
         r.setdefault("avenir", {})
         for p in r.setdefault("points", []):
@@ -1438,6 +1720,20 @@ def _normalize(store: dict) -> dict:
                 rev.setdefault("auteur", "")
                 rev.setdefault("objet", "")
                 rev.setdefault("snapshot", None)
+        rec = c.setdefault("recette", None)             # recette (0..1 par chantier)
+        if rec is not None:
+            for p in rec.setdefault("points", []):
+                p.setdefault("id", _uid("pt_"))
+                p.setdefault("titre", "")
+                p.setdefault("statut", "a_verifier")     # a_verifier | ok | probleme
+                p.setdefault("constat", "")              # rempli seulement quand ca coince
+                p.setdefault("qui", "")                  # qui corrige
+                p.setdefault("echeance", None)
+                p.setdefault("cree_le", today())
+                p.setdefault("debut", None)               # verification demarree (comme une tache)
+                p.setdefault("verifie_le", None)
+                if p["statut"] not in POINT_STATUTS:
+                    p["statut"] = "a_verifier"
         for t in c.setdefault("taches", []):
             t.setdefault("done", False)
             t.setdefault("done_date", None)
@@ -1467,20 +1763,13 @@ def _normalize(store: dict) -> dict:
         for p in c["parties"]:
             p.setdefault("id", _uid("p_"))
             p.setdefault("contact_id", None)
-        for it in c.setdefault("iterations", []):
-            it.setdefault("id", _uid("it_"))
-            it.setdefault("num", 1)
-            it.setdefault("ouverte", True)
+        for it in c.setdefault("iterations", []):        # legacy : anciennes iterations de recette,
+            it.setdefault("id", _uid("it_"))             # conservees pour ne pas casser le temps
+            it.setdefault("num", 1)                      # chronometre qui les reference
+            it.setdefault("ouverte", False)
             it.setdefault("date", None)
             it.setdefault("note", "")
-            for r in it.setdefault("retours", []):
-                r.setdefault("id", _uid("r_"))
-                r.setdefault("de", "")
-                r.setdefault("quoi", "")
-                r.setdefault("statut", "a_traiter")
-                r.setdefault("priorite", "m")
-                r.setdefault("date", None)
-                r.setdefault("echeance", None)
+            it.setdefault("retours", [])
     _migrate_people(store)     # relie livrables/parties a l'annuaire (idempotent)
     return store
 
@@ -1534,16 +1823,66 @@ def _unfinished_preds(ch: dict, t: dict) -> list:
     return [by[p]["label"] for p in t.get("preds", []) if p in by and not by[p]["done"]]
 
 
-def _iteration(ch: dict, iid: str) -> dict:
-    return _sub(ch.setdefault("iterations", []), iid, "Iteration")
-
-
 def _cdc(store: dict, cid: str):
     ch = _chantier(store, cid)
     cdc = ch.get("cdc")
     if not cdc:
         raise ValueError("Ce chantier n'a pas de cahier des charges.")
     return ch, cdc
+
+
+def _rec(store: dict, cid: str):
+    ch = _chantier(store, cid)
+    rec = ch.get("recette")
+    if not rec:
+        raise ValueError("Ce chantier n'a pas de liste de recette.")
+    return ch, rec
+
+
+
+# --------------------------------------------------------------------------- #
+# Le statut d'un chantier SUIT le travail : on ne le pose plus a la main.
+# --------------------------------------------------------------------------- #
+_AUTO_LBL = {"recette": "passe En recette", "done": "passe Termine",
+             "doing": "repasse En cours"}
+
+
+def _auto_statut(store: dict, ch: dict) -> str:
+    """Recale le statut d'un chantier sur l'etat reel de son travail.
+
+    Regle, dans cet ordre :
+      1. recette ouverte (liste presente, pas entierement verifiee) -> « recette » ;
+      2. sinon, toutes les taches faites -> « done » ;
+      3. sinon, un chantier qui etait en recette ou termine repart « doing »
+         (tache rouverte, point rouvert, tache ajoutee).
+    Un chantier en pause n'est pas touche : la pause est une decision, pas un
+    etat calcule. Un chantier sans tache ne retombe jamais de done/recette : il
+    n'y a pas de travail a mesurer. Le plafond de WIP ne s'applique pas ici —
+    c'est une consequence du geste de l'utilisateur, pas un choix a arbitrer.
+    Retourne le suffixe a coller au message de l'op, ou "".
+    """
+    if ch.get("hold"):
+        return ""
+    prev = ch.get("statut", "todo")
+    taches = ch.get("taches", [])
+    # « ouverte » au sens de _recette_stats : une liste existe et n'est pas
+    # entierement verifiee — liste vide comprise (c'est deja le sens de `fini`).
+    if ch.get("recette") is not None and not _recette_stats(ch)["fini"]:
+        new = "recette"
+    elif taches and all(t.get("done") for t in taches):
+        new = "done"
+    elif taches and prev in ("recette", "done"):
+        new = "doing"
+    else:
+        return ""
+    if new == prev:
+        return ""
+    ch["statut"] = new
+    if prev == "recette":       # on quitte la recette : solde un chrono de recette ouvert
+        for s in _clock_active(store):
+            if s.get("chantier_id") == ch["id"] and s.get("kind") == "recette":
+                _close_session(store, s)
+    return f" — « {ch['titre']} » {_AUTO_LBL[new]}"
 
 
 # --------------------------------------------------------------------------- #
@@ -1740,9 +2079,8 @@ def _apply_op(store: dict, op: dict) -> str:
                     f"({', '.join('« ' + c['titre'] + ' »' for c in actifs)}).\n"
                     f"Terminez ou mettez en pause un chantier avant d'en passer un autre En cours.")
         ch["statut"] = op["statut"]
-        if op["statut"] == "recette" and not ch["iterations"]:   # demarre l'iteration 1
-            ch["iterations"].append({"id": _uid("it_"), "num": 1, "ouverte": True,
-                                     "date": today(), "note": "", "retours": []})
+        if op["statut"] == "recette" and not ch.get("recette"):   # ouvre la liste a verifier
+            ch["recette"] = _new_recette()
         elif prev == "recette" and op["statut"] != "recette":     # on quitte la recette : solde un chrono recette ouvert
             for s in _clock_active(store):
                 if s.get("chantier_id") == ch["id"] and s.get("kind") == "recette":
@@ -1796,7 +2134,7 @@ def _apply_op(store: dict, op: dict) -> str:
              "subtasks": []}
         t["preds"] = _clean_preds(ch, op.get("preds"), t["id"])
         ch["taches"].append(t)
-        return f"Tache ajoutee a « {ch['titre']} » : {label}"
+        return f"Tache ajoutee a « {ch['titre']} » : {label}" + _auto_statut(store, ch)
 
     if name == "toggle_tache":
         ch = _chantier(store, op["chantier_id"])
@@ -1817,7 +2155,8 @@ def _apply_op(store: dict, op: dict) -> str:
         elif not new_done:
             t["done_date"] = None                 # ré-ouverte : plus de date de fin
         # déjà fait et on re-confirme "fait" : on NE réécrit PAS done_date (préserve l'historique)
-        return f"Tache « {t['label']} » -> {'faite' if t['done'] else 'a faire'}"
+        return (f"Tache « {t['label']} » -> {'faite' if t['done'] else 'a faire'}"
+                + _auto_statut(store, ch))
 
     if name == "start_tache":
         ch = _chantier(store, op["chantier_id"])
@@ -1885,7 +2224,7 @@ def _apply_op(store: dict, op: dict) -> str:
                 _clock_close_tache(store, t["id"])
             elif not new_done:
                 t["done_date"] = None
-        return f"Tache mise a jour dans « {ch['titre']} »"
+        return f"Tache mise a jour dans « {ch['titre']} »" + _auto_statut(store, ch)
 
     if name == "remove_tache":
         ch = _chantier(store, op["chantier_id"])
@@ -1896,7 +2235,7 @@ def _apply_op(store: dict, op: dict) -> str:
         for l in ch["livrables"]:  # delie les livrables qui pointaient cette tache
             if l.get("tache_id") == op["tache_id"]:
                 l["tache_id"] = None
-        return f"Tache supprimee : {t['label']}"
+        return f"Tache supprimee : {t['label']}" + _auto_statut(store, ch)
 
     # ---- Sous-taches (checklist d'etapes, sans planning propre) ---------- #
     if name == "add_subtask":
@@ -2235,63 +2574,116 @@ def _apply_op(store: dict, op: dict) -> str:
         ch["baseline_edits"] = 0
         return "Reference effacee"
 
-    # ---- Recette / iterations -------------------------------------------- #
-    if name == "add_iteration":
+    # ---- Recette : une liste de points a verifier -------------------------- #
+    if name == "recette_init":
         ch = _chantier(store, op["chantier_id"])
-        for it in ch.setdefault("iterations", []):   # une seule ouverte a la fois
-            it["ouverte"] = False
-        num = max([it["num"] for it in ch["iterations"]], default=0) + 1
-        ch["iterations"].append({"id": _uid("it_"), "num": num, "ouverte": True,
-                                 "date": today(), "note": "", "retours": []})
-        return f"Itération {num} ouverte"
+        if not ch.get("recette"):
+            ch["recette"] = _new_recette()
+        return f"Recette ouverte pour « {ch['titre']} »" + _auto_statut(store, ch)
 
-    if name == "close_iteration":
+    if name == "recette_delete":
         ch = _chantier(store, op["chantier_id"])
-        it = _iteration(ch, op["iteration_id"])
-        it["ouverte"] = False
-        return f"Itération {it['num']} clôturée"
+        ch["recette"] = None
+        return f"Recette supprimée de « {ch['titre']} »" + _auto_statut(store, ch)
 
-    if name == "add_retour":
-        ch = _chantier(store, op["chantier_id"])
-        it = _iteration(ch, op["iteration_id"])
-        quoi = (op.get("quoi") or "").strip()
-        if not quoi:
-            raise ValueError("Description du retour requise.")
-        statut = op.get("statut") or "a_traiter"
-        if statut not in RETOUR_STATUTS:
-            raise ValueError(f"Statut retour invalide: {statut}")
-        prio = op.get("priorite") or "m"
-        if prio not in PRIOS:
-            raise ValueError(f"Priorite invalide: {prio}")
-        it["retours"].append({"id": _uid("r_"), "de": op.get("de") or "", "quoi": quoi,
-                              "statut": statut, "priorite": prio,
-                              "date": op.get("date") or today(), "echeance": op.get("echeance") or None})
-        return f"Retour ajouté (itération {it['num']})"
+    if name == "point_add":
+        ch, rec = _rec(store, op["chantier_id"])
+        titre = (op.get("titre") or "").strip()
+        if not titre:
+            raise ValueError("Intitulé du point à vérifier requis.")
+        rec["points"].append(_new_point(titre))
+        return f"Point ajouté : {titre}" + _auto_statut(store, ch)
 
-    if name == "update_retour":
+    if name == "point_add_lot":
+        # Ajout par lot depuis la liste de points types : on choisit dans une liste
+        # plutot que de rediger — une checklist qu'il faut ecrire ne s'ecrit jamais.
         ch = _chantier(store, op["chantier_id"])
-        it = _iteration(ch, op["iteration_id"])
-        r = _sub(it["retours"], op["retour_id"], "Retour")
-        if op.get("statut"):
-            if op["statut"] not in RETOUR_STATUTS:
-                raise ValueError(f"Statut retour invalide: {op['statut']}")
-            r["statut"] = op["statut"]
-        if op.get("priorite"):
-            if op["priorite"] not in PRIOS:
-                raise ValueError(f"Priorite invalide: {op['priorite']}")
-            r["priorite"] = op["priorite"]
-        for f in ("de", "quoi"):
+        if not ch.get("recette"):
+            ch["recette"] = _new_recette()
+        titres = [str(t).strip() for t in (op.get("titres") or []) if str(t).strip()]
+        if not titres:
+            raise ValueError("Aucun point à ajouter.")
+        deja = {p["titre"].lower() for p in ch["recette"]["points"]}
+        n = 0
+        for t in titres:
+            if t.lower() in deja:          # pas de doublon : on re-coche sans y penser
+                continue
+            ch["recette"]["points"].append(_new_point(t))
+            deja.add(t.lower())
+            n += 1
+        if not n:
+            return "Ces points sont déjà dans la liste."
+        return f"{n} point(s) ajouté(s) à « {ch['titre']} »" + _auto_statut(store, ch)
+
+    if name == "point_start":
+        # Meme geste qu'une tache : demarrer pose le debut reel ET lance le chrono
+        # sur CE point. Le temps de recette se lit donc ligne par ligne.
+        ch, rec = _rec(store, op["chantier_id"])
+        pt = _sub(rec["points"], op["point_id"], "Point")
+        pt["debut"] = pt.get("debut") or today()
+        if pt["statut"] == "ok":
+            pt["statut"], pt["verifie_le"] = "a_verifier", None
+        _clock_start(store, "recette", f"Recette — {pt['titre']}",
+                     chantier_id=ch["id"], point_id=pt["id"])
+        return f"Vérification démarrée : {pt['titre'][:40]}" + _auto_statut(store, ch)
+
+    if name == "point_set":
+        # Statuer un point. Le reste suit tout seul : date de verification, arret
+        # du chrono de CE point, et fin de recette quand tout est verifie.
+        ch, rec = _rec(store, op["chantier_id"])
+        pt = _sub(rec["points"], op["point_id"], "Point")
+        statut = op.get("statut") or "a_verifier"
+        if statut not in POINT_STATUTS:
+            raise ValueError(f"Statut de point invalide: {statut}")
+        pt["statut"] = statut
+        pt["verifie_le"] = today() if statut == "ok" else None
+        if statut == "ok":                 # resolu : le detail du probleme n'a plus d'objet
+            pt["constat"], pt["qui"], pt["echeance"] = "", "", None
+            pt["debut"] = pt.get("debut") or today()
+        elif statut == "a_verifier":       # remise a zero complete : on repart de rien
+            pt["debut"] = None
+            pt["constat"], pt["qui"], pt["echeance"] = "", "", None
+        for f in ("constat", "qui"):
             if f in op and op[f] is not None:
-                r[f] = op[f]
+                pt[f] = str(op[f]).strip()
         if "echeance" in op:
-            r["echeance"] = op["echeance"] or None
-        return "Retour mis à jour"
+            pt["echeance"] = op["echeance"] or None
+        # un point statue n'est plus en cours de verification : on solde son chrono
+        if statut in ("ok", "a_verifier"):
+            for sx in _clock_active(store):
+                if sx.get("point_id") == pt["id"]:
+                    _close_session(store, sx)
+        st = _recette_stats(ch)
+        if st["fini"]:                     # tout est verifie : on arrete de compter la recette
+            for sx in _clock_active(store):   # ...et SEULEMENT la recette : un chrono de
+                if sx.get("kind") == "recette" and sx.get("chantier_id") == ch["id"]:
+                    _close_session(store, sx)  # tache en cours sur ce chantier n'est pas coupe
+            return (f"Recette terminée — {st['total']}/{st['total']} points vérifiés"
+                    + _auto_statut(store, ch))
+        lbl = {"ok": "vérifié", "probleme": "en problème", "a_verifier": "remis à vérifier"}[statut]
+        return (f"« {pt['titre'][:40]} » {lbl} ({st['ok']}/{st['total']})"
+                + _auto_statut(store, ch))
 
-    if name == "remove_retour":
-        ch = _chantier(store, op["chantier_id"])
-        it = _iteration(ch, op["iteration_id"])
-        it["retours"] = [x for x in it["retours"] if x["id"] != op["retour_id"]]
-        return "Retour supprimé"
+    if name == "point_update":
+        ch, rec = _rec(store, op["chantier_id"])
+        pt = _sub(rec["points"], op["point_id"], "Point")
+        for f in ("titre", "constat", "qui"):
+            if f in op and op[f] is not None:
+                pt[f] = str(op[f]).strip()
+        if "echeance" in op:
+            pt["echeance"] = op["echeance"] or None
+        return "Point mis à jour"
+
+    if name == "point_remove":
+        ch, rec = _rec(store, op["chantier_id"])
+        pt = _sub(rec["points"], op["point_id"], "Point")
+        rec["points"] = [x for x in rec["points"] if x["id"] != op["point_id"]]
+        for sx in store.get("timelog", []):   # le temps passe reste, sans rattachement
+            if sx.get("point_id") == op["point_id"]:
+                if sx.get("fin") is None:
+                    _close_session(store, sx)
+                sx["point_id"] = None
+        return f"Point supprimé : {pt['titre'][:40]}" + _auto_statut(store, ch)
 
     # ---- Risques --------------------------------------------------------- #
     if name == "add_risque":
@@ -2448,6 +2840,77 @@ def _apply_op(store: dict, op: dict) -> str:
         cdc["revisions"].append({"id": _uid("rev_"), "indice": nxt, "date": today(),
                                  "auteur": auteur, "objet": objet, "snapshot": None})
         return f"Révision {nxt} émise — « {ch['titre']} » (validation réinitialisée)"
+
+    if name == "cdc_docx_import":
+        # Retour du cahier des charges relu depuis Word. Un import qui change
+        # quelque chose EST une revision : on fige l'indice courant et on passe
+        # au suivant, sinon l'historique du document mentirait.
+        ch, cdc = _cdc(store, op["chantier_id"])
+        recues = op.get("sections")
+        if not isinstance(recues, list) or not recues:
+            raise ValueError("Aucune section lue dans le document Word.")
+
+        avant = {s["id"]: s for s in cdc.get("sections", [])}
+        par_titre = {}
+        for s in cdc.get("sections", []):
+            par_titre.setdefault(_cle_titre(s.get("titre")), s)
+
+        nouvelles, modifiees, ajoutees = [], [], []
+        for i, r in enumerate(recues):
+            titre = (r.get("titre") or "Section").strip() or "Section"
+            corps = r.get("corps") or ""
+            ref = avant.get(r.get("id")) or par_titre.get(_cle_titre(titre))
+            if ref is None and i < len(cdc.get("sections", [])):
+                cand = cdc["sections"][i]           # dernier recours : la position
+                ref = cand if _cle_titre(cand.get("titre")) == _cle_titre(titre) else None
+            if ref is None:
+                nouvelles.append({"id": _uid("sec_"), "titre": titre, "corps": corps})
+                ajoutees.append(titre)
+            else:
+                if (ref.get("titre") or "") != titre or (ref.get("corps") or "") != corps:
+                    modifiees.append(titre)
+                nouvelles.append({"id": ref["id"], "titre": titre, "corps": corps})
+
+        gardes = {s["id"] for s in nouvelles}
+        supprimees = [s.get("titre") or "" for s in cdc.get("sections", [])
+                      if s["id"] not in gardes]
+
+        if not (modifiees or ajoutees or supprimees):
+            return "Document identique : aucune modification à enregistrer."
+
+        cur = cdc["indice"]
+        rec = next((r for r in cdc["revisions"] if r["indice"] == cur), None)
+        if rec is not None and rec.get("snapshot") is None:
+            rec["snapshot"] = {
+                "titre": cdc.get("titre", ""), "reference": cdc.get("reference", ""),
+                "statut": cdc.get("statut"), "valide_par": cdc.get("valide_par", ""),
+                "date_validation": cdc.get("date_validation"),
+                "sections": [dict(s) for s in cdc.get("sections", [])],
+            }
+
+        detail = []
+        if modifiees:
+            detail.append(f"{len(modifiees)} modifiée(s) : " + ", ".join(modifiees[:4])
+                          + ("…" if len(modifiees) > 4 else ""))
+        if ajoutees:
+            detail.append(f"{len(ajoutees)} ajoutée(s) : " + ", ".join(ajoutees[:3]))
+        if supprimees:
+            detail.append(f"{len(supprimees)} supprimée(s) : " + ", ".join(supprimees[:3]))
+        objet = "Import Word — " + " ; ".join(detail)
+
+        nxt = _next_indice(cur)
+        cdc["sections"] = nouvelles
+        cdc["indice"] = nxt
+        cdc["statut"] = "brouillon"         # le contenu a bougé : la validation retombe
+        cdc["valide_par"] = ""
+        cdc["date_validation"] = None
+        cdc["date_maj"] = today()
+        cdc["revisions"].append({
+            "id": _uid("rev_"), "indice": nxt, "date": today(),
+            "auteur": (op.get("auteur") or cdc.get("redacteur") or "").strip(),
+            "objet": objet, "snapshot": None})
+        return (f"Cahier des charges réimporté — indice {nxt}. "
+                + " ; ".join(detail) + ". La validation est réinitialisée.")
 
     # ---- Actions : taches libres ET routines dans une seule liste --------- #
     if name == "action_add":
@@ -2607,7 +3070,16 @@ def _apply_op(store: dict, op: dict) -> str:
             "epingle": False, "cree_le": today(), "maj_le": None,
         }
         _notes(store).insert(0, n)
-        return "Note enregistree" + (f" : {titre}" if titre else "")
+        # Pieces deposees avant l'enregistrement : elles attendaient (note_id vide).
+        joints = 0
+        for fid in (op.get("piece_ids") or []):
+            f = next((x for x in _fichiers(store) if x.get("id") == fid), None)
+            if f is not None and not f.get("note_id"):
+                f["note_id"] = n["id"]
+                joints += 1
+        return ("Note enregistree" + (f" : {titre}" if titre else "")
+                + (f" ({joints} document{'s' if joints > 1 else ''} joint{'s' if joints > 1 else ''})"
+                   if joints else ""))
 
     if name == "note_update":
         n = _note(store, op["id"])
@@ -2643,7 +3115,11 @@ def _apply_op(store: dict, op: dict) -> str:
     if name == "note_remove":
         n = _note(store, op["id"])
         store["notes"] = [x for x in _notes(store) if x["id"] != op["id"]]
-        return "Note supprimee"
+        joints = [f for f in _fichiers(store) if f.get("note_id") == n["id"]]
+        for f in joints:                        # les pieces suivent la note : pas de binaire orphelin
+            _fichier_unlink(f)
+        store["fichiers"] = [f for f in _fichiers(store) if f.get("note_id") != n["id"]]
+        return "Note supprimee" + (f" ({len(joints)} document(s) joint(s))" if joints else "")
 
     if name == "note_to_action":
         # Transforme une ligne d'une note en action : le flux compte-rendu -> decisions.
@@ -2664,6 +3140,45 @@ def _apply_op(store: dict, op: dict) -> str:
         }
         _actions(store).append(a)
         return f"Action creee depuis la note : {label}"
+
+    # ---- Pieces jointes --------------------------------------------------- #
+    if name == "fichier_add":
+        nom = _nom_sur(op.get("nom"))
+        try:
+            data = base64.b64decode((op.get("b64") or "").split(",")[-1])
+        except Exception:
+            raise ValueError(f"Document illisible : {nom}")
+        if not data:
+            raise ValueError(f"Document vide : {nom}")
+        if len(data) > FICHIER_MAX:
+            raise ValueError(f"« {nom} » pese {len(data) / 1048576:.1f} Mio. "
+                             f"Limite : {FICHIER_MAX // 1048576} Mio par document.")
+        nid = op.get("note_id") or None
+        if nid:
+            _note(store, nid)                   # rattachement verifie AVANT d'ecrire sur le disque
+        ext = _ext_sure(nom)
+        f = {"id": _uid("fi_"), "nom": nom, "ext": ext, "taille": len(data),
+             "mime": FICHIER_EXT_MIME.get(ext, "application/octet-stream"),
+             "note_id": nid, "cree_le": today(), "heure": _hm()}
+        os.makedirs(FICHIERS_DIR, exist_ok=True)
+        with open(fichier_path(f), "wb") as fh:
+            fh.write(data)
+        _fichiers(store).append(f)
+        return f"Document joint : {nom}"
+
+    if name == "fichier_remove":
+        f = _fichier(store, op["id"])
+        store["fichiers"] = [x for x in _fichiers(store) if x["id"] != f["id"]]
+        _fichier_unlink(f)
+        return f"Document retire : {f['nom']}"
+
+    if name == "fichier_attach":
+        f = _fichier(store, op["id"])
+        nid = op.get("note_id") or None
+        if nid:
+            _note(store, nid)
+        f["note_id"] = nid
+        return f"Document rattache : {f['nom']}" if nid else f"Document detache : {f['nom']}"
 
     # ---- Absences (congés, RTT, fériés) ---------------------------------- #
     if name == "add_absence":
@@ -2747,8 +3262,8 @@ def _apply_op(store: dict, op: dict) -> str:
     if name == "clock_start":
         kind = op.get("kind") or "libre"
         label = (op.get("label") or "").strip()
-        refs = {k: op.get(k) for k in ("chantier_id", "tache_id", "action_id", "iteration_id", "theme_id")
-                if op.get(k)}
+        refs = {k: op.get(k) for k in ("chantier_id", "tache_id", "action_id", "iteration_id",
+                                       "point_id", "theme_id") if op.get(k)}
         if not label and kind == "tache" and refs.get("chantier_id") and refs.get("tache_id"):
             ch = _chantier(store, refs["chantier_id"])
             label = _sub(ch["taches"], refs["tache_id"], "Tache")["label"]
@@ -2763,7 +3278,9 @@ def _apply_op(store: dict, op: dict) -> str:
                     refs[k] = a[k]
         if not label and kind == "recette" and refs.get("chantier_id"):
             ch = _chantier(store, refs["chantier_id"])
-            label = f"Recette — {ch['titre']}"
+            pt = next((x for x in (ch.get("recette") or {}).get("points", [])
+                       if x["id"] == refs.get("point_id")), None)
+            label = f"Recette — {pt['titre']}" if pt else f"Recette — {ch['titre']}"
         if not label:
             raise ValueError("Libellé requis pour démarrer le chrono.")
         _clock_start(store, kind, label, **refs)
@@ -2814,6 +3331,7 @@ def _apply_op(store: dict, op: dict) -> str:
             "kind": op.get("kind") or "libre", "label": label,
             "chantier_id": op.get("chantier_id"), "tache_id": op.get("tache_id"),
             "action_id": op.get("action_id"), "iteration_id": op.get("iteration_id"),
+            "point_id": op.get("point_id"),
             "theme_id": _theme_id_valide(store, op.get("theme_id")),
         })
         return f"Plage ajoutée : {label}"
@@ -2869,6 +3387,12 @@ def _apply_op(store: dict, op: dict) -> str:
         r["stats"], r["avenir"] = facts["stats"], facts["avenir"]
         r["termines"], r["gantt"] = facts["termines"], facts["gantt"]
         r["hors_chantier"] = facts["hors_chantier"]
+        # Le travail qui n'appartient a aucun chantier : il etait calcule mais jamais
+        # range dans le rapport — donc compte dans les KPI et invisible dans le bilan.
+        r["actions_faites"] = facts["actions_faites"]
+        r["routines_tenue"] = facts["routines_tenue"]
+        r["notes_libres"] = facts["notes_libres"]
+        _rapport_masque(r)      # ce que l'utilisateur a ecarte le reste apres recalcul
         # Retards : la liste est recalculée, les justifications déjà saisies survivent.
         justifs = {x.get("chantier_id"): x.get("justification", "")
                    for x in r.get("retards", []) if (x.get("justification") or "").strip()}
@@ -2935,6 +3459,57 @@ def _apply_op(store: dict, op: dict) -> str:
             r["exclus"].append(cid)
         r["maj_le"] = datetime.now().isoformat(timespec="seconds")
         return "Chantier retiré du rapport"
+
+    if name == "rapport_hc_remove":
+        # Retire une ligne calculee du rapport (note, action, routine, temps hors
+        # chantier). L'objet lui-meme n'est PAS touche : seul son affichage au
+        # rapport est ecarte, et l'exclusion survit aux « Actualiser ».
+        r = _rapport(store, op["rapport_id"])
+        if r.get("statut") == "finalise":
+            raise ValueError("Rapport finalisé : rouvre-le pour le modifier.")
+        cle = (op.get("cle") or "").strip()
+        fam = cle.split(":", 1)[0].split("#", 1)[0]
+        if not cle or fam == cle:
+            raise ValueError("Element a retirer non identifie.")
+        if fam not in ("note", "action", "routine", "temps"):
+            raise ValueError(f"Famille inconnue: {fam}")
+        r.setdefault("exclus_hc", [])
+        if cle in r["exclus_hc"]:
+            return "Élément déjà retiré du rapport"
+        # Un retrait qui ne retire rien doit se voir : sinon un clic sans effet
+        # passe pour un bug de l'application.
+        avant = _hc_total(r)
+        r["exclus_hc"].append(cle)
+        _rapport_masque(r)
+        if _hc_total(r) == avant:
+            r["exclus_hc"].remove(cle)
+            raise ValueError("Élément introuvable dans le rapport — clique « ↻ Actualiser "
+                             "les données » puis réessaie.")
+        r["maj_le"] = datetime.now().isoformat(timespec="seconds")
+        return "Élément retiré du rapport"
+
+    if name == "rapport_hc_reset":   # remet tout ce qui avait ete ecarte
+        r = _rapport(store, op["rapport_id"])
+        if r.get("statut") == "finalise":
+            raise ValueError("Rapport finalisé : rouvre-le pour le modifier.")
+        n = len(r.get("exclus_hc") or [])
+        if not n:
+            return "Aucun élément écarté"
+        r["exclus_hc"] = []
+        # les faits ecartes ont ete retires des listes : il faut les recalculer
+        facts = _rapport_facts(store, r["debut"], r["fin"])
+        for cid, auto in facts["points"].items():
+            p = next((x for x in r.get("points", []) if x.get("chantier_id") == cid), None)
+            if p is not None:
+                p["auto"] = auto
+        r["hors_chantier"] = facts["hors_chantier"]
+        r["actions_faites"] = facts["actions_faites"]
+        r["routines_tenue"] = facts["routines_tenue"]
+        r["notes_libres"] = facts["notes_libres"]
+        r["stats"] = facts["stats"]
+        _rapport_masque(r)
+        r["maj_le"] = datetime.now().isoformat(timespec="seconds")
+        return f"{n} élément(s) réaffiché(s)"
 
     if name == "rapport_retard_update":   # justification d'un retard (rédaction)
         r = _rapport(store, op["rapport_id"])
