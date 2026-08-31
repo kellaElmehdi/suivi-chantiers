@@ -2522,7 +2522,7 @@ function renderPage(){
     `<div id="addNote_${c.id}"></div>` + (hns.length
       ? hns.map(n => `<div class="hist"><span class="d">${(NT_TYPE[n.type] || NT_TYPE.note).ic} ${fmt(n.date)}${n.heure ? " " + n.heure : ""}</span>` +
           (n.titre ? `<b>${esc(n.titre)}</b>` : "") +
-          `<div class="hist-c">${esc(n.corps)}</div>` +
+          `<div class="hist-c">${esc(n.corps)}</div>` + pjListe(piecesOf(n.id), false) +
           `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer cette note ?'))mutate({op:'note_remove',id:'${n.id}'})">×</span></div>`).join("")
       : `<div class="empty">Aucune note.</div>`));
 
@@ -4446,6 +4446,75 @@ function ntMatch(n){
   return true;
 }
 
+// ---- Pieces jointes -----------------------------------------------------
+// Le binaire part sur le serveur DÈS le dépôt : le brouillon n'a donc rien à
+// garder (un PDF de 5 Mo ne tiendrait de toute façon pas dans localStorage).
+// Une pièce sans note_id = déposée mais pas encore rattachée : elle s'affiche
+// dans le bloc de saisie et part avec la note à l'enregistrement. Le serveur
+// fait foi — même après un rechargement, la pièce déposée est toujours là.
+const FICHIERS = () => (STORE.fichiers || []);
+const piecesOf = nid => FICHIERS().filter(f => f.note_id === nid);
+const piecesEnAttente = () => FICHIERS().filter(f => !f.note_id);
+const PJ_MAX = 10 * 1024 * 1024;                 // même limite que le serveur (store.FICHIER_MAX)
+function fmtTaille(o){
+  if(o < 1024) return o + " o";
+  if(o < 1048576) return Math.round(o / 1024) + " Ko";
+  return (o / 1048576).toFixed(o < 10485760 ? 1 : 0) + " Mo";
+}
+const PJ_IC = {pdf: "📕", png: "🖼", jpg: "🖼",
+               jpeg: "🖼", gif: "🖼", webp: "🖼",
+               bmp: "🖼", svg: "🖼",
+               doc: "📘", docx: "📘",
+               xls: "📗", xlsx: "📗", csv: "📗",
+               ppt: "📙", pptx: "📙",
+               zip: "🗜", "7z": "🗜",
+               msg: "✉", eml: "✉",
+               txt: "📄", md: "📄", log: "📄"};
+const pjIc = f => PJ_IC[(f.ext || "").replace(".", "")] || "📎";
+
+let NT_PJ_CIBLE = null;      // note visée par le sélecteur de fichiers (null = brouillon)
+function ntPick(nid){ NT_PJ_CIBLE = nid || null; const i = $("nt_file"); if(i){ i.value = ""; i.click(); } }
+// Dépôt SÉQUENTIEL : chaque réponse renvoie le store entier, deux envois menés
+// en parallèle s'écraseraient l'un l'autre.
+async function ntUpload(files, nid){
+  for(const file of Array.from(files || []).filter(Boolean)){
+    if(file.size > PJ_MAX){
+      alert(`« ${file.name} » pèse ${fmtTaille(file.size)}.\nLimite : 10 Mo par document.`);
+      continue;
+    }
+    const b64 = await new Promise(res => {
+      const r = new FileReader();
+      r.onload = () => res(String(r.result).split(",").pop());
+      r.onerror = () => res(null);
+      r.readAsDataURL(file);
+    });
+    if(!b64){ alert(`« ${file.name} » n'a pas pu être lu.`); continue; }
+    if(!await mutate({op: "fichier_add", nom: file.name, b64, note_id: nid || null})) return;
+  }
+}
+function ntSurvol(ev, on){ ev.preventDefault(); ev.currentTarget.classList.toggle("over", on); }
+function ntDrop(ev, nid){ ntSurvol(ev, false); ntUpload(ev.dataTransfer && ev.dataTransfer.files, nid); }
+// Coller une capture d'écran directement dans la zone de texte.
+function ntColler(ev, nid){
+  const f = Array.from((ev.clipboardData && ev.clipboardData.files) || []);
+  if(!f.length) return;
+  ev.preventDefault();                           // sinon le navigateur colle aussi le nom du fichier
+  ntUpload(f, nid || null);
+}
+function pjListe(fs, retirable){
+  if(!fs.length) return "";
+  return `<div class="nt-pj">` + fs.map(f =>
+    `<span class="pj" title="${esc(f.nom)} · ${fmtTaille(f.taille)}${f.cree_le ? " · déposé le " + fmt(f.cree_le) : ""}">` +
+      `<a href="/api/fichier?id=${f.id}" target="_blank" rel="noopener">${pjIc(f)} ${esc(f.nom)}</a>` +
+      `<span class="pj-s">${fmtTaille(f.taille)}</span>` +
+      (retirable ? `<b class="pj-x" title="Retirer ce document" onclick="pjRetirer('${f.id}','${jqs(f.nom)}')">×</b>` : ``) +
+    `</span>`).join("") + `</div>`;
+}
+function pjRetirer(id, nom){
+  if(confirm(`Retirer « ${nom} » ?\n\nLe document est effacé du disque. La note, elle, reste.`))
+    mutate({op: "fichier_remove", id});
+}
+
 // ---- Brouillons ---------------------------------------------------------
 // La vue se reconstruit ENTIÈREMENT à chaque mutate() (épingler, supprimer,
 // filtrer…). Une saisie qui vit dans le DOM disparaît donc au premier clic.
@@ -4476,9 +4545,15 @@ function ntDraftBadge(){
   el.style.display = ntDraftVide() ? "none" : "";
   el.textContent = ntDraftVide() ? "" : "Brouillon conservé — rien n'est perdu si tu cliques ailleurs ou fermes l'onglet.";
 }
-function ntDraftJeter(){
-  if(!ntDraftVide() && !confirm("Vider le brouillon en cours ?\n\nLe texte non enregistré sera perdu.")) return;
-  ntDraftClear(); renderNotes(); const t = $("nt_corps"); if(t) t.focus();
+async function ntDraftJeter(){
+  const pj = piecesEnAttente();
+  if(ntDraftVide() && !pj.length) return;
+  if(!confirm("Vider le brouillon en cours ?\n\nLe texte non enregistré" +
+              (pj.length ? ` et ${pj.length} document${pj.length > 1 ? "s" : ""} déposé${pj.length > 1 ? "s" : ""}` : "") +
+              " sera perdu.")) return;
+  ntDraftClear();
+  for(const f of pj){ if(!await mutate({op: "fichier_remove", id: f.id})) break; }
+  renderNotes(); const t = $("nt_corps"); if(t) t.focus();
 }
 // Un long texte ne doit pas se lire par une lucarne de quatre lignes.
 function ntGrow(el){
@@ -4513,8 +4588,15 @@ function renderNotes(){
         LIVE().map(c => `<option value="${c.id}" ${NT_DRAFT.chantier_id === c.id ? "selected" : ""}>${esc(c.titre)}</option>`).join("") + `</select>` +
     `</div>` +
     `<textarea id="nt_corps" placeholder="Écris ici. La date et l'heure sont enregistrées automatiquement — c'est tout l'intérêt par rapport au papier. (Ctrl+Entrée pour enregistrer)" ` +
-      `oninput="ntD('corps',this.value);ntGrow(this)" ` +
+      `oninput="ntD('corps',this.value);ntGrow(this)" onpaste="ntColler(event,null)" ` +
       `onkeydown="if(event.key==='Enter'&&(event.ctrlKey||event.metaKey))ntAdd()">${esc(NT_DRAFT.corps)}</textarea>` +
+    `<div class="nt-joint" ondragover="ntSurvol(event,true)" ondragleave="ntSurvol(event,false)" ` +
+      `ondrop="ntDrop(event,null)">` +
+      `<button class="btn sm" onclick="ntPick(null)">📎 Joindre un document</button>` +
+      `<input type="file" id="nt_file" multiple hidden onchange="ntUpload(this.files,NT_PJ_CIBLE);this.value=''">` +
+      `<span class="muted small">… ou glisse un fichier ici, ou colle une capture dans le texte. 10 Mo par document.</span>` +
+      pjListe(piecesEnAttente(), true) +
+    `</div>` +
     `<div class="nt-crow"><button class="btn primary" onclick="ntAdd()">Enregistrer</button>` +
       `<button class="btn sm" onclick="ntDraftJeter()">Vider</button>` +
       `<span class="muted small">Horodatée au ${fmt(TODAY)} à l'heure de saisie.</span>` +
@@ -4577,7 +4659,14 @@ function ntCard(n){
         `<input type="date" value="${n.date}" title="Date de la note" onchange="mutate({op:'note_update',id:'${n.id}',date:this.value})">` +
       `</div>` +
       `<textarea oninput="ntEd('${n.id}',this.value);ntGrow(this)" ` +
+        `onpaste="ntColler(event,'${n.id}')" ` +
         `onblur="ntEdSave('${n.id}',this.value)">${esc(NT_ED[n.id] !== undefined ? NT_ED[n.id] : n.corps)}</textarea>` +
+      `<div class="nt-joint" ondragover="ntSurvol(event,true)" ondragleave="ntSurvol(event,false)" ` +
+        `ondrop="ntDrop(event,'${n.id}')">` +
+        `<button class="btn sm" onclick="ntPick('${n.id}')">📎 Joindre un document</button>` +
+        `<span class="muted small">… ou glisse un fichier ici.</span>` +
+        pjListe(piecesOf(n.id), true) +
+      `</div>` +
       `<div class="nt-crow"><button class="btn sm primary" onclick="ntEdit('${n.id}')">Fermer</button></div>` +
       `</div>`;
   }
@@ -4593,22 +4682,30 @@ function ntCard(n){
       (NT_ED[n.id] !== undefined && NT_ED[n.id] !== n.corps
         ? `<span class="nt-draft-st" title="Réécriture commencée, pas encore enregistrée — rouvre avec ✎">✎ brouillon</span>` : ``) +
       `<button class="nt-b" title="${n.epingle ? "Désépingler" : "Épingler en haut"}" onclick="mutate({op:'note_pin',id:'${n.id}'})">${n.epingle ? "📌" : "📍"}</button>` +
+      `<button class="nt-b" title="Joindre un document à cette note" onclick="ntPick('${n.id}')">📎</button>` +
       `<button class="nt-b" title="Transformer en action" onclick="ntToAction('${n.id}')">➜ action</button>` +
       `<button class="nt-b" title="Modifier" onclick="ntEdit('${n.id}')">✎</button>` +
       `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer cette note ?'))mutate({op:'note_remove',id:'${n.id}'})">×</span>` +
     `</div>` +
     `<div class="nt-corps">${esc(n.corps).replace(/\n/g, "<br>")}</div>` +
+    pjListe(piecesOf(n.id), true) +
     `</div>`;
 }
 
 async function ntAdd(){
   const t = $("nt_corps");
   if(t) ntD("corps", t.value);                           // filet : ce qui est à l'écran fait foi
-  const corps = NT_DRAFT.corps.trim(), titre = NT_DRAFT.titre.trim();
+  const pj = piecesEnAttente();
+  const corps = NT_DRAFT.corps.trim();
+  // Une note qui ne porte QUE des documents mérite d'être tracée : on lui donne
+  // le nom du document pour titre plutôt que de refuser l'enregistrement.
+  const titre = NT_DRAFT.titre.trim() ||
+    ((!corps && pj.length) ? (pj.length === 1 ? pj[0].nom : pj.length + " documents") : "");
   if(!corps && !titre){ if(t) t.focus(); return; }
   const ok = await mutate({op: "note_add", corps, titre, type: NT_DRAFT.type,
                            theme_id: NT_DRAFT.theme_id || null,
-                           chantier_id: NT_DRAFT.chantier_id || null});
+                           chantier_id: NT_DRAFT.chantier_id || null,
+                           piece_ids: pj.map(f => f.id)});
   if(!ok) return;                                        // échec : le brouillon reste intact, rien à retaper
   ntDraftClear(); renderNotes();
   const c = $("nt_corps"); if(c) c.focus();
