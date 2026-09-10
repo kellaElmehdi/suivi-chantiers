@@ -13,7 +13,7 @@ import sys
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(BASE, "static")
@@ -85,11 +85,32 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- GET ------------------------------------------------------------- #
     def do_GET(self):
-        path = self.path.split("?", 1)[0]
+        path, _, qs = self.path.partition("?")
         if path == "/" or path == "/index.html":
             return self._file(os.path.join(STATIC, "index.html"))
         if path == "/api/store":
             return self._send(200, self._store_payload())
+        if path == "/api/cdc_docx":
+            # Cahier des charges en Word, pour le retoucher hors de l'appli.
+            cid = (parse_qs(qs).get("chantier_id") or [""])[0]
+            try:
+                import cdc_docx
+                st = store.load()
+                ch = next((c for c in st["chantiers"] if c["id"] == cid), None)
+                if ch is None:
+                    return self._send(400, {"error": "Chantier introuvable."})
+                data, fname = cdc_docx.build(ch)
+            except ValueError as e:
+                return self._send(400, {"error": str(e)})
+            except Exception as e:  # noqa: BLE001
+                return self._send(500, {"error": str(e)})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.openxmlformats-"
+                                             "officedocument.wordprocessingml.document")
+            self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return self.wfile.write(data)
         if path in ("/api/export", "/api/template"):
             try:
                 import export_xlsx
@@ -104,6 +125,34 @@ class Handler(BaseHTTPRequestHandler):
                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
             self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return self.wfile.write(data)
+        if path == "/api/fichier":
+            # Piece jointe d'une note : le binaire vit dans data/fichiers/,
+            # nomme par son id. Le nom d'origine ne sert qu'a l'en-tete de
+            # telechargement, jamais a construire le chemin.
+            fid = (parse_qs(qs).get("id") or [""])[0]
+            st = store.load()
+            f = next((x for x in st.get("fichiers", []) if x.get("id") == fid), None)
+            if f is None:
+                return self._send(404, {"error": "Document introuvable."})
+            fp = store.fichier_path(f)
+            if not os.path.isfile(fp):
+                return self._send(404, {"error": "Le fichier n'est plus sur le disque."})
+            with open(fp, "rb") as fh:
+                data = fh.read()
+            nom = f.get("nom") or "document"
+            ascii_nom = nom.encode("ascii", "replace").decode("ascii").replace('"', "'")
+            # inline = apercu dans l'onglet (images, PDF, texte) ; le reste se telecharge.
+            dispo = "inline" if (f.get("ext") or "") in store.FICHIER_INLINE else "attachment"
+            self.send_response(200)
+            self.send_header("Content-Type", f.get("mime") or "application/octet-stream")
+            self.send_header("X-Content-Type-Options", "nosniff")   # pas de reniflage de type
+            self.send_header("Content-Disposition",
+                             f'{dispo}; filename="{ascii_nom}"; '
+                             f"filename*=UTF-8''{quote(nom)}")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.end_headers()
             return self.wfile.write(data)
         if path.startswith("/static/"):
@@ -147,6 +196,38 @@ class Handler(BaseHTTPRequestHandler):
                 store.save(st)
                 return self._send(200, {"ok": True, "message": msg, **self._store_payload()})
 
+        if path == "/api/cdc_import":
+            # Relecture du .docx modifie : les sections reviennent, et le
+            # changement est trace comme une revision du document.
+            import base64
+            try:
+                import cdc_docx
+                raw = base64.b64decode((body.get("b64") or "").split(",")[-1])
+                lu = cdc_docx.parse(raw)
+            except ValueError as e:
+                return self._send(400, {"error": str(e)})
+            except Exception as e:  # noqa: BLE001
+                return self._send(400, {"error": f"Document illisible : {e}"})
+            cid = body.get("chantier_id") or lu.get("chantier_id")
+            if not cid:
+                return self._send(400, {"error": "Impossible de savoir à quel chantier "
+                                                 "rattacher ce document."})
+            if (lu.get("chantier_id") and body.get("chantier_id")
+                    and lu["chantier_id"] != body["chantier_id"]):
+                return self._send(400, {"error": "Ce document appartient à un autre "
+                                                 "chantier. Ouvre le bon cahier des charges."})
+            with _STORE_LOCK:
+                st = store.load()
+                try:
+                    msg = store.apply_op(st, {"op": "cdc_docx_import", "chantier_id": cid,
+                                              "sections": lu["sections"]})
+                except ValueError as e:
+                    return self._send(400, {"error": str(e)})
+                except KeyError as e:
+                    return self._send(400, {"error": f"Champ requis manquant : {e}"})
+                store.save(st)
+                return self._send(200, {"ok": True, "message": msg, **self._store_payload()})
+
         if path == "/api/import":
             import base64
             import export_xlsx
@@ -161,6 +242,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True,
                                     "message": f"{n_ch} chantier(s), {n_t} tâche(s), {n_l} livrable(s) importés.",
                                     **self._store_payload()})
+
+        if path == "/api/cdc_mail":
+            # brouillon e-mail avec le cahier des charges Word en piece jointe
+            try:
+                import cdc_mail
+                st = store.load()
+                ch = next((c for c in st["chantiers"]
+                           if c["id"] == body.get("chantier_id")), None)
+                if ch is None:
+                    return self._send(400, {"error": "Chantier introuvable."})
+                if not ch.get("cdc"):
+                    return self._send(400, {"error": "Ce chantier n'a pas de cahier des charges."})
+                res = cdc_mail.send(ch)
+            except Exception as e:  # noqa: BLE001
+                return self._send(200, {"ok": False,
+                                        "message": f"Préparation de l'e-mail impossible : {e}"})
+            return self._send(200, {"ok": True, **res})
 
         if path == "/api/rapport_mail":
             # prépare l'e-mail du rapport : PDF (Edge headless) + brouillon Outlook

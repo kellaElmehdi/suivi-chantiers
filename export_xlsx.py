@@ -16,6 +16,8 @@ STATUT_LBL = {"todo": "A faire", "doing": "En cours", "block": "Bloque", "recett
 PRIO_LBL = {"h": "Haute", "m": "Moyenne", "b": "Basse"}
 LIV_LBL = {"attente": "En attente", "recu": "Recu", "partiel": "Recu partiel", "annule": "Annule"}
 RISQUE_LBL = {"ouvert": "Ouvert", "maitrise": "Maitrise", "avere": "Avere", "clos": "Clos"}
+# Recette : une liste de points a verifier
+POINT_LBL = {"a_verifier": "A verifier", "ok": "Verifie", "probleme": "Probleme"}
 
 PRIO_IN = {"haute": "h", "moyenne": "m", "basse": "b", "h": "h", "m": "m", "b": "b"}
 STATUT_IN = {"a faire": "todo", "en cours": "doing", "bloque": "block", "termine": "done",
@@ -131,11 +133,10 @@ def _weekly_synthese(store: dict) -> dict:
             w = _iso_week_str(l.get("derniere") or "")
             if w:
                 m[w]["relances"] += 1
-        for it in ch.get("iterations", []):
-            for r in it.get("retours", []):
-                w = _iso_week_str(r.get("date") or "")
-                if w:
-                    m[w]["retours"] += 1
+        for p in (ch.get("recette") or {}).get("points", []):
+            w = _iso_week_str(p.get("verifie_le") or "")   # points de recette verifies
+            if w:
+                m[w]["retours"] += 1
     for j in store.get("journal", []):
         w = j.get("week") or _iso_week_str(j.get("date", ""))
         if w:
@@ -177,9 +178,12 @@ def _sess_min(store: dict, s: dict) -> int:
     from store import _day_end, _hm
     today = date.today().isoformat()
     e = s.get("fin")
-    if not e:   # session encore active : borne a la fin de journee de sa date
-        de = _day_end(store, s.get("date") or today)
-        e = de if (s.get("date") and s["date"] < today) else min(_hm(), de)
+    if not e:   # session encore active
+        if s.get("date") and s["date"] < today:   # jour passe : filet, jamais avant le debut
+            de = _day_end(store, s["date"])
+            e = max(de, s.get("debut") or de)
+        else:                                     # aujourd'hui : jusqu'a maintenant
+            e = _hm()
     m = _hm2min(e) - _hm2min(s.get("debut"))
     if m < 0:
         m += 1440
@@ -195,6 +199,16 @@ def _taux_heure(store: dict) -> float:   # taux journalier / heures facturables 
     t = float(stg.get("taux_jour") or 0)
     hj = float(stg.get("heures_jour") or 7) or 7
     return t / hj if t else 15.0
+
+
+def _rec_stats(ch: dict) -> dict:
+    """Combien de points verifies, combien coincent (lecture seule)."""
+    pts = (ch.get("recette") or {}).get("points", [])
+    par = {"a_verifier": 0, "ok": 0, "probleme": 0}
+    for p in pts:
+        par[p.get("statut", "a_verifier")] = par.get(p.get("statut", "a_verifier"), 0) + 1
+    return {"total": len(pts), **par,
+            "pct": round(par["ok"] / len(pts) * 100) if pts else 0}
 
 
 def _dbetween(a: str, b: str) -> int:
@@ -258,6 +272,7 @@ def _styles():
         "head_fill": PatternFill("solid", fgColor="2D2B28"),
         "head_font": Font(color="FFFFFF", bold=True),
         "late_font": Font(color="A8261B", bold=True),
+        "head_font2": Font(bold=True),          # sous-titre de section dans une feuille
         "border": Border(*[Side(style="thin", color="D9D7CF")] * 4),
         "Alignment": Alignment,
     }
@@ -538,6 +553,47 @@ def build() -> bytes:
                 c12.alignment = Align(wrap_text=True, vertical="top")
     _widths(ws12, [11, 8, 11, 26, 22, 26, 70, 12])
     _header(ws12, len(cols12), st)
+
+    # -- Recette : la checklist de chaque chantier, et le temps qu'elle a coute
+    ws13 = wb.create_sheet("Recette")
+    cols13 = ["Chantier", "Point a verifier", "Statut", "Constat", "Qui corrige",
+              "Pour le", "Retard", "Verifie le", "Ajoute le", "Temps recette (h)"]
+    ws13.append(cols13)
+    today_s = date.today().isoformat()
+    rec_min = {}
+    for sx in store.get("timelog", []):
+        if sx.get("kind") == "recette" and sx.get("chantier_id"):
+            rec_min[sx["chantier_id"]] = rec_min.get(sx["chantier_id"], 0) + _sess_min(store, sx)
+    for ch in store.get("chantiers", []):
+        pts = (ch.get("recette") or {}).get("points", [])
+        if not pts:
+            continue
+        heures = round(rec_min.get(ch["id"], 0) / 60, 2)
+        s13 = _rec_stats(ch)
+        # une ligne d'en-tete par chantier : on lit l'avancement sans faire de tableau croise
+        _append(ws13, [ch.get("titre", ""), f"— {s13['ok']}/{s13['total']} verifies —",
+                       f"{s13['pct']} %", "", "", "", "", "", "", heures])
+        for col in range(1, len(cols13) + 1):
+            cellh = ws13.cell(row=ws13.max_row, column=col)
+            cellh.border = st["border"]
+            cellh.font = st["head_font2"]
+        for p in pts:
+            late = bool(p.get("statut") == "probleme" and p.get("echeance")
+                        and p["echeance"] < today_s)
+            _append(ws13, [ch.get("titre", ""), p.get("titre", ""),
+                           POINT_LBL.get(p.get("statut"), p.get("statut", "")),
+                           p.get("constat", ""), p.get("qui", ""), p.get("echeance") or "",
+                           "EN RETARD" if late else "", p.get("verifie_le") or "",
+                           p.get("cree_le") or "", ""])
+            r13 = ws13.max_row
+            if late:
+                ws13.cell(row=r13, column=7).font = st["late_font"]
+            for col in range(1, len(cols13) + 1):
+                ws13.cell(row=r13, column=col).border = st["border"]
+                ws13.cell(row=r13, column=col).alignment = Align(vertical="top",
+                                                                 wrap_text=col in (2, 4))
+    _widths(ws13, [26, 46, 12, 34, 16, 11, 10, 11, 11, 16])
+    _header(ws13, len(cols13), st)
 
     buf = io.BytesIO()
     wb.save(buf)

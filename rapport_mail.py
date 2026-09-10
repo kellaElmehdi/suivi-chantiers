@@ -4,9 +4,15 @@ Chaîne 100 % locale, sans dépendance Python :
 1. le HTML imprimable (généré par l'UI, identique à « Imprimer / PDF »)
    est converti en PDF par Edge en mode headless ;
 2. le PDF est archivé dans data/rapports/ (traçabilité) ;
-3. un brouillon Outlook est ouvert, pièce jointe attachée, prêt à envoyer
-   (COM). Si Outlook n'est pas automatisable (ex. « nouveau Outlook »),
-   l'Explorateur s'ouvre sur le PDF pour un glisser-déposer manuel.
+3. un brouillon est ouvert dans la messagerie du poste, pièce jointe attachée.
+
+Le brouillon passe par un fichier .eml portant l'en-tête `X-Unsent: 1` : c'est
+ce qui fait ouvrir le fichier en RÉDACTION (bouton Envoyer) et non en lecture.
+Cette voie marche avec l'ancien comme avec le NOUVEAU Outlook, contrairement à
+l'automatisation COM qui n'existe pas dans le nouveau (olk.exe) — elle y échoue
+avec 0x80080005 CO_E_SERVER_EXEC_FAILURE. Elle évite aussi PowerShell, dont
+l'antivirus du poste bloque une partie des scripts. Le COM reste en second
+recours pour les postes où seul l'Outlook classique est automatisable.
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ import os
 import pathlib
 import subprocess
 import tempfile
+from email.message import EmailMessage
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 PDF_DIR = os.path.join(BASE, "data", "rapports")
@@ -72,6 +79,32 @@ def _ps(script: str, timeout: int) -> subprocess.CompletedProcess:
             pass
 
 
+def build_eml(pdf: str, semaine: str, sujet: str, corps: str, dest: str = "") -> str:
+    """Brouillon .eml (PDF joint) archivé à côté du PDF, prêt à être ouvert."""
+    m = EmailMessage()
+    m["Subject"] = sujet
+    if dest:
+        m["To"] = dest
+    m["X-Unsent"] = "1"      # ouvre en rédaction, avec le bouton « Envoyer »
+    m.set_content(corps)
+    with open(pdf, "rb") as f:
+        m.add_attachment(f.read(), maintype="application", subtype="pdf",
+                         filename=os.path.basename(pdf))
+    eml = os.path.join(PDF_DIR, f"rapport_{semaine}.eml")
+    with open(eml, "wb") as f:
+        f.write(bytes(m))
+    return eml
+
+
+def open_eml(eml: str) -> bool:
+    """Ouvre le brouillon dans la messagerie par défaut. False si rien ne l'ouvre."""
+    try:
+        os.startfile(eml)    # noqa: S606 — ouverture par l'association Windows
+        return True
+    except (OSError, AttributeError):
+        return False
+
+
 def compose_outlook(pdf: str, sujet: str, corps: str) -> bool:
     """Ouvre un brouillon Outlook avec la pièce jointe. False si non automatisable."""
     script = f"""
@@ -111,14 +144,21 @@ def send(rapport: dict, html: str) -> dict:
              f"Veuillez trouver ci-joint le rapport hebdomadaire de la semaine {num} "
              f"(du {_fr(rapport.get('debut'))} au {_fr(rapport.get('fin'))}).\n\n"
              "Cordialement,\n" + qui)
+    # 1. le brouillon .eml : marche avec l'ancien ET le nouveau Outlook.
+    eml = build_eml(pdf, semaine, sujet, corps, rapport.get("destinataire", ""))
+    if open_eml(eml):
+        return {"mode": "eml", "pdf": pdf, "eml": eml,
+                "message": "Brouillon ouvert dans ta messagerie — le PDF est en pièce jointe, "
+                           "il ne reste qu'à choisir le destinataire et envoyer."}
+    # 2. repli : automatisation de l'Outlook classique (postes sans association .eml)
     if compose_outlook(pdf, sujet, corps):
-        return {"mode": "outlook", "pdf": pdf,
+        return {"mode": "outlook", "pdf": pdf, "eml": eml,
                 "message": "Brouillon Outlook ouvert — le PDF est en pièce jointe, il ne reste qu'à choisir le destinataire et envoyer."}
-    # repli : montrer le PDF dans l'Explorateur pour un glisser-déposer
+    # 3. dernier recours : montrer le PDF dans l'Explorateur pour un glisser-déposer
     try:
         subprocess.Popen(["explorer", "/select,", pdf])
     except OSError:
         pass
-    return {"mode": "dossier", "pdf": pdf,
-            "message": f"Outlook n'est pas automatisable sur ce poste — le PDF est prêt : {pdf} "
+    return {"mode": "dossier", "pdf": pdf, "eml": eml,
+            "message": f"Aucune messagerie n'a pu être ouverte automatiquement — le PDF est prêt : {pdf} "
                        "(fenêtre Explorateur ouverte, glisse-le dans ton e-mail)."}

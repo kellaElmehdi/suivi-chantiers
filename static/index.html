@@ -16,46 +16,22 @@
   <h1>Suivi des chantiers</h1>
   <span class="sub" id="subtitle"></span>
   <div class="grow"></div>
-  <div class="nav">
-    <button class="on" data-v="board" onclick="setView('board')">Tableau</button>
-    <button data-v="planning" onclick="setView('planning')">Planning</button>
-    <button data-v="actions" onclick="setView('actions')" title="Tâches libres et routines — raccourci : a">Actions</button>
-    <button data-v="notes" onclick="setView('notes')" title="Bloc-notes horodaté — raccourci : n">Bloc-notes</button>
-    <button data-v="cahiers" onclick="setView('cahiers')">Cahiers des charges</button>
-    <div class="menu" id="navPilotage">
-      <button data-group="dash,activite,charge,risques,rapport,themes" onclick="toggleMenu(event,'navPilotage')">Pilotage ▾</button>
-      <div class="menu-list">
-        <a onclick="setView('dash')">Tableau de bord</a>
-        <a onclick="setView('activite')">Activité</a>
-        <a onclick="setView('rapport')">Rapport hebdo</a>
-        <a onclick="setView('charge')">Charge</a>
-        <a onclick="setView('risques')">Risques</a>
-        <a onclick="setView('themes')">Thèmes</a>
-      </div>
-    </div>
-    <div class="menu" id="navPeople">
-      <button data-group="people,contacts,absences" onclick="toggleMenu(event,'navPeople')">Personnes ▾</button>
-      <div class="menu-list">
-        <a onclick="setView('people')">Par personne</a>
-        <a onclick="setView('contacts')">Annuaire</a>
-        <a onclick="setView('absences')">Congés &amp; absences</a>
-      </div>
-    </div>
-  </div>
+  <!-- générée par renderNav() depuis le registre VIEWS de app.js -->
+  <nav class="nav" id="nav" aria-label="Vues"></nav>
   <button class="ghost primary" onclick="newChantier()">Nouveau chantier</button>
   <div class="menu right" id="searchMenu">
-    <button class="ghost" onclick="openSearch(event)" title="Rechercher (touche / ou Ctrl+K)">🔍</button>
+    <button class="ghost" onclick="openSearch(event)" title="Rechercher (touche / ou Ctrl+K)" aria-label="Rechercher"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg></button>
     <div class="menu-list search-list" id="searchList" onclick="event.stopPropagation()">
-      <input id="searchInput" class="search-inp" placeholder="Rechercher un chantier, une personne, un livrable, un risque…" oninput="renderSearch()">
+      <input id="searchInput" class="search-inp" placeholder="Rechercher un chantier, une personne, un livrable, un risque, un point de recette…" oninput="renderSearch()">
       <div id="searchResults"></div>
     </div>
   </div>
   <div class="menu right" id="notifMenu">
-    <button class="ghost bell" onclick="toggleMenu(event,'notifMenu')" title="Rappels">🔔<span class="badge" id="notifBadge" style="display:none">0</span></button>
+    <button class="ghost bell" onclick="toggleMenu(event,'notifMenu')" title="Rappels" aria-label="Rappels"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg><span class="badge" id="notifBadge" style="display:none">0</span></button>
     <div class="menu-list notif-list" id="notifList"></div>
   </div>
   <div class="menu right" id="excelMenu">
-    <button class="ghost" onclick="toggleMenu(event,'excelMenu')">Excel ▾</button>
+    <button class="ghost" onclick="toggleMenu(event,'excelMenu')">Excel<svg class="ico car" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
     <div class="menu-list">
       <a onclick="document.getElementById('importFile').click()">Importer un fichier…</a>
       <a onclick="location='/api/template'">Télécharger le modèle</a>
@@ -69,22 +45,24 @@
 
 <div class="layout">
   <div class="work">
-    <div class="board" id="board"></div>
-    <div class="actions-v" id="actions" style="display:none"></div>
-    <div class="notes-v" id="notes" style="display:none"></div>
-    <div class="themes-v" id="themes" style="display:none"></div>
-    <div class="planning" id="planning" style="display:none"></div>
-    <div class="dash" id="dash" style="display:none"></div>
-    <div class="activite" id="activite" style="display:none"></div>
-    <div class="rapport" id="rapport" style="display:none"></div>
-    <div class="charge" id="charge" style="display:none"></div>
-    <div class="risques" id="risques" style="display:none"></div>
-    <div class="people" id="people" style="display:none"></div>
-    <div class="contacts" id="contacts" style="display:none"></div>
-    <div class="absences" id="absences" style="display:none"></div>
-    <div class="cahiers" id="cahiers" style="display:none"></div>
-    <div class="cdc" id="cdc" style="display:none"></div>
-    <div class="page" id="page" style="display:none"></div>
+    <!-- .view : même marge et même largeur pour tous les écrans ; .view--doc : colonne de lecture -->
+    <div class="board view" id="board"></div>
+    <div class="actions-v view" id="actions" style="display:none"></div>
+    <div class="notes-v view" id="notes" style="display:none"></div>
+    <div class="themes-v view" id="themes" style="display:none"></div>
+    <div class="planning view" id="planning" style="display:none"></div>
+    <div class="dash view" id="dash" style="display:none"></div>
+    <div class="activite view" id="activite" style="display:none"></div>
+    <div class="rapport view view--doc" id="rapport" style="display:none"></div>
+    <div class="charge view" id="charge" style="display:none"></div>
+    <div class="risques view" id="risques" style="display:none"></div>
+    <div class="people view" id="people" style="display:none"></div>
+    <div class="contacts view" id="contacts" style="display:none"></div>
+    <div class="absences view" id="absences" style="display:none"></div>
+    <div class="cahiers view" id="cahiers" style="display:none"></div>
+    <div class="cdc view" id="cdc" style="display:none"></div>
+    <div class="recettes view" id="recettes" style="display:none"></div>
+    <div class="page view" id="page" style="display:none"></div>
   </div>
 </div>
 
