@@ -393,7 +393,7 @@ async function loadStore(){
   STORE = d.store; TODAY = d.today;
   if(STORE.settings) SETTINGS = {...SETTINGS, ...STORE.settings};
   rebuildOff();                                          // après SETTINGS : isOff dépend de jours_ouvres
-  if(CUR && chById(CUR)) renderPage(); else { CUR = null; showView("board"); }
+  if(SHOWN === null) route(); else rerender();   // 1er chargement : c'est l'URL qui dit quel écran ouvrir
   renderNotif(); checkDesktopNotifs();
 }
 // Renvoie true si le serveur a bien enregistré, false sinon. Les appelants qui
@@ -407,9 +407,7 @@ async function mutate(op){
   STORE = d.store; TODAY = d.today;
   if(STORE.settings) SETTINGS = {...SETTINGS, ...STORE.settings};
   rebuildOff();                                          // après SETTINGS : isOff dépend de jours_ouvres
-  if($("cdc").style.display !== "none" && CUR_CDC && chById(CUR_CDC)) renderCdc();
-  else if(CUR && chById(CUR)) renderPage();
-  else { CUR = null; showView(VIEW); }
+  rerender();
   renderNotif();
   return true;
 }
@@ -447,49 +445,100 @@ function sortColumn(list, mode){
   });
 }
 function sortTodo(list){ return sortColumn(list, TODO_SORT); }
-function showView(v){
-  if(["board", "charge", "people", "dash", "contacts", "absences", "risques", "planning", "activite",
-      "cahiers", "recettes", "rapport", "actions", "notes", "themes"].includes(v)) VIEW = v;
-  $("board").style.display = v === "board" ? "flex" : "none";
-  $("actions").style.display = v === "actions" ? "block" : "none";
-  $("notes").style.display = v === "notes" ? "block" : "none";
-  $("themes").style.display = v === "themes" ? "block" : "none";
-  $("planning").style.display = v === "planning" ? "block" : "none";
-  $("dash").style.display = v === "dash" ? "block" : "none";
-  $("activite").style.display = v === "activite" ? "block" : "none";
-  $("rapport").style.display = v === "rapport" ? "block" : "none";
-  $("charge").style.display = v === "charge" ? "block" : "none";
-  $("risques").style.display = v === "risques" ? "block" : "none";
-  $("people").style.display = v === "people" ? "grid" : "none";
-  $("contacts").style.display = v === "contacts" ? "block" : "none";
-  $("absences").style.display = v === "absences" ? "block" : "none";
-  $("cahiers").style.display = v === "cahiers" ? "block" : "none";
-  $("cdc").style.display = v === "cdc" ? "block" : "none";
-  $("recettes").style.display = v === "recettes" ? "block" : "none";
-  $("page").style.display = v === "page" ? "block" : "none";
-  document.querySelectorAll(".nav button").forEach(b => {
-    const grp = b.dataset.group ? b.dataset.group.split(",") : (b.dataset.v ? [b.dataset.v] : []);
-    b.classList.toggle("on", grp.includes(v));
+// ---- Registre des vues : la SEULE liste qui fait foi ----------------------
+// Barre de navigation, affichage, rendu, raccourcis clavier et URL (#id) en
+// découlent : ajouter une vue = ajouter une ligne ici. L'ordre est celui de la
+// barre ; `group` range la vue dans un menu déroulant, émis à la place de sa
+// première vue. `detail` : écran ouvert depuis une autre vue (page chantier,
+// cahier des charges) — hors barre ; l'onglet de la vue d'origine reste allumé.
+const NAV_GROUPS = {capture: "Capture", suivi: "Suivi", pilotage: "Pilotage"};
+const VIEWS = [
+  {id: "board",    label: "Tableau",             render: renderBoard,     key: "t", display: "flex"},
+  {id: "planning", label: "Planning",            render: renderPlanning,  key: "p"},
+  {id: "actions",  label: "Actions",             render: renderActions,   key: "a", group: "capture", capture: captureAction,
+   tip: "Tâches libres et routines"},
+  {id: "notes",    label: "Bloc-notes",          render: renderNotes,     key: "n", group: "capture", capture: captureNote,
+   tip: "Journal horodaté, classé par thème"},
+  {id: "cahiers",  label: "Cahiers des charges", render: renderCahiers,   group: "suivi"},
+  {id: "recettes", label: "Recette",             render: renderRecettes,  group: "suivi",
+   tip: "Les points à vérifier avant de livrer, et le temps passé"},
+  {id: "risques",  label: "Risques",             render: renderRisques,   group: "suivi"},
+  {id: "people",   label: "Livrables attendus",  render: renderPeople,    group: "suivi", display: "grid",
+   tip: "Ce que chacun doit livrer, et pour quand"},
+  {id: "contacts", label: "Annuaire",            render: renderContacts,  group: "suivi"},
+  {id: "absences", label: "Congés & absences",   render: renderAbsences,  group: "suivi"},
+  {id: "dash",     label: "Tableau de bord",     render: renderDashboard, key: "d", group: "pilotage"},
+  {id: "activite", label: "Activité",            render: renderActivite,  group: "pilotage", tip: "Temps passé, chronométré"},
+  {id: "charge",   label: "Charge",              render: renderCharge,    group: "pilotage"},
+  {id: "rapport",  label: "Rapport hebdo",       render: renderRapport,   group: "pilotage"},
+  {id: "themes",   label: "Thèmes",              render: renderThemes,    group: "pilotage"},
+  {id: "page",     label: "Chantier",            render: renderPage,      detail: true},
+  {id: "cdc",      label: "Cahier des charges",  render: renderCdc,       detail: true},
+];
+const VIEW_BY_ID = Object.fromEntries(VIEWS.map(v => [v.id, v]));
+let SHOWN = null;     // écran affiché, détail compris (VIEW = dernière vue de la barre)
+let SHOWN_KEY = "";   // écran + objet ouvert : on ne remonte en haut que sur une vraie navigation
+
+function renderNav(){
+  const nav = $("nav"); if(!nav) return;
+  const tip = v => (v.tip || v.key) ? ` title="${esc([v.tip, v.key && "raccourci : " + v.key].filter(Boolean).join(" — "))}"` : "";
+  const seen = new Set(); let h = "";
+  VIEWS.forEach(v => {
+    if(v.detail) return;
+    if(!v.group){ h += `<button data-v="${v.id}"${tip(v)} onclick="setView('${v.id}')">${esc(v.label)}</button>`; return; }
+    if(seen.has(v.group)) return;
+    seen.add(v.group);
+    h += `<div class="menu" id="nav_${v.group}">` +
+         `<button data-g="${v.group}" onclick="toggleMenu(event,'nav_${v.group}')">${NAV_GROUPS[v.group]}${ico("down", "car")}</button>` +
+         `<div class="menu-list">` + VIEWS.filter(x => x.group === v.group).map(x =>
+           `<a data-v="${x.id}"${tip(x)} onclick="setView('${x.id}')">${esc(x.label)}${x.key ? `<kbd>${x.key}</kbd>` : ""}</a>`).join("") +
+         `</div></div>`;
   });
+  nav.innerHTML = h;
+}
+function showView(v){
+  const def = VIEW_BY_ID[v] || VIEW_BY_ID.board;
+  const first = SHOWN === null;
+  if(!def.detail) VIEW = def.id;
+  SHOWN = def.id;
+  VIEWS.forEach(x => { $(x.id).style.display = x === def ? (x.display || "block") : "none"; });
+  const key = def.id + ":" + (def.id === "page" ? CUR : def.id === "cdc" ? CUR_CDC : "");
+  if(key !== SHOWN_KEY){ SHOWN_KEY = key; toTop(); }
+  const on = def.detail ? VIEW : def.id, grp = VIEW_BY_ID[on].group;
+  document.querySelectorAll("#nav [data-v]").forEach(b => b.classList.toggle("on", b.dataset.v === on));
+  document.querySelectorAll("#nav [data-g]").forEach(b => b.classList.toggle("on", b.dataset.g === grp));
   renderAlert();
-  if(v === "board") renderBoard();
-  if(v === "actions") renderActions();
-  if(v === "notes") renderNotes();
-  if(v === "themes") renderThemes();
-  if(v === "planning") renderPlanning();
-  if(v === "dash") renderDashboard();
-  if(v === "activite") renderActivite();
-  if(v === "rapport") renderRapport();
-  if(v === "charge") renderCharge();
-  if(v === "risques") renderRisques();
-  if(v === "people") renderPeople();
-  if(v === "contacts") renderContacts();
-  if(v === "absences") renderAbsences();
-  if(v === "cahiers") renderCahiers();
-  if(v === "cdc") renderCdc();
-  if(v === "recettes") renderRecettes();
+  def.render();
+  syncHash(first);
 }
 function setView(v){ CUR = null; showView(v); }
+// La zone de travail défile, pas la fenêtre : c'est elle qu'on remonte.
+function toTop(){ const w = document.querySelector(".work"); if(w) w.scrollTop = 0; }
+// Après une modification : repeint l'écran courant, sans navigation ni retour en haut.
+function rerender(){
+  let v = SHOWN || "board";
+  if(v === "cdc" && !(CUR_CDC && chById(CUR_CDC))) v = VIEW;
+  if(v === "page" && !(CUR && chById(CUR))){ CUR = null; v = VIEW; }
+  showView(v);
+}
+
+// ---- URL : #vue, #chantier/<id>, #cdc/<id> — F5 garde l'écran, Retour navigateur fonctionne
+function viewHash(){ return SHOWN === "page" ? "#chantier/" + CUR : SHOWN === "cdc" ? "#cdc/" + CUR_CDC : "#" + SHOWN; }
+function curHash(){ try{ return decodeURIComponent(location.hash); }catch(e){ return location.hash; } }
+function syncHash(first){
+  const h = viewHash();
+  if(curHash() === h) return;                     // simple repeinture : l'historique ne bouge pas
+  if(first) history.replaceState(null, "", h); else history.pushState(null, "", h);
+}
+function route(){
+  const [a, b] = curHash().slice(1).split("/");
+  if(a === "chantier" && b && chById(b)) openChantier(b);
+  else if(a === "cdc" && b && chById(b)){ if(SHOWN === null) VIEW = "cahiers"; openCdc(b); }
+  else setView(VIEW_BY_ID[a] && !VIEW_BY_ID[a].detail ? a : "board");
+}
+["popstate", "hashchange"].forEach(t => window.addEventListener(t, () => {
+  if(SHOWN !== null && curHash() !== viewHash()) route();
+}));
 
 // menu déroulant (Excel : import / modèle / export)
 function toggleMenu(e, id){
@@ -753,37 +802,36 @@ function renderAlert(){
   const onhold = STORE.chantiers.filter(c => c.hold && c.statut !== "done").length;
   const over = chargeData().overload;
   const critRisk = LIVE().reduce((a, c) => a + openRisques(c).filter(r => crit(r) >= 15).length, 0);
-  $("subtitle").textContent = `${LIVE().length} chantiers` + (onhold ? ` · ${onhold} en pause` : "");
+  // Le contexte chiffré vit ici, une seule fois ; la barre d'alertes ne garde que l'actionnable.
+  $("subtitle").textContent = `${LIVE().length} chantiers · ${wip}${wipLimit() ? "/" + wipLimit() : ""} en cours` +
+                              (onhold ? ` · ${onhold} en pause` : "");
   // chips lisibles : couleur = sévérité (rouge = à traiter, neutre = contexte), icône pour le scan
   const chip = (txt, o = {}) =>
     `<span class="seg ${o.cls || ""}"${o.view ? ` onclick="setView('${o.view}')"` : ""}${o.title ? ` title="${esc(o.title)}"` : ""}>` +
       (o.icon ? `<i class="seg-i">${o.icon}</i>` : "") + txt + `</span>`;
   // 1) alertes (rouge), regroupées en tête → on voit d'un coup ce qui ne va pas
   const alerts = [];
-  if(lateL) alerts.push(chip(`<b>${lateL}</b> livraison(s) en retard`, {icon: "✉", cls: "bad", view: "people"}));
-  if(lateT) alerts.push(chip(`<b>${lateT}</b> tâche(s) en retard`, {icon: "⏰", cls: "bad"}));
-  if(relances) alerts.push(chip(`<b>${relances}</b> relance(s) à faire`, {icon: "📞", cls: "bad", view: "people"}));
+  if(lateL) alerts.push(chip(`<b>${lateL}</b> livraison(s) en retard`, {icon: ico("mail"), cls: "bad", view: "people"}));
+  if(lateT) alerts.push(chip(`<b>${lateT}</b> tâche(s) en retard`, {icon: ico("clock"), cls: "bad"}));
+  if(relances) alerts.push(chip(`<b>${relances}</b> relance(s) à faire`, {icon: ico("phone"), cls: "bad", view: "people"}));
   if(recPb) alerts.push(chip(`<b>${recPb}</b> point(s) de recette en problème`,
-                             {icon: "🧪", cls: "bad", view: "recettes",
+                             {icon: ico("flask"), cls: "bad", view: "recettes",
                               title: recPbLate ? recPbLate + " dont l'échéance est passée" : "Points à lever avant de livrer"}));
-  if(over) alerts.push(chip(`<b>${over}</b> jour(s) en surcharge`, {icon: "⚡", cls: "bad", view: "charge"}));
-  if(critRisk) alerts.push(chip(`<b>${critRisk}</b> risque(s) critique(s)`, {icon: "⚠", cls: "bad", view: "risques"}));
+  if(over) alerts.push(chip(`<b>${over}</b> jour(s) en surcharge`, {icon: ico("zap"), cls: "bad", view: "charge"}));
+  if(critRisk) alerts.push(chip(`<b>${critRisk}</b> risque(s) critique(s)`, {icon: ico("alert"), cls: "bad", view: "risques"}));
   if(wipLimit() && wip > wipLimit()) alerts.push(chip(`WIP <b>${wip}</b>/${wipLimit()}`, {cls: "bad", title: "Plus de chantiers en cours que la limite WIP"}));
   // 2) contexte (neutre)
   const status = [];
-  if(openL) status.push(chip(`<b>${openL}</b> livraison(s) attendue(s)`, {icon: "⌛", view: "people"}));
-  if(!wipLimit()) status.push(chip(`<b>${wip}</b> en cours`));
-  else if(wip <= wipLimit()) status.push(chip(`WIP <b>${wip}</b>/${wipLimit()} en cours`));
-  if(onhold) status.push(chip(`<b>${onhold}</b> en pause`, {icon: "⏸", cls: "soft"}));
+  if(openL) status.push(chip(`<b>${openL}</b> livraison(s) attendue(s)`, {icon: ico("hourglass"), view: "people"}));
   // 3) chrono actif (action, distinct) en tête, puis alertes, puis contexte
   let html = "";
   const act = activeSession();
   if(act){ const lab = act.label.length > 36 ? act.label.slice(0, 35) + "…" : act.label;
-    html += `<a class="seg run" onclick="mutate({op:'clock_stop'})" title="Chrono en cours : ${esc(act.label)} (depuis ${act.debut}) — cliquer pour arrêter">⏱ ${esc(lab)} · ${act.debut} · stop</a>`; }
+    html += `<a class="seg run" onclick="mutate({op:'clock_stop'})" title="Chrono en cours : ${esc(act.label)} (depuis ${act.debut}) — cliquer pour arrêter">${ico("clock")} ${esc(lab)} · ${act.debut} · ${ico("stop")}</a>`; }
   else { const last = lastEndedSession();   // rien en cours : proposer de reprendre le dernier chrono
     if(last){ const lab = last.label.length > 32 ? last.label.slice(0, 31) + "…" : last.label;
-      html += `<a class="seg resume" onclick="resumeLast()" title="Reprendre le chronométrage : ${esc(last.label)}">▶ Reprendre · ${esc(lab)}</a>`; } }
-  if(!alerts.length) html += chip("Rien d'urgent", {icon: "✓", cls: "ok"});
+      html += `<a class="seg resume" onclick="resumeLast()" title="Reprendre le chronométrage : ${esc(last.label)}">${ico("play")} Reprendre · ${esc(lab)}</a>`; } }
+  if(!alerts.length) html += chip("Rien d'urgent", {icon: ico("check"), cls: "ok"});
   $("alert").innerHTML = html + alerts.join("") + status.join("");
   renderNotif();
 }
@@ -996,13 +1044,94 @@ function checkDesktopNotifs(){
 
 function saveSetting(k, v){ mutate({op: "set_settings", settings: {[k]: v}}); }
 
-// ---- Tableau de bord -----------------------------------------------------
-function dkpi(label, val, sub, cls, onclick, help){
-  return `<div class="kpi ${cls || ""}"${help ? ` title="${esc(help)}"` : ""}${onclick ? ` onclick="${onclick}" style="cursor:pointer"` : ""}>` +
-    `<div class="lab">${label}${help ? ` <span class="khint">ⓘ</span>` : ""}</div><div class="num">${esc(String(val))}</div>` +
-    (sub ? `<div class="sub">${esc(sub)}</div>` : "") + `</div>`;
+// ======================================================================== //
+//  Gabarit commun des écrans. UNE recette par élément : c'est ce qui rend
+//  les 17 écrans homogènes. Toute vue commence par pageHead() ; ses parties
+//  sont des section() ; les chiffres des kpi() ; les filtres des fchip().
+// ======================================================================== //
+// En-tête de page. Le titre est le libellé de la barre de navigation.
+// o = {title, meta, eyebrow, actions, back: {label, onclick, tip}, sticky, edit: "js onblur"}
+function pageHead(o){
+  const title = o.edit
+    ? `<h2 class="ph-title" contenteditable="true" spellcheck="false" onblur="${o.edit}">${o.title}</h2>`
+    : `<h2 class="ph-title">${o.title}</h2>`;
+  return `<div class="ph${o.sticky ? " ph--sticky" : ""}">` +
+    (o.back ? `<button class="ghost ph-back" onclick="${o.back.onclick}"${o.back.tip ? ` title="${esc(o.back.tip)}"` : ""}>` +
+              `${ico("back")}${esc(o.back.label)}</button>` : "") +
+    `<div class="ph-t">` + (o.eyebrow ? `<div class="ph-eyebrow">${o.eyebrow}</div>` : "") + title +
+      (o.meta ? `<span class="ph-meta">${o.meta}</span>` : "") + `</div>` +
+    (o.actions ? `<div class="ph-act">${o.actions}</div>` : "") + `</div>`;
 }
-function dsection(t){ return `<div class="ch-h">${t}</div>`; }
+// Section : titre (méta en gris dans le titre si besoin) à gauche, commandes à droite.
+function section(title, right, cls){
+  return `<div class="sec${cls ? " " + cls : ""}"><span class="sec-t">${title}</span>` +
+         (right ? `<span class="sec-r">${right}</span>` : "") + `</div>`;
+}
+// Tuile chiffrée — la même partout (chantier, risques, recette, tableau de bord,
+// activité, charge, absences). Deux formes d'appel :
+//   kpi(libellé, valeur, sous-titre, ton)          ton : "bad" | "warn" | "good" | ""
+//   kpi({label, value, sub, tone, size: "sm", onclick, help})
+// La tonalité colore le chiffre ; aucune barre d'accent latérale.
+function kpi(label, value, sub, cls){
+  const o = typeof label === "object" ? label : {label, value, sub, tone: cls};
+  return `<div class="kpi${o.size === "sm" ? " sm" : ""}${o.tone ? " " + o.tone : ""}"` +
+    (o.help ? ` title="${esc(o.help)}"` : "") + (o.onclick ? ` onclick="${o.onclick}"` : "") + `>` +
+    `<div class="lab">${o.label}${o.help ? ico("info", "khint") : ""}</div>` +
+    `<div class="num">${esc(String(o.value))}</div>` + (o.sub ? `<div class="sub">${esc(o.sub)}</div>` : "") + `</div>`;
+}
+// Forme compacte (bandes du tableau de bord, charge, activité) — même tuile, taille « sm ».
+function dkpi(label, value, sub, tone, onclick, help){ return kpi({label, value, sub, tone, onclick, help, size: "sm"}); }
+// Pastille de filtre, de tri ou de segment. Un seul état actif pour toutes : contour
+// encre. Le noir plein reste réservé à l'action principale d'un écran.
+function fchip(label, on, onclick, o){
+  o = o || {};
+  return `<button type="button" class="fchip${on ? " on" : ""}${o.cls ? " " + o.cls : ""}" aria-pressed="${on ? "true" : "false"}"` +
+    (o.title ? ` title="${esc(o.title)}"` : "") + (o.style ? ` style="${o.style}"` : "") + ` onclick="${onclick}">${label}</button>`;
+}
+// État vide d'un écran ou d'une section : ce qui manque, et au besoin de quoi le créer.
+function emptyState(text, cta){ return `<div class="empty-state">${text}${cta ? `<div class="empty-cta">${cta}</div>` : ""}</div>`; }
+// Aide sous l'en-tête : comment lire ou utiliser l'écran. Une seule par écran, au plus.
+function hint(text){ return `<div class="hint">${text}</div>`; }
+// Icônes de commande : un trait, la couleur du texte, jamais d'emoji dans un bouton.
+const ICONS = {
+  search:  '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/>',
+  bell:    '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/>',
+  play:    '<path d="M7 4.8v14.4L19 12z" fill="currentColor" stroke="none"/>',
+  stop:    '<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/>',
+  pause:   '<path d="M9 5v14M15 5v14"/>',
+  plus:    '<path d="M12 5v14M5 12h14"/>',
+  x:       '<path d="M18 6 6 18M6 6l12 12"/>',
+  check:   '<path d="M20 6 9 17l-5-5"/>',
+  down:    '<path d="m6 9 6 6 6-6"/>',
+  up:      '<path d="m18 15-6-6-6 6"/>',
+  left:    '<path d="m15 18-6-6 6-6"/>',
+  right:   '<path d="m9 18 6-6-6-6"/>',
+  back:    '<path d="M19 12H5M11 18l-6-6 6-6"/>',
+  edit:    '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+  trash:   '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"/>',
+  clip:    '<path d="m21 11-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9"/>',
+  pin:     '<path d="M12 17v5M9 4h6l-1 6 4 4H6l4-4z"/>',
+  calendar:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+  alert:   '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/>',
+  info:    '<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>',
+  refresh: '<path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/>',
+  mail:    '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>',
+  clock:   '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  sheet:   '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 9h16M4 15h16M10 3v18"/>',
+  forward: '<path d="m13 19 9-7-9-7zM2 19l9-7-9-7z"/>',
+  print:   '<path d="M6 9V3h12v6"/><rect x="3" y="9" width="18" height="8" rx="2"/><path d="M6 14h12v7H6z"/>',
+  phone:   '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3.1-8.7A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.9.6 2.8.7a2 2 0 0 1 1.7 2z"/>',
+  flask:   '<path d="M9 3h6M10 3v6l-5.6 9.6A1.6 1.6 0 0 0 5.8 21h12.4a1.6 1.6 0 0 0 1.4-2.4L14 9V3"/><path d="M7.5 15h9"/>',
+  zap:     '<path d="M13 2 3 14h9l-1 8 10-12h-9z"/>',
+  hourglass:'<path d="M6 2h12M6 22h12M7 2c0 5 5 6 5 10s-5 5-5 10M17 2c0 5-5 6-5 10s5 5 5 10"/>',
+  folder:  '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+};
+function ico(name, cls){
+  return `<svg class="ico${cls ? " " + cls : ""}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ` +
+         `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
+}
+
+// ---- Tableau de bord -----------------------------------------------------
 function topPersAll(m){ return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 8); }
 function chartBox(title, svg){ return `<div class="cardx"><div class="cardx-h">${title}</div><div class="cardx-b">${svg}</div></div>`; }
 const STATUT_COLOR = {todo: "var(--gray)", doing: "var(--blue)", block: "var(--red)", recette: "#8b5cf6", done: "var(--green)"};
@@ -1265,24 +1394,25 @@ function renderDashboard(){
   const pSV = pEV - pPV, pCV = acOn ? pEV - pAC : null;
   const pEAC = pCPI ? pBAC / pCPI : null, pVAC = pEAC != null ? pBAC - pEAC : null;
 
-  // ===== Légende + repères d'interprétation (PMBOK) =====
-  let h = `<div class="dlegend-bar">` +
-    `<span class="leg-chip"><i class="lg-good"></i>bon</span>` +
-    `<span class="leg-chip"><i class="lg-warn"></i>à surveiller</span>` +
-    `<span class="leg-chip"><i class="lg-bad"></i>à risque</span>` +
-    `<span class="leg-chip"><i class="lg-neut"></i>informatif</span>` +
-    `<a class="lnk leg-toggle" onclick="this.parentNode.querySelector('.dref').classList.toggle('show')">Comment lire ces indicateurs ? ▾</a>` +
-    `<div class="dref">` +
+  // ===== En-tête : légende des couleurs + repères d'interprétation (PMBOK) =====
+  let h = pageHead({title: "Tableau de bord", meta: "au " + fmt(TODAY),
+    actions: `<span class="leg">` +
+      `<span class="leg-chip"><i class="lg-good"></i>bon</span>` +
+      `<span class="leg-chip"><i class="lg-warn"></i>à surveiller</span>` +
+      `<span class="leg-chip"><i class="lg-bad"></i>à risque</span>` +
+      `<span class="leg-chip"><i class="lg-neut"></i>informatif</span></span>` +
+      `<button class="lnk" onclick="$('dashRef').classList.toggle('show')">Comment lire ces indicateurs ?</button>`}) +
+    `<div class="dref" id="dashRef">` +
       `<div><b>SPI</b> (délai, EV/PV) &amp; <b>CPI</b> (coût, EV/AC) : <b class="g">≥ 1,0</b> en avance / sous budget · <b class="w">0,90–1,0</b> léger écart · <b class="b">&lt; 0,90</b> à risque.</div>` +
       `<div><b>SV</b> / <b>CV</b> (en €) : <b class="g">positif</b> = avance / économie ; <b class="b">négatif</b> = retard / dépassement.</div>` +
       `<div><b>EAC</b> (coût final estimé) : bon s'il reste ≤ budget, c.-à-d. <b>VAC</b> = BAC − EAC <b class="g">≥ 0</b>.</div>` +
       `<div><b>Retards, tâches/livrables en retard, relances, risques critiques</b> : objectif <b class="g">0</b> ; toute valeur &gt; 0 passe en <b class="b">rouge</b>.</div>` +
       (wipLimit() ? `<div><b>WIP</b> : chantiers en parallèle — bon <b class="g">≤ ${wipLimit()}</b> (au-delà : dispersion).</div>` : `<div><b>WIP</b> : chantiers en parallèle — <b class="g">aucune limite</b> définie.</div>`) +
-      `<div class="muted">Survole un indicateur marqué ⓘ pour son interprétation détaillée.</div>` +
-    `</div></div>`;
+      `<div class="muted">Survole un indicateur marqué ${ico("info", "khint")} pour son interprétation détaillée.</div>` +
+    `</div>`;
 
   // ===== Bande 1 — Performance & délais (repliable) =====
-  let b1 = `<div class="kband">`;
+  let b1 = `<div class="kpis sm">`;
   b1 += dkpi("Avancement moyen", avg + " %", active.length + " chantiers actifs", "", "", "Moyenne d'avancement (tâches faites) des chantiers actifs. Indicatif, pas de seuil bon/mauvais.");
   const wlim = wipLimit();
   b1 += dkpi("WIP — en cours", wlim ? (by.doing + "/" + wlim) : String(by.doing), wlim ? (by.doing > wlim ? "limite dépassée" : "dans la limite") : "illimité", wlim && by.doing > wlim ? "bad" : "good", "", wlim ? ("Chantiers menés en parallèle vs la limite. Bon ≤ " + wlim + " ; au-delà = dispersion, tout avance plus lentement.") : "Chantiers menés en parallèle. Aucune limite WIP définie (réglable dans Charge).");
@@ -1300,7 +1430,7 @@ function renderDashboard(){
   h += dband("perf", "Performance &amp; délais", b1);
 
   // ===== Bande 2 — Livraison & activité =====
-  let b2 = `<div class="kband">`;
+  let b2 = `<div class="kpis sm">`;
   b2 += dkpi("Livrables attendus", livOpen, livLate + " en retard", livLate ? "bad" : "", "setView('people')", "Livrables encore dûs ; le sous-texte compte ceux en retard (échéance passée). Rouge dès qu'un est en retard.");
   b2 += dkpi("Relances à faire", relances, "échéance dépassée", relances ? "bad" : "good", "setView('people')", "Livrables dont l'échéance est passée et non encore livrés → à relancer (puis re-suggéré tous les " + SETTINGS.relance_jours + " j). Tant que la date attendue n'est pas dépassée, aucune relance. Objectif 0.");
   b2 += dkpi("Recette vérifiée", recTtl ? recPct + " %" : "—", recOk + "/" + recTtl + " points", recTtl ? (recPct >= 90 ? "good" : recPct >= 50 ? "warn" : "bad") : "", "setView('recettes')", "Part des points de recette vérifiés, tous chantiers confondus. Clic → suivi de recette.");
@@ -1341,7 +1471,7 @@ function renderDashboard(){
 
   // ===== Détail EVM (€) si budgété =====
   if(evmRows.length){
-    let be = `<div class="kband">`;
+    let be = `<div class="kpis sm">`;
     be += dkpi("Budget total (BAC)", fmtEur(pBAC), evmRows.length + " budgété(s)", "", "", "Budget à l'achèvement — somme des budgets saisis sur les chantiers.");
     be += dkpi("Valeur acquise (EV)", fmtEur(pEV), fmtPctw(pBAC ? pEV / pBAC : null) + " du budget", "", "", "Earned Value : budget correspondant au travail RÉELLEMENT fait (fait = 100 %, en cours = 50 %).");
     be += dkpi("Valeur planifiée (PV)", fmtEur(pPV), fmtPctw(pBAC ? pPV / pBAC : null) + " prévu à date", "", "", "Planned Value : budget qui DEVRAIT être consommé à aujourd'hui selon le planning. EV vs PV → avance / retard.");
@@ -1397,8 +1527,8 @@ function chargeAnalytics(cd){
     cum += cd.days[i].count;
     if(cum > i + 1){ rupt = cd.days[i].date; break; }
   }
-  let fut = `<div class="ch-h">Charge à venir — capacité vs demande (${workDays} j ouvrés · ${hj} h/j)</div>`;
-  fut += `<div class="kband">`;
+  let fut = section(`Charge à venir <span class="muted">· capacité vs demande, ${workDays} j ouvrés à ${hj} h/j</span>`);
+  fut += `<div class="kpis sm">`;
   fut += dkpi("Capacité nette", capH + " h", workDays + " j ouvrés restants", "", "", "Jours ouvrés restants sur l'horizon (week-ends et congés exclus) × heures facturables/jour. Ce que tu peux réellement produire d'ici la fin des tâches planifiées.");
   fut += dkpi("Charge à faire", demH + " h", taskDays + " tâche-jours", "", "", "Somme des durées des tâches non finies × heures facturables/jour. Le travail restant à produire.");
   fut += dkpi("Occupation prévue", occ + " %", occ > 100 ? "au-dessus de la capacité" : "dans la capacité", occ > 100 ? "bad" : "good", "", "Charge à faire ÷ capacité nette. Au-delà de 100 % = plus de travail planifié que d'heures disponibles.");
@@ -1411,8 +1541,8 @@ function chargeAnalytics(cd){
   const avgOcc = occDays.length ? Math.round(occDays.reduce((a, b) => a + b, 0) / occDays.length) : 0;
   const peakOcc = occDays.length ? Math.round(Math.max(...occDays)) : 0;
   const overN = occDays.filter(o => o > 100).length;
-  let pas = `<div class="ch-h">Charge passée — occupation réelle chronométrée (${occDays.length} j travaillés)</div>`;
-  pas += `<div class="kband">`;
+  let pas = section(`Charge passée <span class="muted">· occupation réelle chronométrée, ${occDays.length} j travaillés</span>`);
+  pas += `<div class="kpis sm">`;
   pas += dkpi("Occupation moyenne", avgOcc + " %", occDays.length + " j travaillés", avgOcc > 100 ? "bad" : "", "", "Temps chronométré moyen par jour travaillé ÷ heures facturables/jour. Reflète ta charge réelle passée.");
   pas += dkpi("Pic d'occupation", peakOcc + " %", "journée la plus chargée", peakOcc > 100 ? "bad" : "", "", "Journée la plus chargée en temps chronométré, rapportée aux heures facturables/jour.");
   pas += dkpi("Jours en surcharge", overN + " j", "> 100 % de la journée", overN ? "bad" : "good", "", "Nombre de jours travaillés où le temps chronométré a dépassé les heures facturables/jour.");
@@ -1422,7 +1552,7 @@ function chargeAnalytics(cd){
 }
 function renderCharge(){
   const cd = chargeData();
-  let h = `<div class="settings">` +
+  let h = pageHead({title: "Charge", meta: `limite ${cd.cap} tâche${cd.cap > 1 ? "s" : ""} par jour`}) + `<div class="settings">` +
     fldNum("Capacité / jour", "capacite_jour", 1) +
     fldNum("Max chantiers en cours (0 = illimité)", "wip_max", 0) +
     fldNum("Relance après (j)", "relance_jours", 1) +
@@ -1439,28 +1569,27 @@ function renderCharge(){
     `<label class="fld"><span class="fl">Vendredi (fin, sans pause)</span>` +
     `<input type="time" value="${SETTINGS.vendredi_fin || "13:30"}" title="Le vendredi : journée jusqu'à cette heure, sans pause déjeuner" onchange="saveSetting('vendredi_fin',this.value)"></label></div>`;
   h += chargeAnalytics(cd);
-  h += `<div class="ch-h">Plan de charge — tâches actives par jour · limite <b>${cd.cap}</b> · horizon 120 j</div>`;
-  if(!cd.days.length){ $("charge").innerHTML = h + `<div class="empty">Aucune tâche active planifiée.</div>`; return; }
+  h += section(`Plan de charge <span class="muted">· tâches actives par jour, limite ${cd.cap}, horizon 120 j</span>`);
+  if(!cd.days.length){ $("charge").innerHTML = h + emptyState("Aucune tâche active planifiée."); return; }
   h += chargeChart(cd);
-  h += `<div class="ch-h">Replanifier à la main — une barre par tâche <span class="muted small" style="font-weight:400">· glisse-la sur l'axe</span></div>`;
+  h += section(`Replanifier à la main <span class="muted">· une barre par tâche, glisse-la sur l'axe</span>`);
   h += chargeGantt(cd);
   const over = cd.days.filter(x => x.count > cd.cap);
   if(over.length){
     // Lissage assisté
     const sg = levelingSuggestions();
-    h += `<div class="ch-h">Lissage assisté` +
-         (sg.length ? ` <button class="btn sm primary" onclick="applyAllLeveling()">Tout lisser (${sg.length})</button>` : ``) + `</div>`;
+    h += section("Lissage assisté", sg.length ? `<button class="btn sm primary" onclick="applyAllLeveling()">Tout lisser (${sg.length})</button>` : "");
     if(sg.length){
-      h += `<div class="muted small" style="margin-bottom:8px">On ne décale que des tâches qui ont de la marge — la fin du projet ne bouge pas.</div>`;
+      h += `<div class="sec-note">On ne décale que des tâches qui ont de la marge — la fin du projet ne bouge pas.</div>`;
       sg.forEach(s => {
         h += `<div class="sugg"><div class="sg-txt">Décaler <b>${esc(s.label)}</b> <span class="muted">— ${esc(s.chantier)}</span><br>` +
           `<span class="muted">de ${s.shift} j → début le <b>${fmt(s.newStart)}</b> · marge dispo ${s.slack} j · soulage le ${fmt(s.day)}</span></div>` +
           `<button class="btn sm primary" onclick="applyLeveling('${s.chantier_id}','${s.tache_id}','${s.newStart}')">Appliquer</button></div>`;
       });
     } else {
-      h += `<div class="muted small" style="margin-bottom:10px">Aucune tâche déplaçable : sur les jours surchargés, les tâches sont soit <b>figées</b> (protégées), soit sur le <b>chemin critique</b> (sans marge). Réduis la charge en allongeant une échéance, en retirant une tâche, ou en défigeant un chantier.</div>`;
+      h += `<div class="sec-note">Aucune tâche déplaçable : sur les jours surchargés, les tâches sont soit <b>figées</b> (protégées), soit sur le <b>chemin critique</b> (sans marge). Réduis la charge en allongeant une échéance, en retirant une tâche, ou en défigeant un chantier.</div>`;
     }
-    h += `<div class="ch-h">Jours en surcharge (${over.length})</div>`;
+    h += section(`Jours en surcharge <span class="muted">(${over.length})</span>`);
     over.forEach(x => {
       h += `<div class="overday"><b>${fmt(x.date)}</b> — ${x.count} tâches (limite ${cd.cap})<ul>` +
         x.tasks.map(t => {
@@ -1471,7 +1600,7 @@ function renderCharge(){
         }).join("") + `</ul></div>`;
     });
   } else {
-    h += `<div class="ok-note">Aucune journée au-dessus de la limite de ${cd.cap} tâches.</div>`;
+    h += emptyState(`Aucune journée au-dessus de la limite de ${cd.cap} tâches.`);
   }
   $("charge").innerHTML = h;
   gcBind();   // écouteurs de glissement : posés APRÈS l'injection du HTML
@@ -1689,7 +1818,7 @@ function chargeGantt(cd){
       rows += `<div class="gc-row"><div class="gc-lab">` +
         `<span class="gc-t" title="${esc(it.label)} — ${esc(it.chantier)}">${esc(it.label)}</span>` +
         (it.fixed ? `<span class="gc-pin" title="Début imposé — cliquer pour rendre au calcul automatique" ` +
-                    `onclick="gcUnpin('${it.chantier_id}','${it.tache_id}')">📌</span>` : "") +
+                    `onclick="gcUnpin('${it.chantier_id}','${it.tache_id}')">${ico("pin")}</span>` : "") +
         (it.fige ? `<span class="gc-lock" title="Chantier figé — non déplaçable">🔒</span>` : "") +
         (it.started ? `<span class="gc-run" title="Tâche démarrée">⏱</span>` : "") +
         `</div><div class="gc-track">` +
@@ -1866,24 +1995,27 @@ function boardToggleEtat(e){ BOARD_F.etats.has(e) ? BOARD_F.etats.delete(e) : BO
 function boardClearF(){ BOARD_F.q = ""; BOARD_F.prio = null; BOARD_F.themes.clear(); BOARD_F.etats.clear(); renderBoard(); }
 function renderBoard(){
   const b = $("board"); b.innerHTML = "";
-  { // (12) barre légère de filtres/recherche, en tête du board
-    const F = BOARD_F, bar = document.createElement("div"); bar.className = "board-filter";
+  { // en-tête de page + barre de filtres : le même gabarit que tous les autres écrans
+    const F = BOARD_F;
     // Le thème remplace le tag comme axe de filtrage : 10 boutons stables au lieu
     // d'une liste qui enflait à chaque nouveau chantier.
     const used = new Set(LIVE().map(c => c.theme_id || ""));
     const active = F.q || F.prio || F.themes.size || F.etats.size;
-    let bh = `<input id="boardQ" class="bf-q" type="text" placeholder="Rechercher un chantier…" value="${esc(F.q)}" oninput="boardSearch(this.value)">`;
-    bh += `<span class="bf-grp">` + Object.keys(PRIO).map(p =>
-      `<button class="bf-seg ${F.prio === p ? "on" : ""}" onclick="boardTogglePrio('${p}')">${PRIO[p]}</button>`).join("") + `</span>`;
-    bh += `<span class="bf-grp">` + [["late", "⏰ retard"], ["att", "⌛ attente"], ["risk", "⚠ risque"], ["hold", "⏸ pause"]].map(([k, l]) =>
-      `<button class="bf-seg ${F.etats.has(k) ? "on" : ""}" onclick="boardToggleEtat('${k}')">${l}</button>`).join("") + `</span>`;
-    bh += `<span class="bf-grp th-filter">` + THEMES_ON().filter(t => used.has(t.id)).map(t =>
+    const tmp = document.createElement("div");
+    tmp.innerHTML = pageHead({title: "Tableau",
+      actions: `<input id="boardQ" class="tb-q" type="search" placeholder="Rechercher un chantier…" value="${esc(F.q)}" oninput="boardSearch(this.value)">`});
+    b.appendChild(tmp.firstElementChild);
+    let bh = `<span class="tb-grp">` + Object.keys(PRIO).map(p =>
+      fchip(PRIO[p], F.prio === p, `boardTogglePrio('${p}')`)).join("") + `</span>`;
+    bh += `<span class="tb-grp">` + [["late", "en retard"], ["att", "en attente"], ["risk", "à risque"], ["hold", "en pause"]].map(([k, l]) =>
+      fchip(l, F.etats.has(k), `boardToggleEtat('${k}')`)).join("") + `</span>`;
+    bh += `<span class="tb-grp th-filter">` + THEMES_ON().filter(t => used.has(t.id)).map(t =>
       `<button class="th-fb ${F.themes.has(t.id) ? "on" : ""}" style="--th:${t.couleur}" ` +
       `onclick="boardToggleTheme('${t.id}')">${t.icone} ${esc(t.nom)}</button>`).join("") +
-      (used.has("") ? `<button class="th-fb ${F.themes.has("") ? "on" : ""}" onclick="boardToggleTheme('')">○ sans thème</button>` : "") +
+      (used.has("") ? `<button class="th-fb ${F.themes.has("") ? "on" : ""}" onclick="boardToggleTheme('')">sans thème</button>` : "") +
       `</span>`;
-    if(active) bh += `<button class="bf-clear" onclick="boardClearF()">✕ effacer</button>`;
-    bar.innerHTML = bh; b.appendChild(bar);
+    if(active) bh += `<span class="tb-r"><button class="lnk" onclick="boardClearF()">Effacer les filtres</button></span>`;
+    const bar = document.createElement("div"); bar.className = "tb"; bar.innerHTML = bh; b.appendChild(bar);
   }
   COLS.forEach(col => {
     const isDone = col.key === "done";
@@ -1922,9 +2054,9 @@ function renderBoard(){
     if((isTodo || col.key === "doing") && total){   // barre de tri : Échéance / Avancement (À faire + En cours)
       const setter = isTodo ? "TODO_SORT" : "DOING_SORT", mode = isTodo ? TODO_SORT : DOING_SORT;
       const bar = document.createElement("div"); bar.className = "todo-tools";
-      bar.innerHTML = `<span class="tt-lbl">Trier</span>` +
-        `<button class="tt-seg ${mode === "echeance" ? "on" : ""}" onclick="event.stopPropagation();${setter}='echeance';renderBoard()">Échéance</button>` +
-        `<button class="tt-seg ${mode === "avancement" ? "on" : ""}" onclick="event.stopPropagation();${setter}='avancement';renderBoard()">Avancement</button>`;
+      bar.innerHTML = `<span class="tb-lbl">Trier</span>` +
+        fchip("Échéance", mode === "echeance", `event.stopPropagation();${setter}='echeance';renderBoard()`, {cls: "sm"}) +
+        fchip("Avancement", mode === "avancement", `event.stopPropagation();${setter}='avancement';renderBoard()`, {cls: "sm"});
       body.appendChild(bar);
     }
     if(!visible.length){ const e = document.createElement("div"); e.className = "empty"; e.textContent = "—"; body.appendChild(e); }
@@ -1938,7 +2070,7 @@ function renderBoard(){
       card.onclick = () => openChantier(c.id);
       const p = pct(c), lateDue = c.statut !== "done" && isLate(c.echeance);
       const refPin = c.baseline
-        ? ` <span class="c-pin" title="Référence figée${c.baseline_edits ? ` — planning replanifié ${c.baseline_edits}× depuis` : ""}">📌</span>`
+        ? ` <span class="c-pin" title="Référence figée${c.baseline_edits ? ` — planning replanifié ${c.baseline_edits}× depuis` : ""}">${ico("pin")}</span>`
         : "";
       let h = `<div class="c-title">${esc(c.titre)}${refPin}</div>`;
       h += `<div class="c-prog"><span class="track"><i style="width:${p}%"></i></span><span class="pc">${p}%</span></div>`;
@@ -1966,7 +2098,7 @@ function renderBoard(){
       if(bdg.length) h += `<div class="c-badges">${bdg.join("")}</div>`;
       if(c.theme_id && thById(c.theme_id)) h += `<div class="c-tags">` +
         themeChip(c.theme_id, {click: `event.stopPropagation();boardToggleTheme('${c.theme_id}')`}) + `</div>`;
-      if(c.hold) h += `<div class="c-actions"><button class="btn sm" title="Reprendre ce chantier (le remet dans la charge)" onclick="event.stopPropagation();mutate({op:'set_hold',chantier_id:'${c.id}',hold:false})">▶ Reprendre</button></div>`;
+      if(c.hold) h += `<div class="c-actions"><button class="btn sm" title="Reprendre ce chantier (le remet dans la charge)" onclick="event.stopPropagation();mutate({op:'set_hold',chantier_id:'${c.id}',hold:false})">${ico("play")} Reprendre</button></div>`;
       card.innerHTML = h; body.appendChild(card);
     });
     if((isDone || isTodo) && total > preview){   // bouton replier / déplier (Terminé & À faire)
@@ -1995,8 +2127,9 @@ function renderPeople(){
   const w = $("people"); w.innerHTML = "";
   const groups = Object.values(map).sort((a, b) =>
     (b.moi ? 1 : 0) - (a.moi ? 1 : 0) || a.nom.localeCompare(b.nom));
-  if(!groups.length){ w.innerHTML = `<div class="empty">Aucune attente enregistrée.</div>`; return; }
-  let head = `<div class="people-hint">Géré depuis l'<a onclick="setView('contacts')">annuaire</a> : une fiche par personne (renommer, rôle, fusionner les doublons).</div>`;
+  const ph = pageHead({title: "Livrables attendus", meta: `${groups.length} personne${groups.length > 1 ? "s" : ""}`});
+  if(!groups.length){ w.innerHTML = ph + emptyState("Aucune attente enregistrée."); return; }
+  let head = ph + hint(`Ce que chacun doit livrer, et pour quand. Les fiches se gèrent dans l'<a onclick="setView('contacts')">annuaire</a> : renommer, rôle, fusionner les doublons.`);
   groups.forEach(info => {
     head += `<div class="person"><h3>${info.moi ? "🧍 " : ""}${esc(info.nom)}</h3>` +
       `<div class="role">${esc(info.role || "")}</div>`;
@@ -2056,12 +2189,15 @@ function filterContacts(q){
 function renderContacts(){
   let rows = peopleStats();
   if(PEOPLE_SORT === "open") rows = rows.slice().sort((a, b) => (b.open - a.open) || a.nom.localeCompare(b.nom));
-  let h = `<div class="ch-h">Annuaire — personnes <button class="btn sm primary" onclick="addPerson()">+ Ajouter</button></div>`;
-  h += `<div class="people-hint">Source de vérité unique. « <b>moi</b> » = toi ; « <b>Fusionner</b> » replie un doublon dans une autre fiche (réattribue ses livrables).</div>`;
-  if(!rows.length){ $("contacts").innerHTML = h + `<div class="empty">Aucune personne. Ajoute-en une, ou crée un livrable.</div>`; return; }
+  let h = pageHead({title: "Annuaire", meta: `${rows.length} personne${rows.length > 1 ? "s" : ""}`,
+    actions: `<button class="ghost primary" onclick="addPerson()">${ico("plus")}Ajouter une personne</button>`});
+  h += hint(`Source de vérité unique. « <b>moi</b> » = toi ; « <b>Fusionner</b> » replie un doublon dans une autre fiche (réattribue ses livrables).`);
+  if(!rows.length){ $("contacts").innerHTML = h + emptyState("Aucune personne. Ajoute-en une, ou crée un livrable."); return; }
   h += roleDatalist();
-  h += `<div class="people-tools"><input class="people-search" placeholder="Rechercher un nom, un rôle…" oninput="filterContacts(this.value)">` +
-    `<a class="people-sort" onclick="togglePeopleSort()">Trier : ${PEOPLE_SORT === "open" ? "livrables ouverts" : "nom"}</a></div>`;
+  h += `<div class="tb"><input class="tb-q" type="search" placeholder="Rechercher un nom, un rôle…" oninput="filterContacts(this.value)">` +
+    `<span class="tb-grp"><span class="tb-lbl">Trier par</span>` +
+    fchip("nom", PEOPLE_SORT !== "open", PEOPLE_SORT === "open" ? "togglePeopleSort()" : "") +
+    fchip("livrables ouverts", PEOPLE_SORT === "open", PEOPLE_SORT === "open" ? "" : "togglePeopleSort()") + `</span></div>`;
   h += `<table class="ptable"><thead><tr><th>Nom</th><th>Rôle</th><th>Livrables</th><th>Chantiers</th><th></th></tr></thead><tbody>`;
   rows.forEach(p => {
     const others = rows.filter(o => o.id !== p.id);
@@ -2131,16 +2267,16 @@ function renderAbsences(){
   const aVenir = list.filter(a => a.fin >= TODAY);
   const prochaine = aVenir[0];
 
-  let h = `<div class="ch-h">Congés &amp; absences` +
-    `<button class="btn sm primary" onclick="addAbsence()">+ Poser une absence</button>` +
-    `<button class="btn sm" onclick="importFeries()">Importer les fériés ${an}</button></div>`;
-  h += `<div class="people-hint">Les jours posés sortent du calendrier : le planning les enjambe et les échéances calculées reculent d'autant. ` +
-       `Une absence rattachée à quelqu'un d'autre est <b>informative</b> — sans affectation des tâches, elle ne décale rien.</div>`;
+  let h = pageHead({title: "Congés &amp; absences",
+    actions: `<button class="ghost" onclick="importFeries()">Importer les fériés ${an}</button>` +
+             `<button class="ghost primary" onclick="addAbsence()">${ico("plus")}Poser une absence</button>`});
+  h += hint(`Les jours posés sortent du calendrier : le planning les enjambe et les échéances calculées reculent d'autant. ` +
+       `Une absence rattachée à quelqu'un d'autre est <b>informative</b> — sans affectation des tâches, elle ne décale rien.`);
 
-  h += `<div class="abs-kpis">` +
-    `<div class="abs-kpi"><b>${nbJours}</b><span>jour${nbJours > 1 ? "s" : ""} posé${nbJours > 1 ? "s" : ""} en ${an}</span></div>` +
-    `<div class="abs-kpi"><b>${prochaine ? fmtShort(prochaine.debut) : "—"}</b><span>${prochaine ? "prochaine : " + esc(prochaine.label) : "rien de prévu"}</span></div>` +
-    `<div class="abs-kpi"><b>${OFF.size}</b><span>jours hors planning</span></div></div>`;
+  h += `<div class="kpis">` +
+    kpi(`Jours posés en ${an}`, String(nbJours), "hors jours fériés") +
+    kpi("Prochaine absence", prochaine ? fmtShort(prochaine.debut) : "—", prochaine ? prochaine.label : "rien de prévu") +
+    kpi("Jours hors planning", String(OFF.size)) + `</div>`;
 
   h += `<div class="abs-form">` +
     `<label>Du <input type="date" id="absDebut" value="${TODAY}"></label>` +
@@ -2154,7 +2290,7 @@ function renderAbsences(){
       `</select></label>` +
     `<button class="btn sm primary" onclick="submitAbsence()">Poser</button></div>`;
 
-  if(!list.length){ $("absences").innerHTML = h + `<div class="empty">Aucune absence enregistrée. Commence par importer les jours fériés, puis pose tes congés.</div>`; return; }
+  if(!list.length){ $("absences").innerHTML = h + emptyState("Aucune absence enregistrée. Commence par importer les jours fériés, puis pose tes congés."); return; }
 
   h += `<table class="ptable abs-table"><thead><tr><th>Période</th><th>Type</th><th>Libellé</th><th>Jours</th><th>Qui</th><th>Impact planning</th><th></th></tr></thead><tbody>`;
   list.forEach(a => {
@@ -2305,8 +2441,9 @@ function computeSchedule(c){
 // ======================================================================== //
 //  Page detaillee d'un chantier
 // ======================================================================== //
-function openChantier(id){ CUR = id; renderPage(); showView("page"); window.scrollTo(0, 0); }
-function backToBoard(){ CUR = null; showView("board"); }
+function openChantier(id){ CUR = id; showView("page"); }
+// Retour : vers la vue d'où l'on venait (Tableau, Recette, Bloc-notes…), pas toujours le Tableau.
+function backToBoard(){ CUR = null; showView(VIEW); }
 // Mise en pause (hold) : reprise manuelle ; date de reprise optionnelle (déclenche un rappel).
 function toggleHold(id){
   const c = chById(id); if(!c) return;
@@ -2345,7 +2482,9 @@ document.addEventListener("keydown", e => {
     const sm = $("searchMenu");
     if(sm && sm.classList.contains("open")){ closeSearch(); return; }
     if(document.querySelector(".menu.open")){ document.querySelectorAll(".menu.open").forEach(m => m.classList.remove("open")); return; }
-    if(CUR) backToBoard();
+    if(inField(e.target)){ e.target.blur(); return; }   // Échap dans un champ : on en sort, on ne quitte pas l'écran
+    if(SHOWN === "cdc") backFromCdc();
+    else if(SHOWN === "page") backToBoard();
     return;
   }
   // Recherche globale : '/' (hors saisie) ou Ctrl/Cmd+K.
@@ -2355,16 +2494,13 @@ document.addEventListener("keydown", e => {
   // Raccourcis lettre — inactifs pendant une saisie ou avec un modificateur.
   if(inField(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key.toLowerCase();
-  if(k === "s"){ if(activeSession()) mutate({op: "clock_stop"}); }
-  else if(k === "t"){ setView("board"); }
-  else if(k === "p"){ setView("planning"); }
-  else if(k === "d"){ setView("dash"); }
+  if(k === "s"){ if(activeSession()) mutate({op: "clock_stop"}); return; }
   // Capture immédiate : c'est le point qui décide si l'outil remplace le papier.
   // On écrit BEAUCOUP plus souvent une note ou une action qu'on ne crée un chantier,
   // donc « n » va à la note et la création de chantier passe sur « c ».
-  else if(k === "a"){ e.preventDefault(); captureAction(); }
-  else if(k === "n"){ e.preventDefault(); captureNote(); }
-  else if(k === "c"){ e.preventDefault(); newChantier(); }
+  if(k === "c"){ e.preventDefault(); newChantier(); return; }
+  const kv = VIEWS.find(x => x.key === k);          // t, p, d, a, n : lus dans le registre des vues
+  if(kv){ e.preventDefault(); if(kv.capture) kv.capture(); else setView(kv.id); }
 });
 // Ouvre la vue et pose le curseur dans le champ de saisie : zéro clic entre
 // l'idée et sa capture.
@@ -2387,21 +2523,19 @@ function renderPage(){
 
   let h = "";
   // En-tete
-  h += `<div class="pg-top">`;
-  h += `<button class="ghost" onclick="backToBoard()">← Tableau</button>`;
   const statusTxt = c.hold ? `En pause${c.hold_until ? ` — reprise prévue le ${fmt(c.hold_until)}` : ""}`
                   : blocked ? `Bloqué (auto) — ${esc(blockReason(c))}` : col.label;
-  h += `<div class="pg-titlewrap"><div class="d-status ${c.hold ? "hold" : blocked ? "block" : c.statut}">${statusTxt} · priorité ${PRIO[c.prio]}</div>` +
-       `<h2 class="pg-title" contenteditable="true" onblur="saveField('titre',this.textContent)">${esc(c.titre)}</h2></div>`;
-  h += `<div class="grow"></div>`;
+  let act = "";
   if(!c.hold && c.statut !== "done" && lateTasks(c).length)
-    h += `<button class="ghost" onclick="replanToday('${c.id}')" title="Glisser le travail restant pour repartir d'aujourd'hui — efface le retard dû à un gel ou une pause">⏩ Replanifier</button>`;
-  h += `<button class="ghost ${c.hold ? "held" : ""}" onclick="toggleHold('${c.id}')" title="${c.hold ? "Reprendre ce chantier" : "Mettre en pause : sort le chantier des retards, de la charge et du WIP"}">${c.hold ? "▶ Reprendre" : "⏸ Mettre en pause"}</button>`;
-  h += `<select onchange="mutate({op:'move_chantier',id:'${c.id}',statut:this.value})" class="sel" title="État d'avancement — Recette et Terminé se posent tout seuls (recette ouverte, toutes les tâches faites), comme Bloqué">` +
+    act += `<button class="ghost" onclick="replanToday('${c.id}')" title="Glisser le travail restant pour repartir d'aujourd'hui — efface le retard dû à un gel ou une pause">${ico("forward")}Replanifier</button>`;
+  act += `<button class="ghost ${c.hold ? "held" : ""}" onclick="toggleHold('${c.id}')" title="${c.hold ? "Reprendre ce chantier" : "Mettre en pause : sort le chantier des retards, de la charge et du WIP"}">${c.hold ? ico("play") + "Reprendre" : ico("pause") + "Mettre en pause"}</button>`;
+  act += `<select onchange="mutate({op:'move_chantier',id:'${c.id}',statut:this.value})" class="sel" title="État d'avancement — Recette et Terminé se posent tout seuls (recette ouverte, toutes les tâches faites), comme Bloqué">` +
        COLS.filter(k => k.key !== "block").map(k => `<option value="${k.key}" ${c.statut === k.key ? "selected" : ""}>${k.label}</option>`).join("") + `</select>`;
-  h += `<select onchange="mutate({op:'update_chantier',id:'${c.id}',prio:this.value})" class="sel">` +
+  act += `<select onchange="mutate({op:'update_chantier',id:'${c.id}',prio:this.value})" class="sel">` +
        ["h", "m", "b"].map(x => `<option value="${x}" ${c.prio === x ? "selected" : ""}>Priorité ${PRIO[x]}</option>`).join("") + `</select>`;
-  h += `</div>`;
+  h += pageHead({sticky: true, back: {label: VIEW_BY_ID[VIEW].label, onclick: "backToBoard()"},
+    eyebrow: `<span class="d-status ${c.hold ? "hold" : blocked ? "block" : c.statut}">${statusTxt} · priorité ${PRIO[c.prio]}</span>`,
+    title: esc(c.titre), edit: "saveField('titre',this.textContent)", actions: act});
 
   // KPI
   h += `<div class="kpis">`;
@@ -2474,7 +2608,7 @@ function renderPage(){
   h += card(`Parties prenantes <span class="add" onclick="showAddPartie('${c.id}')">+ ajouter</span>`,
     (c.parties.length ? c.parties.map(pp =>
       `<div class="row-line"><span>${esc(pp.nom)}${pp.role ? ` <span class="muted">· ${esc(pp.role)}</span>` : ""}</span>` +
-      `<span class="del" onclick="mutate({op:'remove_partie',chantier_id:'${c.id}',partie_id:'${pp.id}'})">×</span></div>`).join("")
+      `<span class="del" onclick="mutate({op:'remove_partie',chantier_id:'${c.id}',partie_id:'${pp.id}'})">${ico("x")}</span></div>`).join("")
       : `<div class="empty">Personne pour l'instant.</div>`) + `<div id="addPartie_${c.id}"></div>`);
 
   // Thème — un seul, choisi dans la liste fermée (plus de saisie libre)
@@ -2523,7 +2657,7 @@ function renderPage(){
       ? hns.map(n => `<div class="hist"><span class="d">${(NT_TYPE[n.type] || NT_TYPE.note).ic} ${fmt(n.date)}${n.heure ? " " + n.heure : ""}</span>` +
           (n.titre ? `<b>${esc(n.titre)}</b>` : "") +
           `<div class="hist-c">${esc(n.corps)}</div>` + pjListe(piecesOf(n.id), false) +
-          `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer cette note ?'))mutate({op:'note_remove',id:'${n.id}'})">×</span></div>`).join("")
+          `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer cette note ?'))mutate({op:'note_remove',id:'${n.id}'})">${ico("x")}</span></div>`).join("")
       : `<div class="empty">Aucune note.</div>`));
 
   h += `</div></div>`;
@@ -2534,10 +2668,6 @@ function renderPage(){
   $("page").innerHTML = h;
 }
 
-function kpi(label, value, sub, cls){
-  return `<div class="kpi ${cls || ""}"><div class="lab">${label}</div><div class="num">${esc(value)}</div>` +
-         (sub ? `<div class="sub">${esc(sub)}</div>` : "") + `</div>`;
-}
 // Toutes les sections de la page chantier sont réductibles : chevron dans l'en-tête,
 // état plié/déplié mémorisé. La clé est explicite si fournie, sinon dérivée du titre.
 function card(title, body, key){
@@ -2654,13 +2784,13 @@ function taskTable(c, S){
     if(t.is_milestone){
       h += `<span class="box ${t.done ? "ok" : ""}" title="Jalon atteint / pas encore" onclick="mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})"></span>`;
     } else if(t.done){
-      h += `<button class="tprog-done" title="Terminé — cliquer pour rouvrir" onclick="mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">✓ Terminé</button>`;
+      h += `<button class="tprog-done" title="Terminé — cliquer pour rouvrir" onclick="mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">${ico("check")} Terminé</button>`;
     } else if(t.start_date){
       h += `<span class="tstate inprog${act ? " running" : ""}" title="${act ? "Chrono en cours (depuis " + act.debut + ")" : "Démarrée — chrono en pause"}">${act ? "⏱ en cours" : "● en cours"}</span>`;
     } else if(startBlocked(c)){
-      h += `<button class="tstart blocked" title="Limite de ${SETTINGS.wip_max || 3} chantiers « En cours » atteinte — terminez ou mettez en pause un chantier d'abord" onclick="alert('${wipFullMsg()}')">▶ Démarrer</button>`;
+      h += `<button class="tstart blocked" title="Limite de ${SETTINGS.wip_max || 3} chantiers « En cours » atteinte — terminez ou mettez en pause un chantier d'abord" onclick="alert('${wipFullMsg()}')">${ico("play")} Démarrer</button>`;
     } else {
-      h += `<button class="tstart" title="Démarrer — lance le chrono et enregistre le début réel" onclick="mutate({op:'start_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">▶ Démarrer</button>`;
+      h += `<button class="tstart" title="Démarrer — lance le chrono et enregistre le début réel" onclick="mutate({op:'start_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">${ico("play")} Démarrer</button>`;
     }
     h += `<input class="tlabel ${t.done ? "done" : ""}" value="${esc(t.label)}" ` +
          `onblur="if(this.value.trim()&&this.value!=='${jqs(t.label)}')mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',label:this.value.trim()})">`;
@@ -2677,16 +2807,16 @@ function taskTable(c, S){
         `onchange="mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',done_date:this.value||null})"></span>` +
         (tmin ? `<span class="tstate real" title="Temps chronométré">⏱ ${fmtDur(tmin)}</span>` : "");
     } else if(!t.is_milestone && t.start_date){
-      h += `<button class="tfinish" title="Terminer la tâche (enregistre la fin réelle)" onclick="mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">✓ Terminer</button>`;
+      h += `<button class="tfinish" title="Terminer la tâche (enregistre la fin réelle)" onclick="mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">${ico("check")} Terminer</button>`;
       h += act
-        ? `<button class="tstart stop" title="Mettre le chrono en pause (démarré à ${act.debut})" onclick="mutate({op:'clock_stop',id:'${act.id}'})">⏸ Pause</button>`
-        : `<button class="chrono" title="Reprendre le chrono sur cette tâche" onclick="mutate({op:'clock_start',kind:'tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">▶ Reprendre${tmin ? " · " + fmtDur(tmin) : ""}</button>`;
+        ? `<button class="tstart stop" title="Mettre le chrono en pause (démarré à ${act.debut})" onclick="mutate({op:'clock_stop',id:'${act.id}'})">${ico("pause")} Pause</button>`
+        : `<button class="chrono" title="Reprendre le chrono sur cette tâche" onclick="mutate({op:'clock_start',kind:'tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">${ico("play")} Reprendre${tmin ? " · " + fmtDur(tmin) : ""}</button>`;
       h += `<input type="date" class="tstart-date" value="${t.start_date}" title="Début réel (corrigeable)" ` +
            `onchange="mutate({op:'update_tache',chantier_id:'${c.id}',tache_id:'${t.id}',start_date:this.value||null})">`;
       h += `<span class="tstart-undo" title="Annuler le démarrage (revenir à « à faire »)" ` +
            `onclick="mutate({op:'start_tache',chantier_id:'${c.id}',tache_id:'${t.id}',date:null})">↺</span>`;
     }
-    h += `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer cette tâche ?'))mutate({op:'remove_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">×</span>`;
+    h += `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer cette tâche ?'))mutate({op:'remove_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">${ico("x")}</span>`;
     h += `</div>`;
     // ligne 2 : debut (impose ou auto) / duree / fin / predecesseurs / marge
     h += `<div class="trow-sub">`;
@@ -2705,7 +2835,7 @@ function taskTable(c, S){
     // predecesseurs
     const avail = c.taches.filter(o => o.id !== t.id && !t.preds.includes(o.id));
     const chips = t.preds.map(pid => `<span class="predchip">${esc(lbl[pid] || "?")}` +
-      `<span class="x" title="Retirer" onclick="removePred('${c.id}','${t.id}','${pid}')">×</span></span>`).join("");
+      `<span class="x" title="Retirer" onclick="removePred('${c.id}','${t.id}','${pid}')">${ico("x")}</span></span>`).join("");
     const addsel = avail.length
       ? `<select class="predadd" onchange="addPred('${c.id}','${t.id}',this.value);this.value=''">` +
         `<option value="">+ après…</option>` + avail.map(o => `<option value="${o.id}">${esc(o.label)}</option>`).join("") + `</select>`
@@ -2735,7 +2865,7 @@ function taskTable(c, S){
         `<input class="slabel${st.done ? " done" : ""}" value="${esc(st.label)}" ` +
           `onblur="if(this.value.trim()&&this.value!==this.defaultValue)mutate({op:'update_subtask',chantier_id:'${c.id}',tache_id:'${t.id}',subtask_id:'${st.id}',label:this.value.trim()})">` +
         (st.done && st.done_at ? `<span class="sdate" title="Étape cochée le ${fmtDT(st.done_at)}">✓ ${fmtDT(st.done_at)}</span>` : ``) +
-        `<span class="sdel" title="Supprimer l'étape" onclick="mutate({op:'remove_subtask',chantier_id:'${c.id}',tache_id:'${t.id}',subtask_id:'${st.id}'})">×</span>` +
+        `<span class="sdel" title="Supprimer l'étape" onclick="mutate({op:'remove_subtask',chantier_id:'${c.id}',tache_id:'${t.id}',subtask_id:'${st.id}'})">${ico("x")}</span>` +
         `</div>`;
     });
     h += `<input class="sadd" placeholder="+ étape…" onkeydown="if(event.key==='Enter')addSubtask('${c.id}','${t.id}',this)">`;
@@ -3051,15 +3181,15 @@ function recPointRow(c, p){
   // contrôle principal, à gauche — décalque de celui d'une tâche
   let ctrl;
   if(ok){
-    ctrl = `<button class="tprog-done" title="Vérifié — cliquer pour rouvrir" onclick="${set("a_verifier")}">✓ Vérifié</button>`;
+    ctrl = `<button class="tprog-done" title="Vérifié — cliquer pour rouvrir" onclick="${set("a_verifier")}">${ico("check")} Vérifié</button>`;
   } else if(run){
-    ctrl = `<button class="tstart stop" title="Terminer : arrête le chrono et marque vérifié" onclick="ptStop('${c.id}','${p.id}')">⏹ Terminer</button>` +
+    ctrl = `<button class="tstart stop" title="Terminer : arrête le chrono et marque vérifié" onclick="ptStop('${c.id}','${p.id}')">${ico("stop")} Terminer</button>` +
            `<span class="tstate inprog running" title="Chrono en cours depuis ${run.debut}">⏱ ${run.debut}</span>`;
   } else if(p.debut){
-    ctrl = `<button class="tfinish" title="Marquer vérifié" onclick="${set("ok")}">✓ Vérifier</button>` +
+    ctrl = `<button class="tfinish" title="Marquer vérifié" onclick="${set("ok")}">${ico("check")} Vérifier</button>` +
            `<span class="tstate inprog" title="Vérification démarrée le ${fmt(p.debut)} — chrono en pause">● en cours</span>`;
   } else {
-    ctrl = `<button class="tstart" title="Démarrer la vérification — lance le chrono sur ce point" onclick="mutate({op:'point_start',chantier_id:'${c.id}',point_id:'${p.id}'})">▶ Démarrer</button>`;
+    ctrl = `<button class="tstart" title="Démarrer la vérification — lance le chrono sur ce point" onclick="mutate({op:'point_start',chantier_id:'${c.id}',point_id:'${p.id}'})">${ico("play")} Démarrer</button>`;
   }
 
   let h = `<div class="trow${pb ? " pb" : ""}${late ? " late" : ""}"><div class="trow-main">`;
@@ -3067,11 +3197,11 @@ function recPointRow(c, p){
   h += `<input class="tlabel ${ok ? "done" : ""}" value="${esc(p.titre)}" ` +
        `onblur="if(this.value.trim()&&this.value!=='${jqs(p.titre)}')${u("titre:this.value.trim()")}">`;
   h += pb
-    ? `<button class="pt-flag on" title="Problème levé — cliquer quand c'est corrigé" onclick="${set("ok")}">⚠ Problème</button>`
-    : `<button class="pt-flag" title="Signaler un problème sur ce point" onclick="${set("probleme")}">⚠</button>`;
+    ? `<button class="pt-flag on" title="Problème levé — cliquer quand c'est corrigé" onclick="${set("ok")}">${ico("alert")} Problème</button>`
+    : `<button class="pt-flag" title="Signaler un problème sur ce point" onclick="${set("probleme")}">${ico("alert")}</button>`;
   if(min) h += `<span class="tstate real" title="Temps chronométré sur ce point">⏱ ${fmtDur(min)}</span>`;
   if(ok && p.verifie_le) h += `<span class="dates">vérifié le ${fmt(p.verifie_le)}</span>`;
-  h += `<span class="del" title="Supprimer ce point" onclick="if(confirm('Supprimer « ${jqs(p.titre)} » ?'))mutate({op:'point_remove',chantier_id:'${c.id}',point_id:'${p.id}'})">×</span>`;
+  h += `<span class="del" title="Supprimer ce point" onclick="if(confirm('Supprimer « ${jqs(p.titre)} » ?'))mutate({op:'point_remove',chantier_id:'${c.id}',point_id:'${p.id}'})">${ico("x")}</span>`;
   h += `</div>`;
   if(pb){
     h += `<div class="pt-pb">` +
@@ -3473,7 +3603,7 @@ function risquesBlock(c){
     const n = crit(r), lv = critLevel(n), off = !riskActive(r);
     const late = riskActive(r) && isLate(r.echeance_revue);
     const u = extra => `mutate({op:'update_risque',chantier_id:'${c.id}',risque_id:'${r.id}',${extra}})`;
-    const delx = `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer ce risque ?'))mutate({op:'remove_risque',chantier_id:'${c.id}',risque_id:'${r.id}'})">×</span>`;
+    const delx = `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer ce risque ?'))mutate({op:'remove_risque',chantier_id:'${c.id}',risque_id:'${r.id}'})">${ico("x")}</span>`;
     h += `<div class="rk ${off ? "rk-off" : ""}">`;
     if(!RK_EDIT.has(r.id)){
       // ----- LECTURE SEULE (par défaut) : un risque ajouté ne s'édite pas par accident -----
@@ -3574,7 +3704,7 @@ function renderRisques(){
   const avere = active.filter(r => r.statut === "avere").length;
   const noResp = active.filter(r => !r.responsable).length;
   const noRev = active.filter(r => !r.echeance_revue).length;
-  let h = `<div class="ch-h">Cartographie des risques — ${active.length} actif(s) sur ${all.length}</div>`;
+  let h = pageHead({title: "Risques", meta: `${active.length} actif${active.length > 1 ? "s" : ""} sur ${all.length}`});
   h += `<div class="kpis">` +
     kpi("Risques actifs", String(active.length), "ouverts + avérés") +
     kpi("Critiques", String(critN), "criticité ≥ 15", critN ? "bad" : "good") +
@@ -3585,24 +3715,24 @@ function renderRisques(){
   h += `<div class="dash-row">` +
     chartBox("Matrice de criticité (proba × gravité) — risques actifs", active.length ? riskMatrix(active) : `<div class="empty">Aucun risque actif.</div>`) +
     chartBox("Risques actifs par catégorie", active.length ? hbar(catRows(active), {labelW: 150, barW: 170}) : `<div class="empty">—</div>`) + `</div>`;
-  if(!all.length){ $("risques").innerHTML = h + `<div class="empty">Aucun risque. Ouvre un chantier et utilise « + risque » pour en ajouter.</div>`; return; }
-  // barre de filtres (statut / catégorie / chantier / responsable) sur allRisques()
-  const cats = {}; all.forEach(r => { const k = rkCanon(r.categorie); if(k && !cats[k]) cats[k] = r.categorie; });
-  const chs = {}; all.forEach(r => chs[r._c.id] = r._c.titre);
-  const resp = [...new Set(all.map(r => r.responsable).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-  const fsel = (k, cur, opts) => `<select class="rk-fsel" onchange="rkSetFilt('${k}',this.value)">${opts.map(([v, l]) => `<option value="${esc(v)}" ${cur === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
-  h += `<div class="rk-filters">` +
-    fsel("statut", RK_FILT.statut, [["", "Tous statuts"], ...Object.entries(RISK)]) +
-    fsel("categorie", RK_FILT.categorie, [["", "Toutes catégories"], ...Object.entries(cats)]) +
-    fsel("chantier", RK_FILT.chantier, [["", "Tous chantiers"], ...Object.entries(chs)]) +
-    fsel("responsable", RK_FILT.responsable, [["", "Tous responsables"], ...resp.map(x => [x, x])]) +
-    (RK_FILT.cell ? `<span class="rk-fchip">proba×gravité ${RK_FILT.cell.replace("_", "×")} <a onclick="rkFilt('cell','${RK_FILT.cell}')">×</a></span>` : "") +
-    (rkAnyFilt() ? `<a class="lnk" onclick="rkClearFilt()">Réinitialiser</a>` : "") + `</div>`;
+  if(!all.length){ $("risques").innerHTML = h + emptyState(`Aucun risque. Ouvre un chantier et utilise « + risque » pour en ajouter.`); return; }
+  // Registre : sa section, puis sa barre de filtres (statut / catégorie / chantier / responsable)
   const rows = all.filter(rkPass).sort((a, b) => {
     const va = rkSortVal(a, RK_SORT.key), vb = rkSortVal(b, RK_SORT.key);
     return (va < vb ? -1 : va > vb ? 1 : 0) * RK_SORT.dir;
   });
-  h += `<div class="ch-h">Registre — ${rows.length} risque(s)${rkAnyFilt() ? " (filtré)" : ""}</div>`;
+  h += section(`Registre <span class="muted">· ${rows.length} risque${rows.length > 1 ? "s" : ""}${rkAnyFilt() ? " (filtré)" : ""}</span>`);
+  const cats = {}; all.forEach(r => { const k = rkCanon(r.categorie); if(k && !cats[k]) cats[k] = r.categorie; });
+  const chs = {}; all.forEach(r => chs[r._c.id] = r._c.titre);
+  const resp = [...new Set(all.map(r => r.responsable).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const fsel = (k, cur, opts) => `<select class="rk-fsel" onchange="rkSetFilt('${k}',this.value)">${opts.map(([v, l]) => `<option value="${esc(v)}" ${cur === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+  h += `<div class="tb">` +
+    fsel("statut", RK_FILT.statut, [["", "Tous statuts"], ...Object.entries(RISK)]) +
+    fsel("categorie", RK_FILT.categorie, [["", "Toutes catégories"], ...Object.entries(cats)]) +
+    fsel("chantier", RK_FILT.chantier, [["", "Tous chantiers"], ...Object.entries(chs)]) +
+    fsel("responsable", RK_FILT.responsable, [["", "Tous responsables"], ...resp.map(x => [x, x])]) +
+    (RK_FILT.cell ? fchip(`proba × gravité ${RK_FILT.cell.replace("_", " × ")} ${ico("x")}`, true, `rkFilt('cell','${RK_FILT.cell}')`, {title: "Retirer ce filtre"}) : "") +
+    (rkAnyFilt() ? `<span class="tb-r"><button class="lnk" onclick="rkClearFilt()">Effacer les filtres</button></span>` : "") + `</div>`;
   h += `<table class="ptable rk-table"><thead><tr>` +
     rkTh("crit", "Criticité") + `<th>Risque</th>` + rkTh("chantier", "Chantier") + rkTh("categorie", "Catégorie") +
     rkTh("responsable", "Responsable") + rkTh("revue", "Revue") + rkTh("statut", "Statut") + `</tr></thead><tbody>`;
@@ -3806,10 +3936,10 @@ function setActMode(m){
 }
 function actToggle(){   // interrupteur segmenté Temps / Argent
   const m = actMode();
-  return `<div class="disptog" role="group" aria-label="Afficher le temps ou sa valeur en argent">` +
-    `<button type="button" class="${m === "temps" ? "on" : ""}" onclick="setActMode('temps')" title="Vue équipe : les heures en avant">⏱ Temps</button>` +
-    `<button type="button" class="${m === "argent" ? "on" : ""}" onclick="setActMode('argent')" title="Vue pilotage : la valorisation € en avant">€ Argent</button>` +
-    `</div>`;
+  return `<span class="tb-grp" role="group" aria-label="Afficher le temps ou sa valeur en argent">` +
+    fchip(ico("clock") + "Temps", m === "temps", "setActMode('temps')", {title: "Vue équipe : les heures en avant"}) +
+    fchip("€ Argent", m === "argent", "setActMode('argent')", {title: "Vue pilotage : la valorisation € en avant"}) +
+    `</span>`;
 }
 const fmtIdx = v => v == null ? "—" : v.toFixed(2);
 const fmtPctw = v => v == null ? "—" : Math.round(v * 100) + " %";
@@ -3859,15 +3989,15 @@ function maJourneeSection(){
         `<input type="time" class="dl-t" value="${s.debut}" title="Début" onchange="mutate({op:'clock_edit',id:'${s.id}',debut:this.value})">` +
         `<span class="dl-sep">→</span>` +
         (running
-          ? `<button class="dl-stopbtn" title="Arrêter" onclick="mutate({op:'clock_stop',id:'${s.id}'})">⏹ en cours</button>`
+          ? `<button class="dl-stopbtn" title="Arrêter" onclick="mutate({op:'clock_stop',id:'${s.id}'})">${ico("stop")} en cours</button>`
           : `<input type="time" class="dl-t" value="${s.fin}" title="Fin" onchange="mutate({op:'clock_edit',id:'${s.id}',fin:this.value})">`) +
         `<span class="dl-dur" title="${lunchOverlap(s.debut, s.fin || nowHM(), s.date) ? "Pause déjeuner déduite (" + fmtDur(lunchOverlap(s.debut, s.fin || nowHM(), s.date)) + ")" : ""}">${fmtDur(sessMin(s))}${lunchOverlap(s.debut, s.fin || nowHM(), s.date) ? ` <span class="dl-pause">⏸ déj.</span>` : ""}</span>` +
         `<input class="dl-lib" value="${esc(s.label)}" onblur="if(this.value.trim()&&this.value!=='${jqs(s.label)}')mutate({op:'clock_edit',id:'${s.id}',label:this.value.trim()})">` +
         (s.chantier_id && chById(s.chantier_id)
           ? `<span class="dl-asg" title="Temps compté pour ce chantier${s.tache_id ? " / cette tâche" : ""}">🗂 ${esc(chById(s.chantier_id).titre)}</span>`
           : themeSelect(s.theme_id, `mutate({op:'clock_edit',id:'${s.id}',theme_id:this.value||null})`, "dl-th")) +
-        (running ? "" : `<button class="dl-resume" title="Reprendre cette activité (relance le chrono)" onclick="resumeSess('${s.id}')">▶</button>`) +
-        `<span class="del" title="Supprimer cette plage" onclick="if(confirm('Supprimer cette plage ?'))mutate({op:'clock_delete',id:'${s.id}'})">×</span>` +
+        (running ? "" : `<button class="dl-resume" title="Reprendre cette activité (relance le chrono)" onclick="resumeSess('${s.id}')">${ico("play")}</button>`) +
+        `<span class="del" title="Supprimer cette plage" onclick="if(confirm('Supprimer cette plage ?'))mutate({op:'clock_delete',id:'${s.id}'})">${ico("x")}</span>` +
         `</div>`;
     });
   }
@@ -4057,20 +4187,20 @@ function renderActions(){
   const dus = acDuJour().filter(acMatch);
   const dette = acRoutines().filter(a => acMatch(a))
     .map(a => ({a, occ: occEnSouffrance(a, TODAY)})).filter(x => x.occ.length);
-  let h = "";
+  let h = pageHead({title: "Actions", meta: fmt(TODAY)});
 
   // --- Bandeau : capture immédiate. C'est la fonction la plus utilisée de la vue.
   h += acCaptureBar();
 
   // --- Filtres transverses
-  h += `<div class="ac-filters">` +
-    `<input class="ac-q" placeholder="Filtrer…" value="${esc(ACT_F.q)}" oninput="acFiltre('q',this.value)">` +
-    `<span class="th-filter">` +
-      `<button class="th-fb ${ACT_F.theme ? "" : "on"}" onclick="acFiltre('theme','')">Tous</button>` +
+  h += `<div class="tb">` +
+    `<input class="tb-q" type="search" placeholder="Filtrer les actions…" value="${esc(ACT_F.q)}" oninput="acFiltre('q',this.value)">` +
+    `<span class="tb-grp th-filter">` +
+      `<button class="th-fb ${ACT_F.theme ? "" : "on"}" onclick="acFiltre('theme','')">Tous les thèmes</button>` +
       THEMES_ON().map(t => `<button class="th-fb ${ACT_F.theme === t.id ? "on" : ""}" style="--th:${t.couleur}" ` +
         `onclick="acFiltre('theme','${t.id}')" title="${esc(t.nom)}">${t.icone} ${esc(t.nom)}</button>`).join("") +
     `</span>` +
-    ((ACT_F.q || ACT_F.theme || ACT_F.chantier) ? `<button class="btn sm" onclick="acFiltreClear()">Effacer</button>` : "") +
+    ((ACT_F.q || ACT_F.theme || ACT_F.chantier) ? `<span class="tb-r"><button class="lnk" onclick="acFiltreClear()">Effacer les filtres</button></span>` : "") +
     `</div>`;
 
   // --- Onglets
@@ -4083,10 +4213,10 @@ function renderActions(){
 
   if(ACT_TAB === "todo"){
     // Le jour d'abord : routines dues + actions à échéance du jour, chronométrables.
-    h += `<div class="ch-h">Aujourd'hui — ${fmt(TODAY)}</div>`;
+    h += section(`Aujourd'hui <span class="muted">· ${dus.length}</span>`);
     h += dus.length
       ? `<div class="ac-list">` + acSort(dus).map(a => acRow(a, TODAY)).join("") + `</div>`
-      : `<div class="ok-note">Rien de dû aujourd'hui. Tout est à jour.</div>`;
+      : emptyState("Rien de dû aujourd'hui. Tout est à jour.");
     h += acCapaciteNote(dus);
 
     // La dette de routines : ce qui a été raté et qu'on doit acter.
@@ -4097,7 +4227,7 @@ function renderActions(){
       const items = b.items.filter(acMatch);
       if(!items.length) return;
       if(b.k === "jour") return;                        // déjà couvert par « Aujourd'hui »
-      h += `<div class="ch-h ${b.cls}">${b.titre} <span class="muted">(${items.length})</span></div>`;
+      h += section(`${b.titre} <span class="muted">· ${items.length}</span>`, "", b.cls);
       h += `<div class="ac-list">` + items.map(a => acRow(a, TODAY)).join("") + `</div>`;
     });
   }
@@ -4260,9 +4390,9 @@ function acRow(a, d){
   const deuxMin = a.estimation_min && a.estimation_min <= 2 && !fait;
 
   let ctrl;
-  if(sess) ctrl = `<button class="tstart stop" title="Terminer (arrête le chrono et coche)" onclick="acStop('${a.id}')">⏹ Terminer</button>` +
+  if(sess) ctrl = `<button class="tstart stop" title="Terminer (arrête le chrono et coche)" onclick="acStop('${a.id}')">${ico("stop")} Terminer</button>` +
                   `<span class="tstate inprog" title="Depuis ${sess.debut}">⏱ ${sess.debut}</span>`;
-  else ctrl = `<button class="tstart" title="Démarrer le chrono sur cette action" onclick="acStart('${a.id}')">${fait ? "▶" : "▶ Démarrer"}</button>`;
+  else ctrl = `<button class="tstart" title="Démarrer le chrono sur cette action" onclick="acStart('${a.id}')">${fait ? ico("play") : ico("play") + " Démarrer"}</button>`;
 
   const st_serie = rec ? serie(a) : 0;
   return `<div class="ac-row${fait ? " done" : ""}${st === "saute" ? " skipped" : ""}${acRetard(a) ? " late" : ""}">` +
@@ -4279,7 +4409,7 @@ function acRow(a, d){
         (mins ? ` <span class="ac-dur">${fmtDur(mins)}</span>` : ``) +
       `</div>` +
       `<div class="ac-meta">${esc(acMeta(a))}` +
-        (ch ? ` · <span class="ac-ch" onclick="openChantier('${ch.id}')">🗂 ${esc(ch.titre)}</span>` : ``) +
+        (ch ? ` · <span class="ac-ch" onclick="openChantier('${ch.id}')">${ico("folder")} ${esc(ch.titre)}</span>` : ``) +
       `</div>` +
       (a.desc ? `<div class="ac-desc">${esc(a.desc)}</div>` : ``) +
     `</div>` +
@@ -4287,7 +4417,7 @@ function acRow(a, d){
     (rec
       ? `<button class="ac-skip" title="Sauter cette occurrence (volontairement — ne compte pas comme ratée)" onclick="mutate({op:'action_skip',id:'${a.id}',date:'${d}'})">⤳</button>`
       : `<button class="ac-skip" title="Reporter à demain" onclick="mutate({op:'action_defer',id:'${a.id}',jours:1})">→1j</button>`) +
-    `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer « ${jqs(a.label)} » ?'))mutate({op:'action_remove',id:'${a.id}'})">×</span>` +
+    `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer « ${jqs(a.label)} » ?'))mutate({op:'action_remove',id:'${a.id}'})">${ico("x")}</span>` +
     `</div>`;
 }
 function acStart(aid){
@@ -4313,7 +4443,7 @@ function acCapaciteNote(dus){
 // --- Dette de routines : ce que l'ancien système effaçait -------------------
 function acDetteBloc(dette){
   const n = dette.reduce((s, x) => s + x.occ.length, 0);
-  let h = `<div class="ch-h bad">Routines non tenues <span class="muted">(${n} occurrences en souffrance)</span></div>`;
+  let h = section(`Routines non tenues <span class="muted">· ${n} occurrences en souffrance</span>`, "", "bad");
   h += `<div class="muted small" style="margin-bottom:8px">Ces échéances sont passées sans être cochées. ` +
        `Acte-les — <b>rattrapé</b> si tu l'as fait après coup, <b>sauté</b> si tu as décidé de ne pas le faire, ` +
        `<b>raté</b> sinon. Un raté reste dans l'historique et pèse sur le taux de tenue.</div>`;
@@ -4324,9 +4454,9 @@ function acDetteBloc(dette){
         `<span class="ac-dette-d">${fmt(d)}</span>` +
         `<div class="ac-body"><div class="ac-lib">${themeDot(a.theme_id)}<span class="ac-txt">${esc(a.label)}</span></div>` +
           `<div class="ac-meta">${esc(acMeta(a))}</div></div>` +
-        `<button class="btn sm" title="Je l'ai fait ce jour-là" onclick="mutate({op:'action_done',id:'${a.id}',date:'${d}'})">✓ Rattrapé</button>` +
+        `<button class="btn sm" title="Je l'ai fait ce jour-là" onclick="mutate({op:'action_done',id:'${a.id}',date:'${d}'})">${ico("check")} Rattrapé</button>` +
         `<button class="btn sm" title="Décidé volontairement de ne pas le faire" onclick="mutate({op:'action_skip',id:'${a.id}',date:'${d}'})">⤳ Sauté</button>` +
-        `<button class="btn sm bad" title="Acte le raté : reste dans l'historique et pèse sur le taux de tenue" onclick="mutate({op:'action_miss',id:'${a.id}',date:'${d}'})">✕ Raté</button>` +
+        `<button class="btn sm bad" title="Acte le raté : reste dans l'historique et pèse sur le taux de tenue" onclick="mutate({op:'action_miss',id:'${a.id}',date:'${d}'})">${ico("x")} Raté</button>` +
         `</div>`;
     });
     if(occ.length > 8) h += `<div class="muted small">… et ${occ.length - 8} occurrences plus anciennes de « ${esc(a.label)} ».</div>`;
@@ -4338,7 +4468,7 @@ function acDetteBloc(dette){
 function acRoutinesTab(){
   const rs = acRoutines().filter(acMatch);
   if(!rs.length) return `<div class="empty">Aucune routine. Crée-en une avec « Détaillé… » → Routine récurrente.</div>`;
-  let h = `<div class="ch-h">Tenue des routines <span class="muted">— 8 dernières semaines</span></div>`;
+  let h = section(`Tenue des routines <span class="muted">· 8 dernières semaines</span>`);
   h += `<div class="rt-mlist">`;
   rs.forEach(a => {
     const t = tenue(a, 56), s = serie(a);
@@ -4359,7 +4489,7 @@ function acRoutinesTab(){
         `<span class="tenue ${cls}" title="Occurrences tenues sur celles attendues (les sautées volontairement sont exclues)">` +
           (t.pct == null ? "—" : `${t.pct} % · ${t.faits}/${t.total}`) + `</span>` +
         (s >= 3 ? `<span class="bdg b-streak" title="${s} d'affilée">🔥 ${s}</span>` : ``) +
-        `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer « ${jqs(a.label)} » ?'))mutate({op:'action_remove',id:'${a.id}'})">×</span>` +
+        `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer « ${jqs(a.label)} » ?'))mutate({op:'action_remove',id:'${a.id}'})">${ico("x")}</span>` +
       `</div>` +
       acSparkline(a) +
       `<input class="rt-mdesc" value="${esc(a.desc || "")}" placeholder="+ description / notes…" ` +
@@ -4394,7 +4524,7 @@ function acFaitesTab(){
   occ.slice(0, 120).forEach(({a, d}) => (parJour[d] = parJour[d] || []).push({label: a.label, theme_id: a.theme_id, rec: true}));
   const jours = Object.keys(parJour).sort().reverse().slice(0, 30);
   if(!jours.length) return `<div class="empty">Rien de terminé pour l'instant.</div>`;
-  let h = `<div class="ch-h">Ce qui a été fait <span class="muted">— 30 derniers jours d'activité</span></div>`;
+  let h = section(`Ce qui a été fait <span class="muted">· 30 derniers jours d'activité</span>`);
   jours.forEach(d => {
     h += `<div class="ac-day"><div class="ac-day-h">${fmt(d)} <span class="muted">· ${parJour[d].length}</span></div>`;
     h += parJour[d].map(x => `<div class="ac-done-row">${themeDot(x.theme_id)}${x.rec ? "🔁 " : "✓ "}${esc(x.label)}</div>`).join("");
@@ -4406,11 +4536,11 @@ function acFaitesTab(){
 // --- Bloc « à faire aujourd'hui » réutilisé dans la vue Planning ------------
 function actionsDuJourSection(){
   const dus = acDuJour();
-  let h = `<div class="ch-h">Mes actions du jour — ${fmt(TODAY)} ` +
-          `<span class="add" onclick="setView('actions')">tout voir</span></div>`;
+  let h = section(`Mes actions du jour <span class="muted">· ${dus.length}</span>`,
+                  `<button class="lnk" onclick="setView('actions')">Toutes les actions</button>`);
   h += dus.length
     ? `<div class="ac-list">` + acSort(dus).map(a => acRow(a, TODAY)).join("") + `</div>`
-    : `<div class="ok-note">Aucune action ni routine due aujourd'hui.</div>`;
+    : emptyState("Aucune action ni routine due aujourd'hui.");
   const dette = acRoutines().map(a => occEnSouffrance(a, TODAY).length).reduce((s, n) => s + n, 0);
   if(dette) h += `<div class="ac-warn">⏰ ${dette} occurrence${dette > 1 ? "s" : ""} de routine non actée${dette > 1 ? "s" : ""}. ` +
                  `<span class="add" onclick="setView('actions')">Régler ça</span></div>`;
@@ -4507,7 +4637,7 @@ function pjListe(fs, retirable){
     `<span class="pj" title="${esc(f.nom)} · ${fmtTaille(f.taille)}${f.cree_le ? " · déposé le " + fmt(f.cree_le) : ""}">` +
       `<a href="/api/fichier?id=${f.id}" target="_blank" rel="noopener">${pjIc(f)} ${esc(f.nom)}</a>` +
       `<span class="pj-s">${fmtTaille(f.taille)}</span>` +
-      (retirable ? `<b class="pj-x" title="Retirer ce document" onclick="pjRetirer('${f.id}','${jqs(f.nom)}')">×</b>` : ``) +
+      (retirable ? `<b class="pj-x" title="Retirer ce document" onclick="pjRetirer('${f.id}','${jqs(f.nom)}')">${ico("x")}</b>` : ``) +
     `</span>`).join("") + `</div>`;
 }
 function pjRetirer(id, nom){
@@ -4574,7 +4704,7 @@ function renderNotes(){
   const all = NOTES().filter(ntMatch)
     .sort((a, b) => (b.date + (b.heure || "")).localeCompare(a.date + (a.heure || "")));
   const pin = all.filter(n => n.epingle);
-  let h = "";
+  let h = pageHead({title: "Bloc-notes", meta: `${NOTES().length} note${NOTES().length > 1 ? "s" : ""}`});
 
   // --- Capture : le champ est en haut, toujours au même endroit, focalisable au clavier (n).
   h += `<div class="nt-capture">` +
@@ -4592,7 +4722,7 @@ function renderNotes(){
       `onkeydown="if(event.key==='Enter'&&(event.ctrlKey||event.metaKey))ntAdd()">${esc(NT_DRAFT.corps)}</textarea>` +
     `<div class="nt-joint" ondragover="ntSurvol(event,true)" ondragleave="ntSurvol(event,false)" ` +
       `ondrop="ntDrop(event,null)">` +
-      `<button class="btn sm" onclick="ntPick(null)">📎 Joindre un document</button>` +
+      `<button class="btn sm" onclick="ntPick(null)">${ico("clip")} Joindre un document</button>` +
       `<input type="file" id="nt_file" multiple hidden onchange="ntUpload(this.files,NT_PJ_CIBLE);this.value=''">` +
       `<span class="muted small">… ou glisse un fichier ici, ou colle une capture dans le texte. 10 Mo par document.</span>` +
       pjListe(piecesEnAttente(), true) +
@@ -4604,36 +4734,36 @@ function renderNotes(){
     `</div>`;
 
   // --- Filtres
-  h += `<div class="ac-filters">` +
-    `<input class="ac-q" placeholder="Rechercher dans les notes…" value="${esc(NT_F.q)}" oninput="ntFiltre('q',this.value)">` +
-    `<span class="th-filter">` +
-      `<button class="th-fb ${NT_F.theme ? "" : "on"}" onclick="ntFiltre('theme','')">Tous</button>` +
+  h += `<div class="tb">` +
+    `<input class="tb-q" type="search" placeholder="Rechercher dans les notes…" value="${esc(NT_F.q)}" oninput="ntFiltre('q',this.value)">` +
+    `<span class="tb-grp th-filter">` +
+      `<button class="th-fb ${NT_F.theme ? "" : "on"}" onclick="ntFiltre('theme','')">Tous les thèmes</button>` +
       THEMES_ON().map(t => `<button class="th-fb ${NT_F.theme === t.id ? "on" : ""}" style="--th:${t.couleur}" ` +
         `onclick="ntFiltre('theme','${t.id}')">${t.icone} ${esc(t.nom)}</button>`).join("") +
     `</span>` +
     `<select onchange="ntFiltre('type',this.value)"><option value="">Tous types</option>` +
       Object.entries(NT_TYPE).map(([k, v]) => `<option value="${k}" ${NT_F.type === k ? "selected" : ""}>${v.ic} ${v.lbl}</option>`).join("") + `</select>` +
-    ((NT_F.q || NT_F.theme || NT_F.type || NT_F.chantier) ? `<button class="btn sm" onclick="ntFiltreClear()">Effacer</button>` : "") +
+    ((NT_F.q || NT_F.theme || NT_F.type || NT_F.chantier) ? `<span class="tb-r"><button class="lnk" onclick="ntFiltreClear()">Effacer les filtres</button></span>` : "") +
     `</div>`;
 
   if(!NOTES().length){
-    h += `<div class="empty">Aucune note. Écris la première ci-dessus — elle sera horodatée, ` +
-         `classée par thème, et retrouvable à la recherche.</div>`;
+    h += emptyState(`Aucune note. Écris la première ci-dessus — elle sera horodatée, ` +
+         `classée par thème, et retrouvable à la recherche.`);
     ntPaint(h); return;
   }
   if(!all.length){
-    h += `<div class="empty">Aucune note ne correspond au filtre.</div>`;
+    h += emptyState("Aucune note ne correspond au filtre.");
     ntPaint(h); return;
   }
 
   if(pin.length){
-    h += `<div class="ch-h">📌 Épinglées</div><div class="nt-list">` + pin.map(ntCard).join("") + `</div>`;
+    h += section(`Épinglées <span class="muted">· ${pin.length}</span>`) + `<div class="nt-list">` + pin.map(ntCard).join("") + `</div>`;
   }
   // Journal : regroupé par jour, du plus récent au plus ancien.
   const parJour = {};
   all.filter(n => !n.epingle).forEach(n => (parJour[n.date] = parJour[n.date] || []).push(n));
   const jours = Object.keys(parJour).sort().reverse();
-  h += `<div class="ch-h">Journal <span class="muted">(${all.length} note${all.length > 1 ? "s" : ""})</span></div>`;
+  h += section(`Journal <span class="muted">· ${all.length} note${all.length > 1 ? "s" : ""}</span>`);
   jours.forEach(d => {
     h += `<div class="nt-day"><div class="nt-day-h">${fmt(d)}` +
          (d === TODAY ? ` <span class="bdg b-2min">aujourd'hui</span>` : ``) +
@@ -4663,7 +4793,7 @@ function ntCard(n){
         `onblur="ntEdSave('${n.id}',this.value)">${esc(NT_ED[n.id] !== undefined ? NT_ED[n.id] : n.corps)}</textarea>` +
       `<div class="nt-joint" ondragover="ntSurvol(event,true)" ondragleave="ntSurvol(event,false)" ` +
         `ondrop="ntDrop(event,'${n.id}')">` +
-        `<button class="btn sm" onclick="ntPick('${n.id}')">📎 Joindre un document</button>` +
+        `<button class="btn sm" onclick="ntPick('${n.id}')">${ico("clip")} Joindre un document</button>` +
         `<span class="muted small">… ou glisse un fichier ici.</span>` +
         pjListe(piecesOf(n.id), true) +
       `</div>` +
@@ -4676,16 +4806,16 @@ function ntCard(n){
       `<span class="nt-h">${n.heure ? n.heure : ""}</span>` +
       (n.titre ? `<b class="nt-titre">${esc(n.titre)}</b>` : ``) +
       themeChip(n.theme_id) +
-      (ch ? `<span class="ac-ch" onclick="openChantier('${ch.id}')">🗂 ${esc(ch.titre)}</span>` : ``) +
+      (ch ? `<span class="ac-ch" onclick="openChantier('${ch.id}')">${ico("folder")} ${esc(ch.titre)}</span>` : ``) +
       `<span class="grow"></span>` +
       (n.maj_le ? `<span class="muted small" title="Note réécrite le ${fmt(n.maj_le)}">modifiée ${fmt(n.maj_le)}</span>` : ``) +
       (NT_ED[n.id] !== undefined && NT_ED[n.id] !== n.corps
         ? `<span class="nt-draft-st" title="Réécriture commencée, pas encore enregistrée — rouvre avec ✎">✎ brouillon</span>` : ``) +
-      `<button class="nt-b" title="${n.epingle ? "Désépingler" : "Épingler en haut"}" onclick="mutate({op:'note_pin',id:'${n.id}'})">${n.epingle ? "📌" : "📍"}</button>` +
-      `<button class="nt-b" title="Joindre un document à cette note" onclick="ntPick('${n.id}')">📎</button>` +
+      `<button class="nt-b${n.epingle ? " on" : ""}" title="${n.epingle ? "Désépingler" : "Épingler en haut"}" onclick="mutate({op:'note_pin',id:'${n.id}'})">${ico("pin")}</button>` +
+      `<button class="nt-b" title="Joindre un document à cette note" onclick="ntPick('${n.id}')">${ico("clip")}</button>` +
       `<button class="nt-b" title="Transformer en action" onclick="ntToAction('${n.id}')">➜ action</button>` +
-      `<button class="nt-b" title="Modifier" onclick="ntEdit('${n.id}')">✎</button>` +
-      `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer cette note ?'))mutate({op:'note_remove',id:'${n.id}'})">×</span>` +
+      `<button class="nt-b" title="Modifier" onclick="ntEdit('${n.id}')">${ico("edit")}</button>` +
+      `<span class="del" title="Supprimer" onclick="if(confirm('Supprimer cette note ?'))mutate({op:'note_remove',id:'${n.id}'})">${ico("x")}</span>` +
     `</div>` +
     `<div class="nt-corps">${esc(n.corps).replace(/\n/g, "<br>")}</div>` +
     pjListe(piecesOf(n.id), true) +
@@ -4726,8 +4856,8 @@ function ntToAction(id){
 function renderThemes(){
   const ths = THEMES();
   const actifs = THEMES_ON();
-  let h = `<div class="ch-h">Thèmes <span class="muted">— ${actifs.length}/${THEMES_MAX} actifs</span></div>`;
-  h += `<div class="muted small" style="margin-bottom:10px">` +
+  let h = pageHead({title: "Thèmes", meta: `${actifs.length} actifs, ${THEMES_MAX} au plus`});
+  h += `<div class="hint">` +
     `Liste <b>fermée</b> : un thème se choisit dans un menu, jamais en saisie libre — c'est ce qui évite ` +
     `les doublons et les fautes de frappe. Un élément porte <b>un seul</b> thème, ` +
     `donc la répartition du temps fait 100 %.</div>`;
@@ -4747,8 +4877,8 @@ function renderThemes(){
     const part = Math.round(100 * s.min / totMin);
     h += `<div class="th-row${t.archive ? " off" : ""}" style="--th:${t.couleur}">` +
       `<span class="th-grip">` +
-        `<button class="th-mv" title="Monter" onclick="mutate({op:'theme_move',id:'${t.id}',sens:'haut'})" ${i === 0 ? "disabled" : ""}>▲</button>` +
-        `<button class="th-mv" title="Descendre" onclick="mutate({op:'theme_move',id:'${t.id}',sens:'bas'})" ${i === ths.length - 1 ? "disabled" : ""}>▼</button>` +
+        `<button class="th-mv" title="Monter" onclick="mutate({op:'theme_move',id:'${t.id}',sens:'haut'})" ${i === 0 ? "disabled" : ""}>${ico("up")}</button>` +
+        `<button class="th-mv" title="Descendre" onclick="mutate({op:'theme_move',id:'${t.id}',sens:'bas'})" ${i === ths.length - 1 ? "disabled" : ""}>${ico("down")}</button>` +
       `</span>` +
       `<input class="th-ic" value="${esc(t.icone)}" maxlength="4" title="Icône" ` +
         `onblur="if(this.value!==this.defaultValue)mutate({op:'theme_update',id:'${t.id}',icone:this.value})">` +
@@ -4763,7 +4893,7 @@ function renderThemes(){
       `<label class="rt-toggle" title="${t.archive ? "Archivé — cocher pour réactiver" : "Actif — décocher pour archiver"}">` +
         `<input type="checkbox" ${t.archive ? "" : "checked"} onchange="mutate({op:'theme_update',id:'${t.id}',archive:!this.checked})"></label>` +
       `<span class="del" title="Supprimer ce thème (les éléments repassent sans thème, rien n'est effacé)" ` +
-        `onclick="if(confirm('Supprimer « ${jqs(t.nom)} » ?\\n\\nLes ${s.ch} chantiers, ${s.ac} actions et ${s.nt} notes concernés repasseront « sans thème ». Rien n\\'est supprimé.'))mutate({op:'theme_remove',id:'${t.id}'})">×</span>` +
+        `onclick="if(confirm('Supprimer « ${jqs(t.nom)} » ?\\n\\nLes ${s.ch} chantiers, ${s.ac} actions et ${s.nt} notes concernés repasseront « sans thème ». Rien n\\'est supprimé.'))mutate({op:'theme_remove',id:'${t.id}'})">${ico("x")}</span>` +
       `</div>`;
   });
   h += `</div>`;
@@ -4790,7 +4920,7 @@ function renderThemes(){
   }
 
   // Chantiers par thème : réaffectation en un clic après la migration.
-  h += `<div class="ch-h">Affectation des chantiers</div>`;
+  h += section("Affectation des chantiers");
   h += `<div class="th-assign">`;
   sortColumn(LIVE(), "echeance").forEach(c => {
     h += `<div class="th-arow">${themeDot(c.theme_id)}<span class="th-atit" onclick="openChantier('${c.id}')">${esc(c.titre)}</span>` +
@@ -4898,10 +5028,11 @@ function portfolioGantt(){
 
 function renderPlanning(){
   const items = planningTasks();
-  let h = actionsDuJourSection();
-  h += `<div class="ch-h">À faire aujourd'hui — ${fmt(TODAY)} · ${items.length} tâche(s)</div>`;
+  let h = pageHead({title: "Planning", meta: fmt(TODAY)});
+  h += actionsDuJourSection();
+  h += section(`À faire aujourd'hui <span class="muted">· ${items.length} tâche${items.length > 1 ? "s" : ""}</span>`);
   if(!items.length){
-    h += `<div class="ok-note">Rien d'actif aujourd'hui — aucune tâche en cours ni en retard.</div>`;
+    h += emptyState("Rien d'actif aujourd'hui — aucune tâche en cours ni en retard.");
   } else {
     h += `<div class="today-list">`;
     items.forEach(it => {
@@ -4916,11 +5047,11 @@ function renderPlanning(){
       const lead = t.start_date
         ? `<span class="box ${t.done ? "ok" : ""}" title="Marquer fait" onclick="event.stopPropagation();mutate({op:'toggle_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})"></span>` +
           (t.done ? "" : (activeForTache(t.id)
-            ? `<button class="tstart stop" title="Chrono en cours sur cette tâche — arrêter" onclick="event.stopPropagation();mutate({op:'clock_stop'})">⏹</button>`
-            : `<button class="tstart" title="Reprendre le chrono sur cette tâche" onclick="event.stopPropagation();mutate({op:'clock_start',kind:'tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">▶</button>`))
+            ? `<button class="tstart stop" title="Chrono en cours sur cette tâche — arrêter" onclick="event.stopPropagation();mutate({op:'clock_stop'})">${ico("stop")}</button>`
+            : `<button class="tstart" title="Reprendre le chrono sur cette tâche" onclick="event.stopPropagation();mutate({op:'clock_start',kind:'tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">${ico("play")}</button>`))
         : startBlocked(c)
-        ? `<button class="tstart blocked" title="Limite de ${SETTINGS.wip_max || 3} chantiers « En cours » atteinte" onclick="event.stopPropagation();alert('${wipFullMsg()}')">▶</button>`
-        : `<button class="tstart" title="Démarrer cette tâche" onclick="event.stopPropagation();mutate({op:'start_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">▶</button>`;
+        ? `<button class="tstart blocked" title="Limite de ${SETTINGS.wip_max || 3} chantiers « En cours » atteinte" onclick="event.stopPropagation();alert('${wipFullMsg()}')">${ico("play")}</button>`
+        : `<button class="tstart" title="Démarrer cette tâche" onclick="event.stopPropagation();mutate({op:'start_tache',chantier_id:'${c.id}',tache_id:'${t.id}'})">${ico("play")}</button>`;
       // (7) Écart estimation ↔ réel — uniquement pour une tâche démarrée (non démarrée / jalon ignorés).
       if(t.start_date && !t.is_milestone && t.duree > 0){
         const hj = +SETTINGS.heures_jour || 7, prev = t.duree * hj * 60, tmin = tacheMin(t.id), r = prev ? tmin / prev : 0;
@@ -4945,7 +5076,7 @@ function renderPlanning(){
     });
     h += `</div>`;
   }
-  h += `<div class="ch-h">Planning général — tous les chantiers (triés par échéance)</div>`;
+  h += section(`Planning général <span class="muted">· tous les chantiers, triés par échéance</span>`);
   h += portfolioGantt();
   h += maJourneeSection();   // récap du temps : tout en bas, repliable
   $("planning").innerHTML = h;
@@ -4993,8 +5124,8 @@ function timeStats(){
 function timeInsights(){
   const st = timeStats();
   if(!st.total){
-    return dsection("Temps passé — chrono") +
-      `<div class="muted small">Aucune plage chronométrée pour l'instant. Démarre une tâche ou une routine (bouton ▶), ou ajoute une plage dans « Ma journée » — la répartition par type, par chantier, par semaine et par heure s'affichera ici automatiquement.</div>`;
+    return section("Temps passé") +
+      `<div class="empty-state">Aucune plage chronométrée pour l'instant. Démarre une tâche ou une routine (bouton ▶), ou ajoute une plage dans « Ma journée » — la répartition par type, par chantier, par semaine et par heure s'affichera ici automatiquement.</div>`;
   }
   const hj = +SETTINGS.heures_jour || 7;
   const jp = st.total / (hj * 60);
@@ -5009,8 +5140,8 @@ function timeInsights(){
   const V = m => money ? fmtEur(eurMin(m)) : fmtDur(m);
 
   // — En-tête avec l'interrupteur Temps / Argent —
-  let h = `<div class="ch-h act-head"><span>Temps passé — chrono</span>${actToggle()}</div>`;
-  h += `<div class="kband">`;
+  let h = section("Temps passé");
+  h += `<div class="kpis sm">`;
   h += dkpi("Temps total", V(st.total), st.tl.length + " sessions · " + st.daysWorked + " j travaillés", "", "",
             "Temps total chronométré, toutes activités confondues. " +
             "Pause déjeuner déduite ; journée bornée à l'heure de fin réglée dans Charge." +
@@ -5097,8 +5228,8 @@ function renderActivite(){
   const z = {taches: 0, jalons: 0, notes: 0, retours: 0, relances: 0, actions: 0, events: []};
   const thisMon = weekStart(TODAY), lastMon = weekStart(addDays(thisMon, -1));
   const cur = wk[thisMon] || z, prev = wk[lastMon] || z;
-  let h = timeInsights();                     // en tête : où part mon temps (chrono)
-  h += dsection(`Cette semaine — du ${fmt(thisMon)}`);
+  let h = pageHead({title: "Activité", actions: actToggle()}) + timeInsights();                     // en tête : où part mon temps (chrono)
+  h += section(`Cette semaine — du ${fmt(thisMon)}`);
   h += `<div class="kpis">` +
     actKpi("Tâches terminées", cur.taches, prev.taches) +
     actKpi("Jalons franchis", cur.jalons, prev.jalons) +
@@ -5115,14 +5246,14 @@ function renderActivite(){
     chartBox("Tâches terminées / semaine", vbar(wTaches)) +
     chartBox("Actions tracées / semaine", vbar(wActions)) + `</div>`;
   // Journal détaillé par semaine (récent d'abord)
-  h += dsection("Journal — ce que tu as fait, par semaine");
+  h += section("Journal — ce que tu as fait, par semaine");
   const keys = Object.keys(wk).filter(k => (wk[k].events || []).length).sort().reverse();
   if(!keys.length){
     h += `<div class="muted small">Le journal se remplit automatiquement au fil de tes actions (tâche cochée, chantier déplacé, livrable mis à jour, risque ajouté, note…). Reviens après quelques jours d'usage — l'export Excel (menu « Excel ▾ ») contient déjà les feuilles « Journal » et « Synthèse hebdo ».</div>`;
   }
   keys.forEach(k => {
     const w = wk[k];
-    h += `<div class="ch-h">Semaine du ${fmt(k)} · ${w.events.length} action(s)</div><div class="jrnl">`;
+    h += section(`Semaine du ${fmt(k)} <span class="muted">· ${w.events.length} action(s)</span>`) + `<div class="jrnl">`;
     w.events.slice().sort((a, b) => (a.ts < b.ts ? 1 : -1)).forEach(e => {
       h += `<div class="jr"><span class="jr-d">${fmtShort(e.date)}</span>` +
         (e.chantier ? `<b>${esc(e.chantier)}</b> · ` : "") + `${esc(e.msg)}</div>`;
@@ -5150,7 +5281,7 @@ function isoWeekStr(ds){  // "2026-W30" — numéro de semaine ISO (règle du je
 }
 const rapports = () => STORE.rapports || [];
 function rapShift(d){ RAPPORT_MON = addDays(RAPPORT_MON || weekStart(TODAY), d); renderRapport(); }
-function rapGoto(mon){ RAPPORT_MON = mon; showView("rapport"); window.scrollTo(0, 0); }
+function rapGoto(mon){ RAPPORT_MON = mon; showView("rapport"); toTop(); }
 function rapField(rid, field, val){ mutate({op: "rapport_update", rapport_id: rid, [field]: val}); }
 function rapPointField(rid, cid, field, val){ mutate({op: "rapport_point_update", rapport_id: rid, chantier_id: cid, [field]: val}); }
 // Zone de rédaction : n'enregistre qu'en cas de changement réel (sinon blur = rien)
@@ -5237,7 +5368,7 @@ function hcCle(fam, o){
 }
 function rapHcDel(rid, fam, o, quoi){
   return `<span class="del rap-hc-del" title="Retirer ${quoi} de ce rapport (l'élément n'est pas supprimé)" ` +
-    `onclick="mutate({op:'rapport_hc_remove',rapport_id:'${rid}',cle:'${jqs(hcCle(fam, o))}'})">×</span>`;
+    `onclick="mutate({op:'rapport_hc_remove',rapport_id:'${rid}',cle:'${jqs(hcCle(fam, o))}'})">${ico("x")}</span>`;
 }
 
 function rapHorsChantier(r, dis){
@@ -5248,7 +5379,7 @@ function rapHorsChantier(r, dis){
   const box = (titre, chips, body) => `<div class="cardx"><div class="cardx-h">${titre}` +
     (chips ? `<span class="rap-chips">${chips}</span>` : ``) + `</div><div class="cardx-b">${body}</div></div>`;
   const del = (fam, o, quoi) => dis ? "" : rapHcDel(r.id, fam, o, quoi);
-  let h = dsection(`Hors chantier <span class="muted small">· actions, routines, réunions et notes non rattachées</span>` +
+  let h = section(`Hors chantier <span class="muted small">· actions, routines, réunions et notes non rattachées</span>` +
     (ecartes ? ` <span class="add rap-hc-reset" title="Réafficher tout ce qui a été retiré de ce rapport"` +
       (dis ? "" : ` onclick="mutate({op:'rapport_hc_reset',rapport_id:'${r.id}'})"`) +
       `>${ecartes} élément(s) retiré(s) — tout réafficher</span>` : ``));
@@ -5315,7 +5446,7 @@ function rapPointCard(r, p, dis){
     `<span class="muted rap-pt-meta">${RAP_ST_LBL[a.statut] || ""}` +
     `${a.echeance ? ` · échéance <b class="${late ? "bad-t" : ""}">${fmtShort(a.echeance)}</b>` : ""}</span>` +
     `<span class="rap-chips">${chips.join("")}</span>` +
-    (dis ? "" : `<span class="del" title="Retirer ce chantier du rapport" onclick="mutate({op:'rapport_point_remove',rapport_id:'${r.id}',chantier_id:'${p.chantier_id}'})">×</span>`) +
+    (dis ? "" : `<span class="del" title="Retirer ce chantier du rapport" onclick="mutate({op:'rapport_point_remove',rapport_id:'${r.id}',chantier_id:'${p.chantier_id}'})">${ico("x")}</span>`) +
     `</div><div class="cardx-b">`;
   const faits = [];
   enc.forEach(t => faits.push(`<div class="rap-fact run"><span class="rap-fact-d">▶</span><span><b>${esc(t.label)}</b> — en cours${t.depuis ? ` <span class="muted">depuis le ${fmtShort(t.depuis)}</span>` : ""}</span></div>`));
@@ -5328,7 +5459,7 @@ function rapPointCard(r, p, dis){
             rapNoteHTML(n, dis ? "" : rapHcDel(r.id, "note", n, "cette note"))).join("")}</div>`;
   h += `<div class="rap-cols">`;
   h += `<div><div class="lab">Avancement — commentaire` +
-    (dis ? "" : ` <span class="add" title="Pré-remplit depuis les faits ci-dessus (tâches, notes, temps) — à retoucher ensuite" onclick="rapPrefill('${r.id}','${p.chantier_id}')">⚡ pré-remplir</span>`) +
+    (dis ? "" : ` <span class="add" title="Pré-remplit depuis les faits ci-dessus (tâches, notes, temps) — à retoucher ensuite" onclick="rapPrefill('${r.id}','${p.chantier_id}')">${ico("zap")} pré-remplir</span>`) +
     `</div>` + rapTA("Où en est ce chantier, ce qui a avancé, ce qui bloque…", p.avancement,
                      `rapPointField('${r.id}','${p.chantier_id}','avancement',this.value)`, dis) + `</div>`;
   h += `<div><div class="lab">REX du point</div>` +
@@ -5368,7 +5499,7 @@ function rapAvenir(r){
 function rapArchive(curSem){
   const list = rapports().slice().sort((a, b) => a.semaine < b.semaine ? 1 : -1);
   if(!list.length) return "";
-  let h = dsection("Rapports archivés");
+  let h = section("Rapports archivés");
   h += `<table class="ptable"><thead><tr><th>Semaine</th><th>Période</th><th>Statut</th><th>Visa</th><th>Tâches</th><th>Retards</th><th>Temps</th><th></th></tr></thead><tbody>`;
   list.forEach(x => {
     const s = x.stats || {};
@@ -5391,24 +5522,23 @@ function renderRapport(){
   const r = rapports().find(x => x.semaine === sem);
   const curMon = weekStart(TODAY);
 
-  let h = `<div class="rap-top">`;
-  h += `<div class="rap-nav"><button class="ghost" onclick="rapShift(-7)" title="Semaine précédente">‹</button>` +
-       `<button class="ghost"${mon === curMon ? " disabled" : ""} onclick="RAPPORT_MON=null;renderRapport()">Cette semaine</button>` +
-       `<button class="ghost" onclick="rapShift(7)" title="Semaine suivante">›</button></div>`;
-  h += `<div><div class="d-status">Rapport hebdomadaire${mon === curMon ? "" : (mon < curMon ? " · semaine passée" : " · semaine future")}</div>` +
-       `<h2 class="pg-title">Semaine ${+sem.split("-W")[1]} · du ${fmt(mon)} au ${fmt(dim)}</h2></div>`;
-  h += `<div class="grow"></div>`;
+  const semLbl = `Semaine ${+sem.split("-W")[1]} · du ${fmt(mon)} au ${fmt(dim)}` +
+                 (mon === curMon ? "" : (mon < curMon ? " · semaine passée" : " · semaine future"));
+  let act = `<span class="tb-grp">` +
+    `<button class="ghost" onclick="rapShift(-7)" title="Semaine précédente" aria-label="Semaine précédente">${ico("left")}</button>` +
+    `<button class="ghost"${mon === curMon ? " disabled" : ""} onclick="RAPPORT_MON=null;renderRapport()">Cette semaine</button>` +
+    `<button class="ghost" onclick="rapShift(7)" title="Semaine suivante" aria-label="Semaine suivante">${ico("right")}</button></span>`;
   if(r){
     const fin = r.statut === "finalise";
-    h += `<span class="rap-badge${fin ? " ok" : ""}">${fin ? "Finalisé" : "Brouillon"}</span>`;
-    if(!fin) h += `<button class="ghost" title="Recalcule les faits (tâches, temps, notes, à venir…) sans toucher à ta rédaction" onclick="mutate({op:'rapport_generate',semaine:'${sem}'})">↻ Actualiser les données</button>`;
-    h += fin ? `<button class="ghost" onclick="mutate({op:'rapport_reopen',rapport_id:'${r.id}'})">Rouvrir</button>`
-             : `<button class="ghost primary" onclick="rapFinalize('${r.id}')">Finaliser</button>`;
-    h += `<button class="ghost" onclick="rapportPrint('${r.id}')">Imprimer / PDF</button>`;
-    if(fin) h += `<button class="ghost primary" onclick="rapportMail('${r.id}')" title="Génère le PDF et ouvre un brouillon Outlook avec la pièce jointe">✉ Envoyer par mail</button>`;
-    h += `<span class="danger-link" onclick="rapDelete('${r.id}')">Supprimer</span>`;
+    act += `<span class="rap-badge${fin ? " ok" : ""}">${fin ? "Finalisé" : "Brouillon"}</span>`;
+    if(!fin) act += `<button class="ghost" title="Recalcule les faits (tâches, temps, notes, à venir…) sans toucher à ta rédaction" onclick="mutate({op:'rapport_generate',semaine:'${sem}'})">${ico("refresh")}Actualiser les données</button>`;
+    act += fin ? `<button class="ghost" onclick="mutate({op:'rapport_reopen',rapport_id:'${r.id}'})">Rouvrir</button>`
+               : `<button class="ghost primary" onclick="rapFinalize('${r.id}')">Finaliser</button>`;
+    act += `<button class="ghost" onclick="rapportPrint('${r.id}')">${ico("print")}Imprimer / PDF</button>`;
+    if(fin) act += `<button class="ghost primary" onclick="rapportMail('${r.id}')" title="Génère le PDF et ouvre un brouillon Outlook avec la pièce jointe">${ico("mail")}Envoyer par mail</button>`;
+    act += `<span class="danger-link" onclick="rapDelete('${r.id}')">Supprimer</span>`;
   }
-  h += `</div>`;
+  let h = pageHead({title: "Rapport hebdo", meta: semLbl, actions: act});
 
   if(!r){
     const vendredi = addDays(mon, 4), ouvert = TODAY >= vendredi;
@@ -5446,7 +5576,7 @@ function renderRapport(){
             : `« ↻ Actualiser » recalcule les faits ; ta rédaction (synthèse, avancements, REX, justifications) n'est jamais écrasée.`) + `</div>`;
 
   if(retards.length){
-    h += dsection(`Retards à justifier <span class="muted small">· obligatoire avant finalisation</span>`);
+    h += section(`Retards à justifier <span class="muted small">· obligatoire avant finalisation</span>`);
     retards.forEach(x => {
       const ok = (x.justification || "").trim();
       h += `<div class="cardx rap-late"><div class="cardx-h">` +
@@ -5460,11 +5590,11 @@ function renderRapport(){
     });
   }
 
-  h += dsection("Synthèse de la semaine");
+  h += section("Synthèse de la semaine");
   h += rapTA("Deux ou trois phrases pour la direction : l'essentiel de la semaine, les décisions prises, les alertes…",
              r.synthese, `rapField('${r.id}','synthese',this.value)`, dis);
 
-  h += dsection(`Bilan par chantier <span class="muted small">· ${(r.points || []).length} point(s)</span>`);
+  h += section(`Bilan par chantier <span class="muted small">· ${(r.points || []).length} point(s)</span>`);
   if(!(r.points || []).length)
     h += `<div class="empty">Aucune activité détectée cette semaine (tâche terminée, note, temps chronométré, relance ou retour de recette).</div>`;
   (r.points || []).forEach(p => { h += rapPointCard(r, p, dis); });
@@ -5480,13 +5610,13 @@ function renderRapport(){
 
   h += rapHorsChantier(r, dis);
 
-  h += dsection(`Programmé pour la suite <span class="muted small">· jusqu'au ${fmt(addDays(dim, 14))}</span>`);
+  h += section(`Programmé pour la suite <span class="muted small">· jusqu'au ${fmt(addDays(dim, 14))}</span>`);
   h += rapAvenir(r);
   h += `<div class="cardx rap-blk"><div class="cardx-h">Priorités de la semaine prochaine</div><div class="cardx-b">` +
        rapTA("Les 3 à 5 priorités que tu annonces pour la semaine à venir…", r.priorites,
              `rapField('${r.id}','priorites',this.value)`, dis) + `</div></div>`;
 
-  h += dsection("REX général de la semaine");
+  h += section("REX général de la semaine");
   const rg = r.rex_general || {};
   h += `<div class="rex-grid">` +
     `<div class="cardx"><div class="cardx-h rex-plus">✚ Ce qui a bien fonctionné</div><div class="cardx-b">` +
@@ -5832,8 +5962,13 @@ const CDC_ST = {
 const CDC_STATUTS_ARR = [["brouillon", "Brouillon"], ["en_validation", "En validation"],
                          ["valide", "Validé"], ["obsolete", "Obsolète"]];
 
-function openCdc(cid){ CUR_CDC = cid; showView("cdc"); window.scrollTo(0, 0); }
-function backFromCdc(){ if(CUR_CDC) openChantier(CUR_CDC); else setView("cahiers"); }
+// Retour : vers l'écran d'où l'on a ouvert le cahier — la page du chantier, la liste des cahiers…
+let CDC_FROM = null;
+function openCdc(cid){
+  CDC_FROM = SHOWN === "page" && CUR === cid ? "page" : (SHOWN && !VIEW_BY_ID[SHOWN].detail ? SHOWN : VIEW);
+  CUR_CDC = cid; showView("cdc");
+}
+function backFromCdc(){ if(CDC_FROM === "page" && chById(CUR_CDC)) openChantier(CUR_CDC); else setView(CDC_FROM || "cahiers"); }
 
 // Carte de synthèse affichée sur la page chantier
 function cdcSummary(c){
@@ -5853,22 +5988,19 @@ function cdcSummary(c){
 }
 
 function cdcHeader(c, cdc){
-  let h = `<div class="cdc-top">`;
-  h += `<button class="ghost" onclick="backFromCdc()" title="Revenir à « ${esc(c.titre)} »">← Chantier</button>`;
-  h += `<div class="cdc-toptitle"><div class="d-status">Cahier des charges</div>` +
-       `<h2 class="pg-title">${esc((cdc && cdc.titre) || c.titre)}</h2></div>`;
-  h += `<div class="grow"></div>`;
+  let act = "";
   if(cdc){
-    h += `<button class="ghost" onclick="cdcRevise('${c.id}')" title="Figer l'indice courant et passer à l'indice suivant (la validation est réinitialisée)">Émettre une révision</button>`;
-    h += `<button class="ghost" onclick="cdcPrint()" title="Imprimer ou enregistrer en PDF">Imprimer / PDF</button>`;
-    h += `<button class="ghost" onclick="cdcWord('${c.id}')" title="Télécharger le cahier des charges en Word pour le retoucher">Word</button>`;
-    h += `<button class="ghost" onclick="$('cdcDocx').click()" title="Relire un .docx modifié : le contenu revient ici et le changement est tracé comme une révision">Réimporter Word</button>`;
-    h += `<button class="ghost" onclick="cdcMail('${c.id}')" title="Ouvrir un brouillon e-mail avec le Word en pièce jointe et un message de demande de validation">Envoyer</button>`;
-    h += `<input type="file" id="cdcDocx" accept=".docx" style="display:none" onchange="cdcImportWord(this,'${c.id}')">`;
-    h += `<span class="danger-link" onclick="cdcDelete('${c.id}')">Supprimer</span>`;
+    act += `<button class="ghost" onclick="cdcRevise('${c.id}')" title="Figer l'indice courant et passer à l'indice suivant (la validation est réinitialisée)">Émettre une révision</button>`;
+    act += `<button class="ghost" onclick="cdcPrint()" title="Imprimer ou enregistrer en PDF">${ico("print")}Imprimer / PDF</button>`;
+    act += `<button class="ghost" onclick="cdcWord('${c.id}')" title="Télécharger le cahier des charges en Word pour le retoucher">Word</button>`;
+    act += `<button class="ghost" onclick="$('cdcDocx').click()" title="Relire un .docx modifié : le contenu revient ici et le changement est tracé comme une révision">Réimporter Word</button>`;
+    act += `<button class="ghost" onclick="cdcMail('${c.id}')" title="Ouvrir un brouillon e-mail avec le Word en pièce jointe et un message de demande de validation">${ico("mail")}Envoyer</button>`;
+    act += `<input type="file" id="cdcDocx" accept=".docx" style="display:none" onchange="cdcImportWord(this,'${c.id}')">`;
+    act += `<span class="danger-link" onclick="cdcDelete('${c.id}')">Supprimer</span>`;
   }
-  h += `</div>`;
-  return h;
+  const back = CDC_FROM === "page" ? "Chantier" : (VIEW_BY_ID[CDC_FROM] || VIEW_BY_ID.cahiers).label;
+  return pageHead({sticky: true, back: {label: back, onclick: "backFromCdc()", tip: `Revenir à « ${c.titre} »`},
+    eyebrow: "Cahier des charges", title: esc((cdc && cdc.titre) || c.titre), actions: act});
 }
 
 // ---- aller-retour Word ---------------------------------------------------
@@ -5906,8 +6038,8 @@ function renderCdc(){
   if(!c){ setView("cahiers"); return; }
   if(!c.cdc){
     $("cdc").innerHTML = cdcHeader(c, null) +
-      `<div class="cdc-doc"><div class="cdc-card"><div class="empty">Ce chantier n'a pas encore de cahier des charges.</div>` +
-      `<button class="btn primary" onclick="cdcCreate('${c.id}')">+ Créer le cahier des charges</button></div></div>`;
+      `<div class="cdc-doc">` + emptyState("Ce chantier n'a pas encore de cahier des charges.",
+        `<button class="btn primary" onclick="cdcCreate('${c.id}')">${ico("plus")}Créer le cahier des charges</button>`) + `</div>`;
     return;
   }
   const cdc = c.cdc, st = CDC_ST[cdc.statut] || CDC_ST.brouillon;
@@ -5935,7 +6067,7 @@ function renderCdc(){
   h += `<div class="cdc-pp"><div class="lab">Parties prenantes <span class="add" onclick="cdcAddPartie('${c.id}')">+ ajouter</span></div>`;
   h += (cdc.parties_prenantes.length ? cdc.parties_prenantes.map(pp =>
       `<div class="row-line"><span>${esc(pp.nom)}${pp.role ? ` <span class="muted">· ${esc(pp.role)}</span>` : ""}</span>` +
-      `<span class="del" onclick="mutate({op:'cdc_partie_remove',chantier_id:'${c.id}',partie_id:'${pp.id}'})">×</span></div>`).join("")
+      `<span class="del" onclick="mutate({op:'cdc_partie_remove',chantier_id:'${c.id}',partie_id:'${pp.id}'})">${ico("x")}</span></div>`).join("")
       : `<div class="empty">Personne pour l'instant.</div>`);
   h += `</div></div>`;   // cdc-pp + cdc-valid-block
   h += `</div>`;         // cdc-card
@@ -5948,7 +6080,7 @@ function renderCdc(){
       `<input class="cdc-sec-titre" value="${esc(sec.titre)}" placeholder="Titre de la section" onblur="cdcSectionField('${c.id}','${sec.id}','titre',this.value)">` +
       `<span class="cdc-sec-acts"><a onclick="mutate({op:'cdc_section_move',chantier_id:'${c.id}',section_id:'${sec.id}',dir:-1})" title="Monter">↑</a>` +
       `<a onclick="mutate({op:'cdc_section_move',chantier_id:'${c.id}',section_id:'${sec.id}',dir:1})" title="Descendre">↓</a>` +
-      `<a class="danger" onclick="cdcRemoveSection('${c.id}','${sec.id}')" title="Supprimer la section">×</a></span></div>` +
+      `<a class="danger" onclick="cdcRemoveSection('${c.id}','${sec.id}')" title="Supprimer la section">${ico("x")}</a></span></div>` +
       `<textarea class="cdc-sec-corps" placeholder="Rédige cette section…" onblur="cdcSectionField('${c.id}','${sec.id}','corps',this.value)">${esc(sec.corps)}</textarea>` +
       `</section>`;
   });
@@ -6009,7 +6141,7 @@ function cdcViewRevision(cid, rid){
                               valide_par: cdc.valide_par, date_validation: cdc.date_validation};
   let h = `<div class="cdc-modal-bg" onclick="closeCdcModal()"><div class="cdc-modal" onclick="event.stopPropagation()">`;
   h += `<div class="cdc-modal-h"><b>Indice ${esc(r.indice)}</b> · ${fmt(r.date)}${r.auteur ? ` · ${esc(r.auteur)}` : ""}` +
-       `<span class="add" onclick="closeCdcModal()">Fermer ✕</span></div>`;
+       `<span class="add" onclick="closeCdcModal()">Fermer ${ico("x")}</span></div>`;
   h += `<div class="cdc-modal-b"><h1 class="cdc-h1">${esc(snap.titre || c.titre)}</h1>` +
        `<div class="cdc-sub">${snap.reference ? esc(snap.reference) + " · " : ""}Indice ${esc(r.indice)} · ${fmt(r.date)}</div>`;
   (snap.sections || []).forEach((s, i) => {
@@ -6195,9 +6327,9 @@ function cdcPrint(){
 
 // Vue d'ensemble : tous les cahiers des charges
 function renderCahiers(){
-  if(!STORE.chantiers.length){ $("cahiers").innerHTML = `<div class="ch-h">Cahiers des charges</div><div class="empty">Aucun chantier.</div>`; return; }
+  if(!STORE.chantiers.length){ $("cahiers").innerHTML = pageHead({title: "Cahiers des charges"}) + emptyState("Aucun chantier."); return; }
   const n = LIVE().filter(c => c.cdc).length;
-  let h = `<div class="ch-h">Cahiers des charges <span class="muted small">· ${n}/${LIVE().length} chantier(s)</span></div>`;
+  let h = pageHead({title: "Cahiers des charges", meta: `${n} sur ${LIVE().length} chantiers`});
   h += `<table class="ptable"><thead><tr><th>Chantier</th><th>Référence</th><th>Indice</th><th>Statut</th><th>Mis à jour</th><th>Validé</th><th></th></tr></thead><tbody>`;
   LIVE().forEach(c => {
     if(c.cdc){
@@ -6229,7 +6361,7 @@ function renderRecettes(){
     ok += s.ok; ttl += s.total; pb += s.probleme; late += recProbLate(c).length;
     min += recetteMin(c.id);
   });
-  let h = `<div class="ch-h">Recette <span class="muted small">· ${chs.length} liste(s) · ${enRec.length} chantier(s) en recette</span></div>`;
+  let h = pageHead({title: "Recette", meta: `${chs.length} liste${chs.length > 1 ? "s" : ""} · ${enRec.length} chantier${enRec.length > 1 ? "s" : ""} en recette`});
   h += `<div class="kpis">` +
     kpi("Points vérifiés", `${ok}/${ttl}`, ttl ? Math.round(ok / ttl * 100) + " % de l'ensemble" : "aucun point", ttl && ok === ttl ? "good" : "") +
     kpi("Problèmes ouverts", String(pb), late + " en retard", (pb && late) ? "bad" : pb ? "warn" : "good") +
@@ -6237,9 +6369,10 @@ function renderRecettes(){
     kpi("Temps de recette", min ? fmtDur(min) : "—", "chronométré, tous chantiers") +
     `</div>`;
   if(!chs.length){
-    $("recettes").innerHTML = h + `<div class="empty">Aucune liste de recette. Ouvre un chantier et démarre-la depuis la carte « Recette ».</div>`;
+    $("recettes").innerHTML = h + emptyState(`Aucune liste de recette. Ouvre un chantier et démarre-la depuis la carte « Recette ».`);
     return;
   }
+  h += section(`Listes de recette <span class="muted">· les chantiers qui coincent d'abord</span>`);
   h += `<table class="ptable rec-tbl"><thead><tr><th>Chantier</th><th>Avancement</th>` +
     `<th>Problèmes</th><th>Temps passé</th><th></th></tr></thead><tbody>`;
   chs.slice().sort((a, b) => recProblemes(b).length - recProblemes(a).length || recStats(a).pct - recStats(b).pct)
@@ -6257,8 +6390,8 @@ function renderRecettes(){
   // Ce qui coince, tous chantiers confondus — les échéances les plus proches d'abord
   const ech = p => p.echeance || "9999-99-99";
   const pbs = chs.flatMap(c => recProblemes(c)).sort((a, b) => ech(a) < ech(b) ? -1 : ech(a) > ech(b) ? 1 : 0);
-  h += `<div class="ch-h">Ce qui coince — ${pbs.length}</div>`;
-  if(!pbs.length) h += `<div class="empty">Aucun problème ouvert.</div>`;
+  h += section(`Ce qui coince <span class="muted">· ${pbs.length}</span>`);
+  if(!pbs.length) h += emptyState("Aucun problème ouvert.");
   else {
     h += `<table class="ptable"><thead><tr><th>Point</th><th>Chantier</th><th>Constat</th>` +
       `<th>Qui corrige</th><th>Pour le</th><th></th></tr></thead><tbody>`;
@@ -6268,14 +6401,14 @@ function renderRecettes(){
         `<td><b>${esc(p.titre)}</b></td><td>${esc(p._c.titre)}</td>` +
         `<td class="muted">${esc(p.constat || "—")}</td><td>${esc(p.qui || "—")}</td>` +
         `<td class="${lt ? "bad-t" : ""}">${p.echeance ? fmt(p.echeance) + (lt ? " (en retard)" : "") : "—"}</td>` +
-        `<td class="pacts"><a title="Marquer ce point comme vérifié" onclick="event.stopPropagation();mutate({op:'point_set',chantier_id:'${p._c.id}',point_id:'${p.id}',statut:'ok'})">✓ vérifié</a></td></tr>`;
+        `<td class="pacts"><a title="Marquer ce point comme vérifié" onclick="event.stopPropagation();mutate({op:'point_set',chantier_id:'${p._c.id}',point_id:'${p.id}',statut:'ok'})">${ico("check")} vérifié</a></td></tr>`;
     });
     h += `</tbody></table>`;
   }
   // Chantiers en recette sans liste : le trou dans la raquette
   const sans = enRec.filter(c => !recPoints(c).length);
   if(sans.length){
-    h += `<div class="ch-h">À outiller — ${sans.length}</div><table class="ptable"><tbody>`;
+    h += section(`À outiller <span class="muted">· ${sans.length}</span>`) + `<table class="ptable"><tbody>`;
     sans.forEach(c => h += `<tr><td><b>${esc(c.titre)}</b></td>` +
       `<td class="muted">${c.recette ? "liste vide" : "aucune liste de recette"}</td>` +
       `<td class="pacts"><a onclick="openChantier('${c.id}')">Ouvrir le chantier</a></td></tr>`);
@@ -6287,6 +6420,7 @@ function miniBar(v, cls){
   return `<span class="mbar ${cls || ""}"><i style="width:${Math.max(0, Math.min(100, v))}%"></i></span><span class="mbar-v">${v} %</span>`;
 }
 
+renderNav();
 loadStore();
 // re-vérifie périodiquement les rappels (notif bureau tant que l'onglet est ouvert)
 setInterval(checkDesktopNotifs, 60000);
@@ -6294,5 +6428,5 @@ setInterval(checkDesktopNotifs, 60000);
 setInterval(() => {
   if(!activeSession()) return;
   renderAlert();
-  if(VIEW === "planning" && $("planning").style.display !== "none") renderPlanning();
+  if(SHOWN === "planning") renderPlanning();
 }, 60000);

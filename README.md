@@ -112,6 +112,14 @@ aucune ressaisie.
 - Chronomètre intégré et récapitulatif « Ma journée ». Le temps hors chantier se
   ventile par thème au lieu de tomber dans un unique bloc « divers ».
 
+**Navigation** — cinq entrées dans la barre : `Tableau`, `Planning`, `Capture`
+(actions, bloc-notes), `Suivi` (cahiers des charges, recette, risques, livrables
+attendus, annuaire, congés) et `Pilotage` (tableau de bord, activité, charge,
+rapport hebdo, thèmes). Chaque écran a son adresse (`#planning`,
+`#chantier/<id>`…) : F5 garde l'écran et le bouton Retour du navigateur
+fonctionne. Depuis une page chantier ou un cahier des charges, `Échap` ramène à
+l'écran d'où l'on vient.
+
 **Raccourcis clavier** — la capture doit coûter moins qu'un post-it :
 `a` nouvelle action · `n` nouvelle note · `c` nouveau chantier · `t` tableau ·
 `p` planning · `d` tableau de bord · `s` arrêter le chrono · `/` ou `Ctrl+K`
@@ -168,6 +176,7 @@ Aucun framework, aucune étape de compilation, une seule dépendance externe
 | `export_xlsx.py` | Import et export Excel |
 | `rapport_mail.py` | Rapport en PDF (Edge headless) et envoi par e-mail |
 | `static/app.js` | Interface complète (JavaScript natif) |
+| `tools/shots.mjs` | Captures d'écran et contrôles de l'interface (Edge headless, sans dépendance) |
 | `data/store.json` | Vos données (hors dépôt) |
 
 Le serveur expose une API volontairement minimale : toute modification passe par
@@ -178,12 +187,17 @@ durées et des dépendances.
 
 ## Contribuer
 
-Les propositions sont bienvenues. Le projet suit deux principes :
+Les propositions sont bienvenues. Le projet suit trois principes :
 
 1. **Aucune saisie redondante.** Si une information peut être déduite de données
    déjà présentes, elle doit l'être.
 2. **Rien à installer.** Pas de dépendance qui imposerait un `npm install` ou un
    moteur de base de données.
+3. **Un seul gabarit d'écran.** Une vue s'ajoute par une ligne du registre `VIEWS`
+   (`static/app.js`) et s'assemble avec les briques communes — `pageHead`,
+   `section`, `kpi`, `fchip`, `emptyState`, `ico`. Aucune vue ne redéfinit son
+   en-tête, ses tuiles ou ses filtres : c'est ce qui garde l'interface homogène.
+   `node tools/shots.mjs --check nav,ph,emoji,errors` le vérifie.
 
 ## Licence
 
